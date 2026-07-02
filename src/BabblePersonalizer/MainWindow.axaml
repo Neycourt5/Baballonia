@@ -112,11 +112,12 @@
         <ScrollViewer>
           <StackPanel Margin="16" Spacing="14">
             <TextBlock FontSize="20" FontWeight="SemiBold" Text="Stock versus personalized" />
-            <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10">
+            <Grid ColumnDefinitions="Auto,Auto,Auto,*" ColumnSpacing="10">
               <CheckBox x:Name="UsePersonalizedCheck" Content="Enable personalized preview" IsChecked="True"
                         IsCheckedChanged="PersonalizedToggle_Changed" />
               <Button Grid.Column="1" Click="LoadProfile_Click" Content="Load profile…" />
-              <TextBlock Grid.Column="2" x:Name="ProfilePathText" VerticalAlignment="Center" Text="No profile loaded" />
+              <Button Grid.Column="2" Click="ExportDiagnostics_Click" Content="Export diagnostics" />
+              <TextBlock Grid.Column="3" x:Name="ProfilePathText" VerticalAlignment="Center" Text="No profile loaded" />
             </Grid>
             <Border Padding="16" CornerRadius="8" Background="#20252E">
               <TextBlock x:Name="DiagnosticsLiveText" FontFamily="Consolas" TextWrapping="Wrap" Text="Start camera inference to view live values." />

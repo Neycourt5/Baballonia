@@ -239,6 +239,17 @@ public partial class MainWindow : Avalonia.Controls.Window
         SetStatus(loaded.CameraMismatch ? "Profile loaded with camera mismatch warning" : "Profile loaded");
     }
 
+    private async void ExportDiagnostics_Click(object? sender, RoutedEventArgs e)
+    {
+        if (_activeProfile == null) { SetStatus("Generate or load a profile before exporting diagnostics"); return; }
+        try
+        {
+            var path = await new DiagnosticsReportExporter(_dataPaths).ExportAsync(_activeProfile);
+            SetStatus("Diagnostics exported: " + path);
+        }
+        catch (Exception ex) { SetStatus("Diagnostics export failed: " + ex.Message); }
+    }
+
     private void PersonalizedToggle_Changed(object? sender, RoutedEventArgs e) =>
         _personalizationEnabled = UsePersonalizedCheck.IsChecked == true;
 

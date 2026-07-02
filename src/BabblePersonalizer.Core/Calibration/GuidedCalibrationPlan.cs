@@ -39,13 +39,16 @@ public sealed class GuidedCalibrationPlan
         segments.Add(new(parameter.CanonicalName, parameter.CanonicalName,
             $"Prepare for {parameter.DisplayName}. {InstructionFor(parameter.CanonicalName)}",
             firstRepetition, 0, "None", prefix + "Transition", TimeSpan.FromSeconds(2), validation));
-        var levels = new[] { 0f, .25f, .5f, .75f, 1f, .75f, .5f, .25f, 0f };
+        var levels = parameter.CalibrationStrategy == CalibrationStrategy.MaximumOnly
+            ? new[] { 0f, 1f, 0f }
+            : new[] { 0f, .25f, .5f, .75f, 1f, .75f, .5f, .25f, 0f };
         for (var repetition = firstRepetition; repetition <= lastRepetition; repetition++)
         {
             for (var i = 0; i < levels.Length; i++)
             {
-                var direction = i == 0 || i == levels.Length - 1 || i == 4 ? "Hold" : i < 4 ? "Increasing" : "Decreasing";
-                var duration = i == 4 ? 1.1 : i is 0 or 8 ? .8 : .9;
+                var peak = Array.IndexOf(levels, 1f);
+                var direction = i == 0 || i == levels.Length - 1 || i == peak ? "Hold" : i < peak ? "Increasing" : "Decreasing";
+                var duration = i == peak ? 1.1 : i == 0 || i == levels.Length - 1 ? .8 : .9;
                 segments.Add(new(parameter.CanonicalName, parameter.CanonicalName,
                     $"{InstructionFor(parameter.CanonicalName)} Target {levels[i]:P0}; move slowly and comfortably.",
                     repetition, levels[i], direction, prefix + "Ramp", TimeSpan.FromSeconds(duration), validation));
