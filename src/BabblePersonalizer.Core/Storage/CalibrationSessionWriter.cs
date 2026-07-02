@@ -17,7 +17,7 @@ public sealed record CalibrationSample(
     long MonotonicTimestamp, double SessionSeconds, long FrameSequence,
     string PoseName, string CanonicalTarget, int Repetition, float RequestedIntensity,
     string RampDirection, string StepType, float Stability, float Noise,
-    float[] RawOutput, float[]? CorrectedOutput = null);
+    float[] RawOutput, float[]? CorrectedOutput = null, bool IsValidation = false, int Attempt = 0);
 
 public sealed class CalibrationSessionWriter : IAsyncDisposable
 {
@@ -34,12 +34,17 @@ public sealed class CalibrationSessionWriter : IAsyncDisposable
     public long DroppedSamples { get; private set; }
     public long DroppedFrames { get; private set; }
     public string SessionDirectory => _directory;
+    public SessionMetadata Metadata { get; }
 
     public CalibrationSessionWriter(PersonalizerDataPaths paths, SessionMetadata metadata, int queueCapacity = 512)
     {
+        Metadata = metadata;
         paths.EnsureCreated();
         _directory = Path.Combine(paths.Sessions, $"Session-{DateTime.Now:yyyyMMdd-HHmmss}");
         Directory.CreateDirectory(_directory);
+        var root = Path.GetPathRoot(Path.GetFullPath(_directory));
+        if (!string.IsNullOrEmpty(root) && new DriveInfo(root).AvailableFreeSpace < 100L * 1024 * 1024)
+            throw new IOException("Less than 100 MB of free disk space remains; calibration recording was not started.");
         if (metadata.FrameRecordingEnabled) Directory.CreateDirectory(Path.Combine(_directory, "frames"));
         _expressionNames = metadata.Model.Parameters.Select(x => x.CanonicalName).ToArray();
         File.WriteAllText(Path.Combine(_directory, "metadata.json"),
@@ -109,7 +114,7 @@ public sealed class CalibrationSessionWriter : IAsyncDisposable
     private string Header() => string.Join(',', new[]
     {
         "monotonic_timestamp", "session_seconds", "frame_sequence", "pose", "canonical_target",
-        "repetition", "requested_intensity", "ramp_direction", "step_type", "stability", "noise"
+        "repetition", "requested_intensity", "ramp_direction", "step_type", "stability", "noise", "is_validation", "attempt"
     }.Concat(_expressionNames.Select(x => "raw_" + x)).Concat(_expressionNames.Select(x => "corrected_" + x)));
 
     private static string ToCsv(CalibrationSample sample)
@@ -122,7 +127,8 @@ public sealed class CalibrationSessionWriter : IAsyncDisposable
             sample.SessionSeconds.ToString("R", CultureInfo.InvariantCulture),
             sample.FrameSequence.ToString(CultureInfo.InvariantCulture), E(sample.PoseName), E(sample.CanonicalTarget),
             sample.Repetition.ToString(CultureInfo.InvariantCulture), F(sample.RequestedIntensity),
-            E(sample.RampDirection), E(sample.StepType), F(sample.Stability), F(sample.Noise)
+            E(sample.RampDirection), E(sample.StepType), F(sample.Stability), F(sample.Noise),
+            sample.IsValidation ? "true" : "false", sample.Attempt.ToString(CultureInfo.InvariantCulture)
         };
         var corrected = sample.CorrectedOutput?.Select(F) ??
                         Enumerable.Repeat(string.Empty, sample.RawOutput.Length);

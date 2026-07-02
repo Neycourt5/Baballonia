@@ -22,5 +22,7 @@
     <None Include="..\..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\docs\BabblePersonalizer\PHASE0-INVESTIGATION.md" Link="PHASE0-INVESTIGATION.md"
           CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\docs\BabblePersonalizer\PHASE2-CALIBRATION.md" Link="PHASE2-CALIBRATION.md"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

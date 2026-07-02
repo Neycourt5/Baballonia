@@ -76,21 +76,63 @@
         </ScrollViewer>
       </TabItem>
 
-      <TabItem Header="3  Session recorder">
+      <TabItem Header="3  Guided calibration">
+        <ScrollViewer>
         <StackPanel Margin="16" Spacing="14">
-          <TextBlock FontSize="20" FontWeight="SemiBold" Text="Phase 1 stream recorder" />
+          <TextBlock FontSize="20" FontWeight="SemiBold" Text="Advanced personal calibration" />
           <TextBlock TextWrapping="Wrap" Foreground="#AEB6C5"
-                     Text="This records every raw inference sample using the current model and camera settings. The guided calibration wizard arrives in Phase 2." />
+                     Text="The routine records the complete raw stream. Requested intensity is a pacing guide, not assumed ground truth. A fourth repetition is held out from profile fitting." />
           <CheckBox x:Name="RecordFramesCheck" Content="Save exact inference images locally (privacy-sensitive)" />
-          <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10">
-            <Button Click="StartRecording_Click" Content="Start recording" />
-            <Button Grid.Column="1" Click="StopRecording_Click" Content="Stop &amp; finalize" />
-            <TextBlock Grid.Column="2" x:Name="RecordingText" VerticalAlignment="Center" Text="Not recording" />
+          <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,*" ColumnSpacing="10">
+            <Button Click="StartRecording_Click" Content="Start guided calibration" />
+            <Button Grid.Column="1" Click="StopRecording_Click" Content="Cancel" />
+            <Button Grid.Column="2" Click="RetryPose_Click" Content="Retry pose" />
+            <Button Grid.Column="3" Click="SkipPose_Click" Content="Skip pose" />
+            <TextBlock Grid.Column="4" x:Name="RecordingText" VerticalAlignment="Center" Text="Not recording" />
           </Grid>
+          <Border Padding="20" CornerRadius="10" Background="#20252E">
+            <StackPanel Spacing="10">
+              <TextBlock x:Name="CalibrationPoseText" FontSize="22" FontWeight="SemiBold" Text="Ready" />
+              <TextBlock x:Name="CalibrationInstructionText" FontSize="16" TextWrapping="Wrap" Text="Start the camera, then begin calibration." />
+              <TextBlock x:Name="CalibrationTargetText" FontFamily="Consolas" Text="Target: neutral" />
+              <ProgressBar x:Name="SegmentProgress" Minimum="0" Maximum="1" Value="0" Height="14" />
+              <TextBlock Text="Overall session" />
+              <ProgressBar x:Name="CalibrationProgress" Minimum="0" Maximum="1" Value="0" Height="14" />
+              <TextBlock x:Name="CalibrationMetricsText" FontFamily="Consolas" />
+            </StackPanel>
+          </Border>
           <Border Padding="16" CornerRadius="8" Background="#20252E">
-            <TextBlock TextWrapping="Wrap" Text="Session data: metadata.json, samples.csv, diagnostics.json, manual-labels.json, and optional frames/. Writes use a bounded queue so camera processing never waits for disk I/O." />
+            <TextBlock TextWrapping="Wrap" Text="The routine includes neutral, three slow ramps for every safely guided direct output, normal and exaggerated speech, then held-out neutral and a fourth ramp. Manual-review-only and unresolved channels remain passthrough." />
           </Border>
         </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <TabItem Header="4  Diagnostics &amp; validation">
+        <ScrollViewer>
+          <StackPanel Margin="16" Spacing="14">
+            <TextBlock FontSize="20" FontWeight="SemiBold" Text="Stock versus personalized" />
+            <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10">
+              <CheckBox x:Name="UsePersonalizedCheck" Content="Enable personalized preview" IsChecked="True"
+                        IsCheckedChanged="PersonalizedToggle_Changed" />
+              <Button Grid.Column="1" Click="LoadProfile_Click" Content="Load profile…" />
+              <TextBlock Grid.Column="2" x:Name="ProfilePathText" VerticalAlignment="Center" Text="No profile loaded" />
+            </Grid>
+            <Border Padding="16" CornerRadius="8" Background="#20252E">
+              <TextBlock x:Name="DiagnosticsLiveText" FontFamily="Consolas" TextWrapping="Wrap" Text="Start camera inference to view live values." />
+            </Border>
+            <TextBlock FontWeight="SemiBold" Text="Expression detail" />
+            <ComboBox x:Name="DiagnosticExpressionCombo" SelectionChanged="DiagnosticExpression_Changed" />
+            <Border Padding="16" CornerRadius="8" Background="#20252E">
+              <TextBlock x:Name="DiagnosticDetailText" FontFamily="Consolas" TextWrapping="Wrap" Text="Generate or load a profile." />
+            </Border>
+            <TextBlock FontWeight="SemiBold" Text="Per-expression confidence" />
+            <ListBox x:Name="ConfidenceList" Height="260" />
+            <Border Padding="16" CornerRadius="8" Background="#20252E">
+              <TextBlock x:Name="ValidationText" TextWrapping="Wrap" Text="Held-out validation has not run." />
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
       </TabItem>
     </TabControl>
   </Grid>
