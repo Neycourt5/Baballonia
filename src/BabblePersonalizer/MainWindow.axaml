@@ -1,0 +1,97 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="BabblePersonalizer.MainWindow"
+        Title="Babble Personalizer" Width="1120" Height="760" MinWidth="900" MinHeight="620">
+  <Grid RowDefinitions="Auto,*">
+    <Border Padding="24,16" Background="#171A20">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel>
+          <TextBlock FontSize="25" FontWeight="SemiBold" Text="Babble Personalizer" />
+          <TextBlock Foreground="#AEB6C5" Text="Local, correction-enhanced face model personalization" />
+        </StackPanel>
+        <Border Grid.Column="1" Padding="12,6" CornerRadius="12" Background="#263246">
+          <TextBlock x:Name="StatusText" Text="Select a stock model to begin" />
+        </Border>
+      </Grid>
+    </Border>
+
+    <TabControl Grid.Row="1" Margin="18">
+      <TabItem Header="1  Stock model">
+        <ScrollViewer>
+          <StackPanel Margin="16" Spacing="14">
+            <TextBlock FontSize="20" FontWeight="SemiBold" Text="Select and validate faceModel.onnx" />
+            <TextBlock TextWrapping="Wrap" Foreground="#AEB6C5"
+                       Text="The model stays on this computer and is never bundled or uploaded. Models with unresolved expression identity are rejected." />
+            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+              <TextBox x:Name="ModelPathText" Watermark="Path to your existing faceModel.onnx" IsReadOnly="True" />
+              <Button Grid.Column="1" x:Name="BrowseModelButton" Click="BrowseModel_Click" Content="Browse…" />
+            </Grid>
+            <ProgressBar x:Name="ModelProgress" IsVisible="False" IsIndeterminate="True" />
+            <Border Padding="16" CornerRadius="8" Background="#20252E">
+              <TextBlock x:Name="ModelDetailsText" FontFamily="Consolas" TextWrapping="Wrap" Text="No model selected." />
+            </Border>
+            <TextBlock FontWeight="SemiBold" Text="Ordered direct outputs" />
+            <ListBox x:Name="ExpressionList" Height="300" />
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <TabItem Header="2  Camera &amp; preview">
+        <ScrollViewer>
+          <Grid Margin="16" ColumnDefinitions="320,*" ColumnSpacing="18">
+            <StackPanel Spacing="10">
+              <TextBlock FontSize="20" FontWeight="SemiBold" Text="Camera configuration" />
+              <ComboBox x:Name="CameraCombo" SelectedIndex="0" />
+              <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                <NumericUpDown x:Name="WidthInput" Minimum="160" Maximum="4096" Value="640" Watermark="Width" />
+                <NumericUpDown Grid.Column="1" x:Name="HeightInput" Minimum="120" Maximum="2160" Value="480" Watermark="Height" />
+              </Grid>
+              <NumericUpDown x:Name="FpsInput" Minimum="1" Maximum="240" Value="30" Watermark="FPS" />
+              <TextBlock FontWeight="SemiBold" Text="Crop (X, Y, width, height)" />
+              <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto" ColumnSpacing="8" RowSpacing="8">
+                <NumericUpDown x:Name="CropXInput" Minimum="0" Maximum="4096" Value="0" />
+                <NumericUpDown Grid.Column="1" x:Name="CropYInput" Minimum="0" Maximum="4096" Value="0" />
+                <NumericUpDown Grid.Row="1" x:Name="CropWidthInput" Minimum="1" Maximum="4096" Value="256" />
+                <NumericUpDown Grid.Row="1" Grid.Column="1" x:Name="CropHeightInput" Minimum="1" Maximum="4096" Value="256" />
+              </Grid>
+              <TextBlock FontWeight="SemiBold" Text="Transform" />
+              <NumericUpDown x:Name="RotationInput" Minimum="-3.1416" Maximum="3.1416" Increment="0.01" Value="0" Watermark="Rotation radians" />
+              <NumericUpDown x:Name="GammaInput" Minimum="0.1" Maximum="4" Increment="0.05" Value="1" Watermark="Gamma multiplier" />
+              <CheckBox x:Name="MirrorHorizontalCheck" Content="Horizontal mirror" />
+              <CheckBox x:Name="MirrorVerticalCheck" Content="Vertical mirror" />
+              <CheckBox x:Name="RedChannelCheck" Content="Use Baballonia red-channel option" />
+              <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                <Button x:Name="StartCameraButton" Click="StartCamera_Click" Content="Start camera" />
+                <Button Grid.Column="1" Click="StopCamera_Click" Content="Stop" />
+              </Grid>
+              <TextBlock x:Name="LiveOutputText" FontFamily="Consolas" TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel Grid.Column="1" Spacing="10">
+              <TextBlock FontWeight="SemiBold" Text="Raw camera" />
+              <Border Height="250" Background="Black"><Image x:Name="RawPreview" Stretch="Uniform" /></Border>
+              <TextBlock FontWeight="SemiBold" Text="Exact transformed inference image" />
+              <Border Height="250" Background="Black"><Image x:Name="InferencePreview" Stretch="Uniform" /></Border>
+            </StackPanel>
+          </Grid>
+        </ScrollViewer>
+      </TabItem>
+
+      <TabItem Header="3  Session recorder">
+        <StackPanel Margin="16" Spacing="14">
+          <TextBlock FontSize="20" FontWeight="SemiBold" Text="Phase 1 stream recorder" />
+          <TextBlock TextWrapping="Wrap" Foreground="#AEB6C5"
+                     Text="This records every raw inference sample using the current model and camera settings. The guided calibration wizard arrives in Phase 2." />
+          <CheckBox x:Name="RecordFramesCheck" Content="Save exact inference images locally (privacy-sensitive)" />
+          <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10">
+            <Button Click="StartRecording_Click" Content="Start recording" />
+            <Button Grid.Column="1" Click="StopRecording_Click" Content="Stop &amp; finalize" />
+            <TextBlock Grid.Column="2" x:Name="RecordingText" VerticalAlignment="Center" Text="Not recording" />
+          </Grid>
+          <Border Padding="16" CornerRadius="8" Background="#20252E">
+            <TextBlock TextWrapping="Wrap" Text="Session data: metadata.json, samples.csv, diagnostics.json, manual-labels.json, and optional frames/. Writes use a bounded queue so camera processing never waits for disk I/O." />
+          </Border>
+        </StackPanel>
+      </TabItem>
+    </TabControl>
+  </Grid>
+</Window>

@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="../BabblePersonalizer.Core/BabblePersonalizer.Core.csproj" />
+  <Project Path="../BabblePersonalizer.Tests/BabblePersonalizer.Tests.csproj" />
+  <Project Path="BabblePersonalizer.csproj" />
+</Solution>
