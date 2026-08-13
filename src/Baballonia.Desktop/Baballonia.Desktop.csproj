@@ -155,15 +155,41 @@
         <Move SourceFiles="@(ModuleDlls)" DestinationFolder="$(OutputPath)Modules\" />
     </Target>
     <!-- TODO: this sucks -->
+    <!--
+        Uses $(PublishDir) rather than a hardcoded "$(OutputPath)\publish\". The old path is only
+        correct for a default publish; with "dotnet publish -o <dir>" the capture backends were left
+        in the publish root, where the module loader (which scans Modules\) never finds them - so the
+        published app started with no cameras at all. $(PublishDir) is right in both cases.
+    -->
     <Target Name="CopyModulesToFolderPublish" AfterTargets="Publish">
         <ItemGroup>
-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.SerialCameraCapture.dll')" Include="$(OutputPath)\publish\Baballonia.SerialCameraCapture.dll" />
-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.OpenCVCapture.dll')" Include="$(OutputPath)\publish\Baballonia.OpenCVCapture.dll" />
-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.IPCameraCapture.dll')" Include="$(OutputPath)\publish\Baballonia.IPCameraCapture.dll" />
-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.VFTCapture.dll')" Include="$(OutputPath)\publish\Baballonia.VFTCapture.dll" />
-            <PublishModuleDlls Condition="Exists('$(OutputPath)\publish\Baballonia.LibV4L2Capture.dll')" Include="$(OutputPath)\publish\Baballonia.LibV4L2Capture.dll" />
+            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.SerialCameraCapture.dll')" Include="$(PublishDir)Baballonia.SerialCameraCapture.dll" />
+            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.OpenCVCapture.dll')" Include="$(PublishDir)Baballonia.OpenCVCapture.dll" />
+            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.IPCameraCapture.dll')" Include="$(PublishDir)Baballonia.IPCameraCapture.dll" />
+            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.VFTCapture.dll')" Include="$(PublishDir)Baballonia.VFTCapture.dll" />
+            <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.LibV4L2Capture.dll')" Include="$(PublishDir)Baballonia.LibV4L2Capture.dll" />
         </ItemGroup>
-        <Move SourceFiles="@(PublishModuleDlls)" DestinationFolder="$(OutputPath)\publish\Modules\" />
+        <Move SourceFiles="@(PublishModuleDlls)" DestinationFolder="$(PublishDir)Modules\" />
+    </Target>
+
+    <!--
+        Ship the personalization training scripts beside the app.
+
+        The Personalization page locates them by walking up from the executable's folder, which
+        works when running from the source tree but not from a published build. Copying them into
+        the publish output keeps "Train My Face Model" working for an installed copy. They are a few
+        small text files; the heavy dependency (PyTorch) is still installed separately, on demand,
+        into the user's own environment.
+    -->
+    <Target Name="CopyPersonalizationTrainingScripts" AfterTargets="Publish">
+        <ItemGroup>
+            <PersonalizationTrainingFiles Include="$(MSBuildThisFileDirectory)..\..\training\**\*"
+                                          Exclude="$(MSBuildThisFileDirectory)..\..\training\**\__pycache__\**;$(MSBuildThisFileDirectory)..\..\training\runs\**;$(MSBuildThisFileDirectory)..\..\training\.venv\**" />
+        </ItemGroup>
+        <Copy SourceFiles="@(PersonalizationTrainingFiles)"
+              DestinationFiles="@(PersonalizationTrainingFiles->'$(PublishDir)training\%(RecursiveDir)%(Filename)%(Extension)')"
+              SkipUnchangedFiles="true"
+              Condition="'@(PersonalizationTrainingFiles)' != ''" />
     </Target>
 
     <!-- SkiaSharp is currently broken on ARM for some reason -->

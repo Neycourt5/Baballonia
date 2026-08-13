@@ -8,10 +8,11 @@ should be able to continue without any prior conversation.
 ## Current Status
 
 ```
-Current phase: P0 COMPLETE. P1 COMPLETE (except real-data validation).
-Branch: main (8 commits ahead of upstream 84eca8c, not pushed)
-Build: OK.  Suite: 82 passed / 9 failed (all 9 pre-existing, see Tests Run).
-Personalization tests: 65/65 pass.  Python: 7/7 pass.
+Current phase: P0 COMPLETE. P1 COMPLETE. Guided workflow (UX layer) COMPLETE.
+               Still blocked on real-data validation.
+Branch: main (10 commits ahead of upstream 84eca8c, not pushed)
+Build: OK.  Suite: 97 passed / 9 failed (all 9 pre-existing, see Tests Run).
+Personalization tests: 81/81 pass.  Python: 8/8 pass.
 ```
 
 P0 delivered capture and interception: schema lock, pipeline hooks, calibration override path,
@@ -140,6 +141,28 @@ Test fixtures in `src/Baballonia.Tests/Assets/PersonalModels/` are real ONNX fil
 trainer — valid, schema-mismatched, and metadata-stripped — so the load/validate/infer path is
 tested for real rather than mocked. Regenerate them with the snippet in Decisions #9.
 
+### P1-3 — Guided workflow / UX layer  (commit `563d674`)
+Thin orchestration over the existing tooling; **no ML changes**. The CLI remains fully usable.
+
+* `PersonalizationEnvironment` — pure detection: locates `training/` by walking up from the exe,
+  finds the venv and host Python, counts sessions by type, and turns all of it into friendly
+  `SetupItem`s. Two sessions per type is the recommended threshold because validation holds out a
+  whole session.
+* `PersonalTrainingService` — runs train → export → install → reload as child processes, streaming
+  both stdout and stderr into a detail log. Also `SetUpTrainingToolsAsync` (create venv, install
+  pinned requirements). Failures are translated into actionable messages with a suggested remedy;
+  raw process output stays in the log.
+* `train.py` additions: `[stage] …` markers (so progress text is not inferred from log shape) and
+  **`summary.json`**, the machine-readable outcome the app reads. Its `verdict` is deliberately
+  conservative — `"unclear"` whenever there was no held-out session, since numbers describing
+  training data cannot support a claim.
+* Page restructured to Setup / Recordings / Train / Compare, with the strength slider and the
+  45-row delta table moved under **Advanced** rather than removed.
+
+**Install unloads the current model first.** An active `InferenceSession` holds the file open on
+Windows, so retraining over a live model would fail with a sharing violation. A `.previous.onnx`
+rollback copy is kept.
+
 ---
 
 ## Files Changed
@@ -182,17 +205,22 @@ src/Baballonia.Tests/IpCameraCaptureFactoryTest.cs         stale using (build re
 
 ```
 <sdk>\dotnet.exe test src/Baballonia.Tests/Baballonia.Tests.csproj
-  Total: 91   Passed: 82   Failed: 9      (was 70/61/9 before this work)
+  Total: 106  Passed: 97   Failed: 9      (was 70/61/9 before this work)
 
 <sdk>\dotnet.exe test ... --filter "FullyQualifiedName~Personalization|FullyQualifiedName~FaceProcessingPipelineCorrector"
-  Total: 65   Passed: 65   Failed: 0
+  Total: 81   Passed: 81   Failed: 0
 
 <sdk>\dotnet.exe build src/Baballonia.Desktop/Baballonia.Desktop.csproj
   Build succeeded. 0 Errors, 132 Warnings (all pre-existing).
 
 %LOCALAPPDATA%\babble-train-venv\Scripts\python training\tests\test_pipeline_smoke.py
-  7/7 passed
+  8/8 passed
 ```
+
+`PersonalTrainingOrchestrationTest.FullPipeline_TrainsExportsInstallsAndLoads` runs the **real**
+Python chain on synthetic recordings (~10 s) and asserts the model is trained, exported, installed
+and live on the pipeline. It skips (Inconclusive) when PyTorch is absent or when real recordings
+exist, and restores the machine's prior state afterwards.
 
 The Python smoke test is the meaningful one for the ML side: it fabricates sessions containing known
 defects and asserts the trained adapter removes them.
@@ -303,6 +331,19 @@ export.export(ck, out / "validAdapter.onnx", parity_samples=4)
 # and export a build_model("b") the same way as imageAdapter.onnx
 ```
 
+**10. Fixed a publish bug that would have shipped a camera-less app.**
+- Plan expected: nothing about publishing.
+- Actual: `CopyModulesToFolderPublish` hardcoded `$(OutputPath)\publish\`, so
+  `dotnet publish -o <dir>` left the capture backends in the publish root. The module loader only
+  scans `Modules\`, so the published app started with **no camera backends at all**.
+- Decision: use `$(PublishDir)`, which is correct both with and without `-o`.
+- Reason: found while producing a build; the default-path CI publish was unaffected, which is why it
+  went unnoticed upstream.
+
+Also added `CopyPersonalizationTrainingScripts`, which copies `training/` into the publish output so
+"Train My Face Model" works from an installed copy (the scripts are located by walking up from the
+executable). A few small text files; PyTorch is still installed on demand into the user's own venv.
+
 **7. Upstream bugs observed and deliberately NOT fixed** (out of scope, documented so nobody
 "rediscovers" them): One Euro filter is not cleared when disabled (`FacePipelineManager.LoadFilter`
 returns early); `FaceProcessingPipeline` never disposes the source `frame` Mat; `RunUpdate` shadows
@@ -345,8 +386,20 @@ ebfae7f  personalization: add minimal capture page
 15455e6  docs: add approved plan and P0 handoff log
 76e33bc  personalization: add local training package
 cfa00a6  personalization: add personal model runtime, blend and debug view
+235255b  docs: add user guide and record P1 state
+563d674  personalization: add guided workflow over the existing tooling
 ```
 Nothing pushed. No history rewritten.
+
+A self-contained Windows build was produced with:
+
+```
+<sdk>\dotnet.exe publish src/Baballonia.Desktop/Baballonia.Desktop.csproj ^
+    -c Release -r win-x64 --self-contained true -o <output>
+```
+
+Verify any build has `Modules\` populated (4 capture DLLs) and a `training\babble_personal` folder —
+without the former the app has no cameras, without the latter the Train button cannot run.
 
 User-facing guide: `PERSONALIZATION_GUIDE.md` (record → train → export → install → compare,
 plus troubleshooting and a privacy summary).
@@ -360,17 +413,23 @@ because P2's design depends on the answer.
 
 ### Step 1 — First real-data run (validates everything built so far)
 
-1. Start the face camera, open the **Personalization** page, confirm the preview shows a sensible
-   mouth crop.
-2. Record **2 × Neutral** (~45 s each, relaxed face) and **2 × Speech** (60–90 s), ideally with a
-   small headset reposition between them.
-3. Check `%APPDATA%\ProjectBabble\PersonalDataset\` — inspect one `session.json` (does
-   `EffectiveFps` match the camera?), skim `labels.jsonl`, open a few frames.
-4. Train baseline A, export, install, and compare with the Strength slider
-   (see `PERSONALIZATION_GUIDE.md` for exact commands).
+Now a UI flow, not a CLI one:
 
-**Record the outcome in this file**, especially the neutral false-activation rate before and after.
-That single number is the first genuine evidence the project works on a real face.
+1. Start the face camera, open **Personalization**, confirm the preview shows a sensible mouth crop
+   and Setup reports the camera and training tools ready (press **Set Up Training Tools** if not).
+2. **Record Neutral** ×2 (~45 s each, relaxed) and **Record Speech** ×2 (60–90 s), ideally with a
+   small headset reposition between them.
+3. Sanity-check `%APPDATA%\ProjectBabble\PersonalDataset\`: does `EffectiveFps` in a `session.json`
+   match the camera? Do the frames look right?
+4. Press **Train My Face Model**, then compare with the **Stock / Personal** switch.
+
+**Record the outcome in this file**, especially the neutral false-activation rate before and after,
+which the results screen reports directly. That single number is the first genuine evidence the
+project works on a real face.
+
+Watch for two things the synthetic tests cannot cover: whether the recorded crop is actually usable,
+and whether unique-fps matches the camera (a large mismatch means the dedupe or rate cap is
+misbehaving on real hardware).
 
 ### Step 2 — Supervision experiment, before writing any cue code
 
