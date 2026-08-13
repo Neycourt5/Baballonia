@@ -1,0 +1,107 @@
+<UserControl
+    x:Class="Baballonia.Views.PersonalizationView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="clr-namespace:Baballonia.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:splitViewPane="clr-namespace:Baballonia.ViewModels.SplitViewPane"
+    d:DesignHeight="700"
+    d:DesignWidth="800"
+    x:DataType="splitViewPane:PersonalizationViewModel"
+    mc:Ignorable="d">
+  <!--
+    Strings here are intentionally literal rather than RESX entries. This is a fork-local feature,
+    and Assets/Resources.resx is Crowdin-managed upstream, so adding keys there would create merge
+    conflicts on every rebase for no benefit until the feature stabilises.
+  -->
+  <ScrollViewer>
+    <StackPanel Margin="24" Spacing="12">
+      <TextBlock Classes="Header" Text="Personalization" />
+
+      <TextBlock
+          MaxWidth="620"
+          HorizontalAlignment="Left"
+          Opacity="0.8"
+          TextWrapping="Wrap"
+          Text="Record training data for a personal face model. Frames are the exact images the stock model sees, paired with its raw predictions. Everything stays on this machine." />
+
+      <controls:ContentExample>
+        <StackPanel Spacing="12">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Live model input" />
+          <Border
+              Width="224"
+              Height="224"
+              HorizontalAlignment="Left"
+              Background="#20000000"
+              CornerRadius="4">
+            <Image
+                Source="{Binding Preview}"
+                Stretch="Uniform"
+                RenderOptions.BitmapInterpolationMode="None" />
+          </Border>
+          <TextBlock
+              Opacity="0.7"
+              Text="Start the face camera on the Home page if this stays blank."
+              TextWrapping="Wrap" />
+        </StackPanel>
+      </controls:ContentExample>
+
+      <controls:ContentExample>
+        <StackPanel Spacing="12">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Record a session" />
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <TextBlock VerticalAlignment="Center" Text="Session type" />
+            <ComboBox
+                MinWidth="160"
+                IsEnabled="{Binding !IsRecording}"
+                ItemsSource="{Binding SessionTypes}"
+                SelectedItem="{Binding SelectedSessionType}" />
+          </StackPanel>
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <TextBlock VerticalAlignment="Center" Text="Notes" />
+            <TextBox
+                MinWidth="320"
+                IsEnabled="{Binding !IsRecording}"
+                Text="{Binding Notes}"
+                Watermark="e.g. headset slightly higher than usual" />
+          </StackPanel>
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <Button
+                Command="{Binding StartRecordingCommand}"
+                Content="Start recording"
+                IsEnabled="{Binding !IsRecording}" />
+            <Button
+                Command="{Binding StopRecordingCommand}"
+                Content="Stop"
+                IsEnabled="{Binding IsRecording}" />
+            <Button
+                Command="{Binding OpenDatasetFolderCommand}"
+                Content="Open dataset folder" />
+          </StackPanel>
+
+          <TextBlock FontWeight="SemiBold" Text="{Binding StatusText}" TextWrapping="Wrap" />
+          <TextBlock Opacity="0.6" Text="{Binding DatasetPath}" TextWrapping="Wrap" />
+        </StackPanel>
+      </controls:ContentExample>
+
+      <controls:ContentExample>
+        <StackPanel Spacing="8">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="How to record" />
+          <TextBlock
+              TextWrapping="Wrap"
+              Text="Neutral: relax your face for about 45 seconds, breathing normally. These frames anchor what your resting face looks like." />
+          <TextBlock
+              TextWrapping="Wrap"
+              Text="Speech: talk naturally for 60-90 seconds. This captures the expression combinations that occur in real conversation." />
+          <TextBlock
+              TextWrapping="Wrap"
+              Text="Record several sessions across different days and headset placements so the model does not memorise one exact camera position." />
+        </StackPanel>
+      </controls:ContentExample>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

@@ -148,6 +148,8 @@ public partial class App : Application
             services.AddTransient<AppSettingsView>();
             services.AddTransient<AboutPageViewModel>();
             services.AddTransient<AboutPageView>();
+            services.AddTransient<PersonalizationViewModel>();
+            services.AddTransient<PersonalizationView>();
 
             if (Utils.IsSupportedDesktopOS)
             {
