@@ -299,6 +299,56 @@ def test_untrained_adapter_is_identity() -> None:
     print("  both models start as exact stock passthrough")
 
 
+def test_summary_json_contract() -> None:
+    """The app's results screen reads summary.json, so its shape is a contract.
+
+    Also pins the conservative verdict rule: with no held-out session the numbers describe training
+    data and cannot support a claim, so the verdict must stay 'unclear' however good they look.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        build_corpus(root)
+        out = root / "runs"
+
+        assert train.main([
+            "--data", str(root), "--model", "a", "--out", str(out),
+            "--epochs", "10", "--batch-size", "64", "--patience", "10",
+        ]) == 0
+
+        summary = json.loads(next(out.rglob("summary.json")).read_text(encoding="utf-8"))
+
+        for key in (
+            "summary_version", "adapter_type", "parameters", "checkpoint", "schema_sha256",
+            "train_sessions", "val_sessions", "validated_on_held_out_sessions",
+            "scored_expressions", "expressions_improved", "expressions_regressed",
+            "mean_stock_mae", "mean_personal_mae", "verdict",
+        ):
+            assert key in summary, f"summary.json is missing '{key}'"
+
+        assert summary["verdict"] in ("better", "unclear", "worse")
+        assert summary["schema_sha256"] == schema.SCHEMA_SHA256
+        assert summary["validated_on_held_out_sessions"] is True
+        assert "neutral" in summary, "neutral stats drive the headline result"
+        assert summary["neutral"]["personal_false_activation_rate"] <= \
+               summary["neutral"]["stock_false_activation_rate"] + 1e-9
+
+        # Single-session corpus: nothing can be held out, so no claim may be made.
+        solo = root / "solo"
+        _write_session(solo, "20260813_0000a_neutral", "Neutral", _neutral_frames(30, 0.3))
+        assert train.main([
+            "--data", str(solo), "--model", "a", "--out", str(solo / "runs"),
+            "--epochs", "3", "--batch-size", "32", "--patience", "3",
+        ]) == 0
+        solo_summary = json.loads(next((solo / "runs").rglob("summary.json")).read_text(encoding="utf-8"))
+        assert solo_summary["validated_on_held_out_sessions"] is False
+        assert solo_summary["verdict"] == "unclear", \
+            "without held-out data the result must not be reported as an improvement"
+
+        print(f"  summary.json OK (verdict '{summary['verdict']}', "
+              f"{summary['expressions_improved']} improved / "
+              f"{summary['expressions_regressed']} regressed)")
+
+
 def test_image_model_trains_and_exports() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -325,6 +375,7 @@ def main() -> int:
         test_untrained_adapter_is_identity,
         test_both_models_export_identical_io_signature,
         test_training_reduces_known_error_and_exports,
+        test_summary_json_contract,
         test_image_model_trains_and_exports,
     ]
 

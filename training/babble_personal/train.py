@@ -88,11 +88,21 @@ def _predict(model, images: torch.Tensor, stock: torch.Tensor, batch_size: int =
     return np.concatenate(out) if out else np.zeros((0, schema.EXPRESSION_COUNT), dtype=np.float32)
 
 
+def _stage(name: str) -> None:
+    """Emit a machine-readable stage marker.
+
+    The app's one-button workflow maps these to friendly progress text. Printed rather than
+    inferred from log shape so a wording change here cannot silently break the UI.
+    """
+    print(f"[stage] {name}", flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
+    _stage("preparing")
     print(f"Loading sessions from {args.data}")
     sessions = ds.discover_sessions(args.data)
     print(ds.describe(sessions))
@@ -144,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
     best_epoch = -1
     history = []
 
+    _stage("training")
     print(f"\nTraining for up to {args.epochs} epochs (early stop patience {args.patience})")
     for epoch in range(args.epochs):
         train_stats = _run_epoch(model, train_loader, optimizer, args.shrinkage, train=True)
@@ -172,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
         if epoch - best_epoch >= args.patience:
             print(f"  early stop: no improvement for {args.patience} epochs")
             break
+
+    _stage("evaluating")
 
     # Report using the best checkpoint, not the last epoch.
     model.load_state_dict(torch.load(checkpoint_path)["state_dict"])
@@ -215,9 +228,110 @@ def main(argv: list[str] | None = None) -> int:
         "args": {k: str(v) for k, v in vars(args).items()},
     }, indent=2), encoding="utf-8")
 
+    summary = _build_summary(
+        model=model,
+        checkpoint_path=checkpoint_path,
+        expression_reports=expression_reports,
+        neutral=neutral,
+        train_sessions=train_sessions,
+        val_sessions=val_sessions,
+    )
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
     print(f"\nCheckpoint: {checkpoint_path}")
     print(f"Export with: python -m babble_personal.export --checkpoint \"{checkpoint_path}\"")
+    _stage("done")
     return 0
+
+
+def _build_summary(
+    *,
+    model,
+    checkpoint_path: Path,
+    expression_reports,
+    neutral,
+    train_sessions,
+    val_sessions,
+) -> dict:
+    """Machine-readable outcome for the app's results screen.
+
+    The app reads this instead of parsing printed text, so the human-facing report can be reworded
+    freely without breaking the UI. Everything here is measured - there is deliberately no invented
+    "quality score", and ``verdict`` stays "unclear" unless the numbers actually say something.
+    """
+    scored = [r for r in expression_reports if r.supervised_frames > 0]
+    improved = [r for r in scored if r.improvement > 1e-4]
+    regressed = [r for r in scored if r.improvement < -1e-4]
+
+    stock_mae = float(np.mean([r.stock_mae for r in scored])) if scored else None
+    personal_mae = float(np.mean([r.personal_mae for r in scored])) if scored else None
+
+    summary: dict = {
+        "summary_version": 1,
+        "adapter_type": model.adapter_type,
+        "parameters": models.parameter_count(model),
+        "checkpoint": str(checkpoint_path),
+        "schema_sha256": schema.SCHEMA_SHA256,
+        "train_sessions": [s.session_id for s in train_sessions],
+        "val_sessions": [s.session_id for s in val_sessions],
+        "validated_on_held_out_sessions": bool(val_sessions),
+        "scored_expressions": len(scored),
+        "expressions_improved": len(improved),
+        "expressions_regressed": len(regressed),
+        "mean_stock_mae": stock_mae,
+        "mean_personal_mae": personal_mae,
+        "worst_regressions": [
+            {"name": r.name, "stock_mae": r.stock_mae, "personal_mae": r.personal_mae}
+            for r in sorted(regressed, key=lambda r: r.improvement)[:5]
+        ],
+        "biggest_improvements": [
+            {"name": r.name, "stock_mae": r.stock_mae, "personal_mae": r.personal_mae}
+            for r in sorted(improved, key=lambda r: r.improvement, reverse=True)[:5]
+        ],
+    }
+
+    if neutral is not None and neutral.frames > 0:
+        summary["neutral"] = {
+            "frames": neutral.frames,
+            "stock_false_activation_rate": neutral.stock_false_activation_rate,
+            "personal_false_activation_rate": neutral.personal_false_activation_rate,
+            "stock_mean_activation": neutral.stock_mean_activation,
+            "personal_mean_activation": neutral.personal_mean_activation,
+        }
+
+    summary["verdict"] = _verdict(summary)
+    return summary
+
+
+def _verdict(summary: dict) -> str:
+    """'better' | 'unclear' | 'worse', judged only on what was actually measured.
+
+    Deliberately conservative. Without held-out sessions the numbers describe data the model was
+    trained on and cannot support any claim, so the verdict is 'unclear' regardless of how good they
+    look. A model is only "better" if it improves accuracy or neutral stability *without* trading one
+    away for the other - suppressing everything would otherwise score as a win.
+    """
+    if not summary.get("validated_on_held_out_sessions"):
+        return "unclear"
+
+    stock_mae = summary.get("mean_stock_mae")
+    personal_mae = summary.get("mean_personal_mae")
+    neutral = summary.get("neutral")
+
+    mae_better = stock_mae is not None and personal_mae is not None and personal_mae < stock_mae - 1e-4
+    mae_worse = stock_mae is not None and personal_mae is not None and personal_mae > stock_mae + 1e-4
+
+    neutral_better = neutral_worse = False
+    if neutral:
+        delta = neutral["stock_false_activation_rate"] - neutral["personal_false_activation_rate"]
+        neutral_better = delta > 0.005
+        neutral_worse = delta < -0.005
+
+    if mae_worse or neutral_worse:
+        return "worse" if not (mae_better or neutral_better) else "unclear"
+    if mae_better or neutral_better:
+        return "better"
+    return "unclear"
 
 
 if __name__ == "__main__":

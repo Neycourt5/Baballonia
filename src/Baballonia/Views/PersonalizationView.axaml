@@ -6,162 +6,245 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:splitViewPane="clr-namespace:Baballonia.ViewModels.SplitViewPane"
-    d:DesignHeight="700"
+    d:DesignHeight="900"
     d:DesignWidth="800"
     x:DataType="splitViewPane:PersonalizationViewModel"
     mc:Ignorable="d">
   <!--
-    Strings here are intentionally literal rather than RESX entries. This is a fork-local feature,
-    and Assets/Resources.resx is Crowdin-managed upstream, so adding keys there would create merge
-    conflicts on every rebase for no benefit until the feature stabilises.
+    Strings are intentionally literal rather than RESX entries. This is a fork-local feature and
+    Assets/Resources.resx is Crowdin-managed upstream, so adding keys would conflict on every rebase
+    while the feature is still moving.
   -->
   <ScrollViewer>
     <StackPanel Margin="24" Spacing="12">
-      <TextBlock Classes="Header" Text="Personalization" />
 
+      <TextBlock Classes="Header" Text="Personalize My Face" />
       <TextBlock
-          MaxWidth="620"
+          MaxWidth="640"
           HorizontalAlignment="Left"
           Opacity="0.8"
           TextWrapping="Wrap"
-          Text="Record training data for a personal face model. Frames are the exact images the stock model sees, paired with its raw predictions. Everything stays on this machine." />
+          Text="Teach Baballonia what your face looks like on your camera. Record a few short sessions, press Train, and compare the result against the stock tracker. Everything stays on this computer." />
 
+      <!-- ============================ SETUP ============================ -->
       <controls:ContentExample>
-        <StackPanel Spacing="12">
-          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Live model input" />
+        <StackPanel Spacing="10">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Grid.Column="0" FontSize="16" FontWeight="SemiBold" Text="Setup" />
+            <Button Grid.Column="1" Command="{Binding RefreshSetupCommand}" Content="Refresh" />
+          </Grid>
+
+          <!-- Two glyphs per row rather than a value converter: same result, no extra plumbing. -->
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBlock FontWeight="Bold" Foreground="#4CAF50" IsVisible="{Binding CameraReady}" Text="&#x2713;" />
+            <TextBlock FontWeight="Bold" IsVisible="{Binding !CameraReady}" Opacity="0.5" Text="&#x2022;" />
+            <TextBlock Text="{Binding CameraStatus}" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBlock FontWeight="Bold" Foreground="#4CAF50" IsVisible="{Binding ToolsReady}" Text="&#x2713;" />
+            <TextBlock FontWeight="Bold" IsVisible="{Binding !ToolsReady}" Opacity="0.5" Text="&#x2022;" />
+            <TextBlock Text="{Binding ToolsStatus}" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBlock FontWeight="Bold" Foreground="#4CAF50" IsVisible="{Binding ModelReady}" Text="&#x2713;" />
+            <TextBlock FontWeight="Bold" IsVisible="{Binding !ModelReady}" Opacity="0.5" Text="&#x2022;" />
+            <TextBlock Text="{Binding ModelStatus}" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Button
+              Command="{Binding SetUpToolsCommand}"
+              Content="Set Up Training Tools"
+              IsEnabled="{Binding !IsBusy}"
+              IsVisible="{Binding CanSetUpTools}" />
+          <TextBlock
+              IsVisible="{Binding CanSetUpTools}"
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="This downloads the training software (about 200 MB) once. It is installed outside Baballonia and never uploads anything." />
+        </StackPanel>
+      </controls:ContentExample>
+
+      <!-- ========================== RECORDINGS ========================= -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Recordings" />
+
+          <Grid ColumnDefinitions="120,Auto">
+            <TextBlock Grid.Column="0" Text="Neutral" VerticalAlignment="Center" />
+            <TextBlock
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                Text="{Binding NeutralCount, StringFormat='{}{0} of 2 recorded'}" />
+          </Grid>
+          <Grid ColumnDefinitions="120,Auto">
+            <TextBlock Grid.Column="0" Text="Speech" VerticalAlignment="Center" />
+            <TextBlock
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                Text="{Binding SpeechCount, StringFormat='{}{0} of 2 recorded'}" />
+          </Grid>
+
+          <TextBlock Opacity="0.8" Text="{Binding RecordingAdvice}" TextWrapping="Wrap" />
+
           <Border
-              Width="224"
-              Height="224"
+              Width="200"
+              Height="200"
               HorizontalAlignment="Left"
               Background="#20000000"
               CornerRadius="4">
             <Image
+                RenderOptions.BitmapInterpolationMode="None"
                 Source="{Binding Preview}"
-                Stretch="Uniform"
-                RenderOptions.BitmapInterpolationMode="None" />
+                Stretch="Uniform" />
           </Border>
+
+          <StackPanel Orientation="Horizontal" Spacing="12" IsVisible="{Binding !IsRecording}">
+            <Button
+                Command="{Binding RecordNeutralCommand}"
+                Content="Record Neutral"
+                IsEnabled="{Binding !IsBusy}" />
+            <Button
+                Command="{Binding RecordSpeechCommand}"
+                Content="Record Speech"
+                IsEnabled="{Binding !IsBusy}" />
+            <Button Command="{Binding OpenDatasetFolderCommand}" Content="Open Folder" />
+          </StackPanel>
+
+          <Button
+              Command="{Binding StopRecordingCommand}"
+              Content="Stop Recording"
+              IsVisible="{Binding IsRecording}" />
+
           <TextBlock
-              Opacity="0.7"
-              Text="Start the face camera on the Home page if this stays blank."
+              FontWeight="SemiBold"
+              IsVisible="{Binding RecordingStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Text="{Binding RecordingStatus}"
               TextWrapping="Wrap" />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="Neutral: let your face rest for about 45 seconds. Speech: talk naturally for a minute. Record on different days and with slightly different headset positions so the model does not learn one exact camera angle." />
         </StackPanel>
       </controls:ContentExample>
 
+      <!-- =========================== TRAINING ========================== -->
       <controls:ContentExample>
-        <StackPanel Spacing="12">
-          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Record a session" />
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Train" />
 
-          <StackPanel Orientation="Horizontal" Spacing="12">
-            <TextBlock VerticalAlignment="Center" Text="Session type" />
-            <ComboBox
-                MinWidth="160"
-                IsEnabled="{Binding !IsRecording}"
-                ItemsSource="{Binding SessionTypes}"
-                SelectedItem="{Binding SelectedSessionType}" />
+          <Button
+              Command="{Binding TrainCommand}"
+              Content="Train My Face Model"
+              IsEnabled="{Binding CanTrain}"
+              IsVisible="{Binding !IsBusy}" />
+
+          <StackPanel IsVisible="{Binding IsBusy}" Spacing="8">
+            <ProgressBar IsIndeterminate="True" />
+            <TextBlock FontWeight="SemiBold" Text="{Binding BusyMessage}" TextWrapping="Wrap" />
+            <Button Command="{Binding CancelWorkCommand}" Content="Cancel" />
           </StackPanel>
 
-          <StackPanel Orientation="Horizontal" Spacing="12">
-            <TextBlock VerticalAlignment="Center" Text="Notes" />
-            <TextBox
-                MinWidth="320"
-                IsEnabled="{Binding !IsRecording}"
-                Text="{Binding Notes}"
-                Watermark="e.g. headset slightly higher than usual" />
-          </StackPanel>
-
-          <StackPanel Orientation="Horizontal" Spacing="12">
-            <Button
-                Command="{Binding StartRecordingCommand}"
-                Content="Start recording"
-                IsEnabled="{Binding !IsRecording}" />
-            <Button
-                Command="{Binding StopRecordingCommand}"
-                Content="Stop"
-                IsEnabled="{Binding IsRecording}" />
-            <Button
-                Command="{Binding OpenDatasetFolderCommand}"
-                Content="Open dataset folder" />
-          </StackPanel>
-
-          <TextBlock FontWeight="SemiBold" Text="{Binding StatusText}" TextWrapping="Wrap" />
-          <TextBlock Opacity="0.6" Text="{Binding DatasetPath}" TextWrapping="Wrap" />
-        </StackPanel>
-      </controls:ContentExample>
-
-      <controls:ContentExample>
-        <StackPanel Spacing="12">
-          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Personal model" />
-
-          <CheckBox Content="Use personal model" IsChecked="{Binding PersonalModelEnabled}" />
-
-          <StackPanel Orientation="Horizontal" Spacing="12">
-            <TextBlock VerticalAlignment="Center" Text="Strength" Width="70" />
-            <Slider
-                Width="240"
-                Maximum="100"
-                Minimum="0"
-                TickFrequency="25"
-                Value="{Binding PersonalStrength}" />
+          <StackPanel IsVisible="{Binding HasResult}" Spacing="8">
+            <TextBlock FontWeight="SemiBold" Text="{Binding ResultHeadline}" TextWrapping="Wrap" />
             <TextBlock
-                VerticalAlignment="Center"
-                Text="{Binding PersonalStrength, StringFormat='{}{0:F0}%'}" />
+                IsVisible="{Binding ResultDetail, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                Text="{Binding ResultDetail}"
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <Button Command="{Binding ToggleDetailsCommand}" Content="Show Details" />
+          </StackPanel>
+
+          <Border
+              Background="#18000000"
+              CornerRadius="4"
+              IsVisible="{Binding ShowDetails}"
+              MaxHeight="240"
+              Padding="8">
+            <ScrollViewer>
+              <SelectableTextBlock
+                  FontFamily="Consolas,Menlo,monospace"
+                  FontSize="11"
+                  Text="{Binding DetailLog}" />
+            </ScrollViewer>
+          </Border>
+        </StackPanel>
+      </controls:ContentExample>
+
+      <!-- ========================== COMPARISON ========================= -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Compare" />
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <RadioButton
+                Content="Stock"
+                GroupName="ModelChoice"
+                IsChecked="{Binding !PersonalModelEnabled}" />
+            <RadioButton
+                Content="Personal"
+                GroupName="ModelChoice"
+                IsChecked="{Binding PersonalModelEnabled}" />
           </StackPanel>
 
           <TextBlock
               Opacity="0.7"
               TextWrapping="Wrap"
-              Text="0% is exactly the stock model and 100% is fully personalized, so this slider is the quickest A/B test. It is an evaluation control, not a substitute for training." />
+              Text="Switch between the two while pulling faces, or while talking to someone in VRChat. Stock is always available - nothing you do here can break normal tracking." />
 
-          <StackPanel Orientation="Horizontal" Spacing="12">
-            <Button Command="{Binding ReloadModelCommand}" Content="Reload model" />
+          <CheckBox Content="Advanced" IsChecked="{Binding ShowAdvanced}" />
+
+          <StackPanel IsVisible="{Binding ShowAdvanced}" Spacing="10">
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <TextBlock VerticalAlignment="Center" Text="Strength" Width="70" />
+              <Slider
+                  Width="240"
+                  Maximum="100"
+                  Minimum="0"
+                  TickFrequency="25"
+                  Value="{Binding PersonalStrength}" />
+              <TextBlock
+                  VerticalAlignment="Center"
+                  Text="{Binding PersonalStrength, StringFormat='{}{0:F0}%'}" />
+            </StackPanel>
+            <TextBlock
+                Opacity="0.7"
+                TextWrapping="Wrap"
+                Text="0% is exactly the stock model, 100% is fully personalized. Useful for blending in a model you are not yet sure about." />
+
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <Button Command="{Binding ReloadModelCommand}" Content="Reload Model" />
+            </StackPanel>
+
+            <CheckBox Content="Sort by largest change" IsChecked="{Binding SortByDelta}" />
+
+            <Grid ColumnDefinitions="180,70,70,70">
+              <TextBlock Grid.Column="0" FontWeight="SemiBold" Text="Expression" />
+              <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="Stock" />
+              <TextBlock Grid.Column="2" FontWeight="SemiBold" Text="Personal" />
+              <TextBlock Grid.Column="3" FontWeight="SemiBold" Text="Delta" />
+            </Grid>
+
+            <ItemsControl ItemsSource="{Binding Comparison}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Grid ColumnDefinitions="180,70,70,70">
+                    <TextBlock Grid.Column="0" Text="{Binding Name}" />
+                    <TextBlock Grid.Column="1" Text="{Binding Stock, StringFormat='{}{0:F2}'}" />
+                    <TextBlock Grid.Column="2" Text="{Binding Personal, StringFormat='{}{0:F2}'}" />
+                    <TextBlock Grid.Column="3" Text="{Binding Delta, StringFormat='{}{0:+0.00;-0.00; 0.00}'}" />
+                  </Grid>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
           </StackPanel>
-
-          <TextBlock FontWeight="SemiBold" Text="{Binding ModelStatusText}" TextWrapping="Wrap" />
-          <TextBlock Opacity="0.6" Text="{Binding ModelPath}" TextWrapping="Wrap" />
         </StackPanel>
       </controls:ContentExample>
 
-      <controls:ContentExample>
-        <StackPanel Spacing="12">
-          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Stock vs personal" />
-          <CheckBox Content="Sort by largest change" IsChecked="{Binding SortByDelta}" />
-
-          <Grid ColumnDefinitions="180,70,70,70">
-            <TextBlock Grid.Column="0" FontWeight="SemiBold" Text="Expression" />
-            <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="Stock" />
-            <TextBlock Grid.Column="2" FontWeight="SemiBold" Text="Personal" />
-            <TextBlock Grid.Column="3" FontWeight="SemiBold" Text="Delta" />
-          </Grid>
-
-          <ItemsControl ItemsSource="{Binding Comparison}">
-            <ItemsControl.ItemTemplate>
-              <DataTemplate>
-                <Grid ColumnDefinitions="180,70,70,70">
-                  <TextBlock Grid.Column="0" Text="{Binding Name}" />
-                  <TextBlock Grid.Column="1" Text="{Binding Stock, StringFormat='{}{0:F2}'}" />
-                  <TextBlock Grid.Column="2" Text="{Binding Personal, StringFormat='{}{0:F2}'}" />
-                  <TextBlock Grid.Column="3" Text="{Binding Delta, StringFormat='{}{0:+0.00;-0.00; 0.00}'}" />
-                </Grid>
-              </DataTemplate>
-            </ItemsControl.ItemTemplate>
-          </ItemsControl>
-        </StackPanel>
-      </controls:ContentExample>
-
-      <controls:ContentExample>
-        <StackPanel Spacing="8">
-          <TextBlock FontSize="16" FontWeight="SemiBold" Text="How to record" />
-          <TextBlock
-              TextWrapping="Wrap"
-              Text="Neutral: relax your face for about 45 seconds, breathing normally. These frames anchor what your resting face looks like." />
-          <TextBlock
-              TextWrapping="Wrap"
-              Text="Speech: talk naturally for 60-90 seconds. This captures the expression combinations that occur in real conversation." />
-          <TextBlock
-              TextWrapping="Wrap"
-              Text="Record several sessions across different days and headset placements so the model does not memorise one exact camera position." />
-        </StackPanel>
-      </controls:ContentExample>
     </StackPanel>
   </ScrollViewer>
 </UserControl>

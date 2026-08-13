@@ -100,6 +100,12 @@ public sealed class PersonalModelManager : IDisposable
 
     public bool Enabled => _settings.ReadSetting<bool>(EnabledSetting);
 
+    /// <summary>
+    /// Persists the on/off state. Does not load or unload by itself - call
+    /// <see cref="ReloadAsync"/> afterwards to act on the change.
+    /// </summary>
+    public void SetEnabled(bool enabled) => _settings.SaveSetting(EnabledSetting, enabled);
+
     public float Blend
     {
         get
