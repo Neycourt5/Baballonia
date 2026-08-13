@@ -2,6 +2,7 @@
 using Baballonia.Services.Inference.Filters;
 using Baballonia.Services.Inference.Models;
 using Baballonia.Services.Inference.VideoSources;
+using Baballonia.Services.Personalization;
 using Microsoft.Extensions.Logging;
 using System;
 using System.IO;
@@ -133,6 +134,16 @@ public class FacePipelineManager
     public void SetFilter(IFilter? filter)
     {
         _pipeline.Filter = filter;
+    }
+
+    /// <summary>
+    /// Installs (or, with null, removes) the personal correction stage. Passing null must restore
+    /// stock behavior immediately - unlike <see cref="LoadFilter"/>, which historically returns
+    /// early when disabled and leaves a previously installed filter in place.
+    /// </summary>
+    public void SetCorrector(IExpressionCorrector? corrector)
+    {
+        _pipeline.Corrector = corrector;
     }
 
     public static string GenerateMD5(string filepath)
