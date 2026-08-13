@@ -1,4 +1,4 @@
-﻿using Baballonia.Android.Captures;
+﻿using Baballonia.IPCameraCapture;
 using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
