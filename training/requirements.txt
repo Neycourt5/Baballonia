@@ -1,0 +1,13 @@
+# Training-only dependencies. The Baballonia runtime never needs Python - it loads the exported
+# ONNX through the ONNX Runtime it already ships.
+#
+# Verified working on Windows with Python 3.13.5 (see README for the install commands).
+# torch must come from the PyTorch CPU index; the default PyPI wheel pulls CUDA.
+
+torch==2.7.1
+
+onnx==1.18.0
+onnxruntime==1.22.0
+numpy>=2.2
+opencv-python-headless>=4.11
+tqdm>=4.67

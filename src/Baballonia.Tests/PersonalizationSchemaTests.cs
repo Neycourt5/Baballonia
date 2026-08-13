@@ -113,6 +113,25 @@ public class PersonalizationSchemaTests
             "names joined by '\\n', UTF-8, no trailing newline, lowercase hex SHA-256.");
     }
 
+    /// <summary>
+    /// Pins the exact hash the Python trainer computes
+    /// (training/babble_personal/schema.py :: SCHEMA_SHA256).
+    ///
+    /// This is the cross-language contract: exported personal models embed this value and the
+    /// runtime refuses models that disagree. If the expression list legitimately changes, this
+    /// literal and the Python constant must be updated together, and existing personal models
+    /// retrained - which is exactly the conversation this failure should start.
+    /// </summary>
+    [TestMethod]
+    public void Schema_Sha256_MatchesPythonTrainerConstant()
+    {
+        const string pythonComputed = "c35805d06b03ec5b808f2cf1c8a1ce599aa99d7de0d65a45d2350a1086b6392e";
+
+        Assert.AreEqual(pythonComputed, PersonalizationSchema.Sha256,
+            "C# and Python disagree on the schema hash. Personal models would be rejected at load " +
+            "time (or, worse, trained against a different expression order).");
+    }
+
     [TestMethod]
     public void Schema_IndexOf_ResolvesKnownExpressionsAndRejectsUnknown()
     {
