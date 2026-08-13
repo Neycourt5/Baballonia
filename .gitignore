@@ -416,3 +416,32 @@ src/Baballonia/Firmware/Windows/espflash.exe
 src/Baballonia/Firmware/Linux/espflash
 src/Baballonia.Desktop/Calibration/Windows/Trainer/BabbleTrainer.exe
 src/Baballonia.Desktop/Calibration/Linux/Trainer/BabbleTrainer
+
+# ---------------------------------------------------------------------------
+# Personalization (personal face-tracking fork)
+#
+# PRIVACY: personal face imagery and anything derived from it must never be
+# committed. Recorded datasets normally live outside the repo entirely
+# (%APPDATA%/ProjectBabble/PersonalDataset), so these rules are a safety net
+# for symlinked/copied data and local experiments.
+# ---------------------------------------------------------------------------
+
+# Recorded personal face datasets (frames, labels, session metadata)
+**/PersonalDataset/
+**/personal_dataset/
+training/data/
+
+# Local training runs: checkpoints, logs, metrics, exported models
+training/runs/
+training/**/__pycache__/
+training/.venv/
+training/venv/
+*.ipynb_checkpoints/
+
+# Trained personal models (the stock *Model.onnx files stay tracked on purpose)
+personalFaceModel*.onnx
+*.personal.onnx
+faceModelWithEmbedding.onnx
+
+# Manual label corrections produced by the review tool
+corrections*.jsonl
