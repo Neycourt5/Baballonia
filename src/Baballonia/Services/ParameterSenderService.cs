@@ -1,5 +1,6 @@
 ﻿using Baballonia.Contracts;
 using Baballonia.Helpers;
+using Baballonia.Services.Personalization;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using OscCore;
@@ -19,6 +20,17 @@ public class ParameterSenderService : BackgroundService
     private readonly ILocalSettingsService _localSettingsService;
     private readonly ICalibrationService _calibrationService;
     private readonly ILogger<ParameterSenderService> _logger;
+
+    /// <summary>
+    /// Supplies avatar-guided calibration targets. Null outside calibration builds/sessions.
+    /// </summary>
+    private readonly IExpressionOverrideSource? _expressionOverrideSource;
+
+    /// <summary>
+    /// True while calibration targets are being sent instead of tracked face values. Written by the
+    /// sender loop, read by the processing-tick handler.
+    /// </summary>
+    private volatile bool _faceOverrideActive;
 
     private string _prefix = "";
     private bool _sendNativeVrcEyeTracking;
@@ -98,13 +110,15 @@ public class ParameterSenderService : BackgroundService
         ILocalSettingsService localSettingsService,
         ICalibrationService calibrationService,
         ProcessingLoopService processingLoopService,
-        ILogger<ParameterSenderService> logger)
+        ILogger<ParameterSenderService> logger,
+        IExpressionOverrideSource? expressionOverrideSource = null)
     {
         this._vrcftModuleSendService = vrcftModuleSendService;
         this._dfrSendService = dfrSendService;
         this._localSettingsService = localSettingsService;
         this._calibrationService = calibrationService;
         this._logger = logger;
+        this._expressionOverrideSource = expressionOverrideSource;
 
          processingLoopService.ExpressionChangeEvent += ExpressionUpdateHandler;
     }
@@ -122,6 +136,14 @@ public class ParameterSenderService : BackgroundService
                 _prefix = _localSettingsService.ReadSetting<string>("AppSettings_OSCPrefix");
                 _sendNativeVrcEyeTracking = _localSettingsService.ReadSetting<bool>("VRC_UseNativeTracking");
                 _useDfr = _localSettingsService.ReadSetting<bool>("AppSettings_UseDFR");
+
+                // Sampled here rather than pushed from the cue engine so the avatar animates on the
+                // transmitting clock, independent of camera rate and UI tick jitter.
+                var overrideTarget = _expressionOverrideSource?.SampleTarget();
+                _faceOverrideActive = overrideTarget != null;
+                if (overrideTarget != null)
+                    EnqueueRawFaceVector(overrideTarget);
+
                 await SendAndClearQueue(cancellationToken);
                 await Task.Delay(10, cancellationToken);
             }
@@ -188,8 +210,28 @@ public class ParameterSenderService : BackgroundService
         queue.Enqueue(new OscMessage("/tracking/eye/LeftRightPitchYaw", leftEyeY, rightEyeX, rightEyeY, leftEyeX));
     }
 
+    /// <summary>
+    /// Sends an externally commanded calibration target verbatim: clamped to [0,1] but deliberately
+    /// NOT passed through the user's calibration remap. Those ranges exist to correct the stock
+    /// model's output; a commanded ground-truth target is already in canonical units, and remapping
+    /// it would make the avatar show something other than the value we are about to record as the
+    /// training label.
+    /// </summary>
+    private void EnqueueRawFaceVector(float[] target)
+    {
+        for (var i = 0; i < Math.Min(target.Length, FaceExpressionMap.Count); i++)
+        {
+            var faceElement = FaceExpressionMap.ElementAt(i);
+            _vrcftQueue.Enqueue(new OscMessage(_prefix + faceElement.Value, Math.Clamp(target[i], 0f, 1f)));
+        }
+    }
+
     private void ProcessFaceExpressionData(float[] expressions)
     {
+        // Calibration owns the face channel while an override is active. Eye output is untouched:
+        // ProcessEyeExpressionData still runs, so eye tracking keeps working during calibration.
+        if (_faceOverrideActive) return;
+
         if (expressions == null) return;
         if (expressions.Length == 0) return;
 

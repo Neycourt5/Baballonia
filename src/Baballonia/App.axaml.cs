@@ -10,6 +10,7 @@ using Baballonia.Models;
 using Baballonia.Services;
 using Baballonia.Services.Inference;
 using Baballonia.Services.Inference.Platforms;
+using Baballonia.Services.Personalization;
 using Baballonia.ViewModels;
 using Baballonia.ViewModels.SplitViewPane;
 using Baballonia.Views;
@@ -111,6 +112,10 @@ public partial class App : Application
             services.AddSingleton<IEyePipelineEventBus, EyePipelineEventBus>();
             services.AddSingleton<SingleCameraSourceFactory>();
             services.AddSingleton<FirmwareSessionFactory>();
+
+            // Personalization: inert unless a calibration session or personal model activates it.
+            services.AddSingleton<ExpressionOverrideService>();
+            services.AddSingleton<IExpressionOverrideSource>(sp => sp.GetRequiredService<ExpressionOverrideService>());
 
             // Core Services
             services.AddTransient<IIdentityService, IdentityService>();
