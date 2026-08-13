@@ -117,6 +117,7 @@ public partial class App : Application
             services.AddSingleton<ExpressionOverrideService>();
             services.AddSingleton<IExpressionOverrideSource>(sp => sp.GetRequiredService<ExpressionOverrideService>());
             services.AddSingleton<DatasetRecorderService>();
+            services.AddSingleton<PersonalModelManager>();
 
             // Core Services
             services.AddTransient<IIdentityService, IdentityService>();

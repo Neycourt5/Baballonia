@@ -40,6 +40,11 @@
         <None Update="OverlayTests\user_cal.bin">
           <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         </None>
+        <!-- Personal-adapter fixtures: small random-weight models exported by training/, used to
+             test the real ONNX load/validate/inference path rather than a mock. -->
+        <None Update="Assets\PersonalModels\*.onnx">
+          <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </None>
     </ItemGroup>
 
     <ItemGroup>

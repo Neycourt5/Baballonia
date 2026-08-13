@@ -1,10 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Linq;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using Avalonia.Threading;
+using Baballonia.Contracts;
+using Baballonia.Models;
 using Baballonia.Services;
 using Baballonia.Services.events;
 using Baballonia.Services.Personalization;
@@ -26,18 +30,37 @@ namespace Baballonia.ViewModels.SplitViewPane;
 public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 {
     private readonly DatasetRecorderService _recorder;
+    private readonly PersonalModelManager _modelManager;
+    private readonly ILocalSettingsService _settings;
     private readonly IFacePipelineEventBus _faceEventBus;
     private readonly ILogger<PersonalizationViewModel> _logger;
 
     private readonly Action<FacePipelineEvents.NewTransformedFrameEvent> _frameHandler;
+    private readonly Action<FacePipelineEvents.NewRawExpressionsEvent> _rawHandler;
+    private readonly Action<FacePipelineEvents.NewCorrectedExpressionsEvent> _correctedHandler;
     private readonly DispatcherTimer _statusTimer;
 
     private WriteableBitmap? _backingBitmap;
+
+    // Latest values, written on the processing tick and drained by the status timer. Binding at
+    // 100 Hz would swamp the UI; 4 Hz is more than enough to watch values move.
+    private readonly float[] _latestStock = new float[PersonalizationSchema.ExpressionCount];
+    private readonly float[] _latestPersonal = new float[PersonalizationSchema.ExpressionCount];
+    private volatile bool _hasCorrectedValues;
 
     [ObservableProperty] private WriteableBitmap? _preview;
     [ObservableProperty] private bool _isRecording;
     [ObservableProperty] private string _statusText = "Idle.";
     [ObservableProperty] private string _datasetPath = PersonalizationPaths.DatasetRoot;
+
+    [ObservableProperty] private bool _personalModelEnabled;
+    [ObservableProperty] private double _personalStrength = 100;
+    [ObservableProperty] private string _modelStatusText = "Personal model not loaded.";
+    [ObservableProperty] private string _modelPath = "";
+    [ObservableProperty] private bool _sortByDelta = true;
+
+    /// <summary>One row per expression, mutated in place rather than rebuilt.</summary>
+    public ObservableCollection<ExpressionComparisonRow> Comparison { get; } = [];
 
     /// <summary>Neutral and Speech are recordable now; Guided needs the cue engine.</summary>
     public IReadOnlyList<string> SessionTypes { get; } = [nameof(SessionType.Neutral), nameof(SessionType.Speech)];
@@ -47,21 +70,38 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
     public PersonalizationViewModel(
         DatasetRecorderService recorder,
+        PersonalModelManager modelManager,
+        ILocalSettingsService settings,
         IFacePipelineEventBus faceEventBus,
         ILogger<PersonalizationViewModel> logger)
     {
         _recorder = recorder;
+        _modelManager = modelManager;
+        _settings = settings;
         _faceEventBus = faceEventBus;
         _logger = logger;
 
-        _frameHandler = OnTransformedFrame;
-        _faceEventBus.Subscribe(_frameHandler);
+        foreach (var (name, index) in PersonalizationSchema.ExpressionNames.Select((n, i) => (n, i)))
+            Comparison.Add(new ExpressionComparisonRow(index, name));
 
-        // Recording stats are polled rather than pushed: the recorder updates them on a background
-        // writer, and 4 Hz is plenty for a progress readout.
+        _frameHandler = OnTransformedFrame;
+        _rawHandler = OnRawExpressions;
+        _correctedHandler = OnCorrectedExpressions;
+        _faceEventBus.Subscribe(_frameHandler);
+        _faceEventBus.Subscribe(_rawHandler);
+        _faceEventBus.Subscribe(_correctedHandler);
+
+        _personalModelEnabled = _modelManager.Enabled;
+        _personalStrength = _modelManager.Blend * 100.0;
+        _modelPath = _modelManager.ModelPath;
+
+        // Stats and comparison values are polled rather than pushed: the recorder updates its
+        // counters on a background writer, and 4 Hz is plenty for a readout.
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _statusTimer.Tick += (_, _) => RefreshStatus();
         _statusTimer.Start();
+
+        _ = ReloadModelAsync();
     }
 
     [RelayCommand]
@@ -116,12 +156,74 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         Utils.OpenUrl(PersonalizationPaths.DatasetRoot);
     }
 
-    private void RefreshStatus()
+    [RelayCommand]
+    private async Task ReloadModelAsync()
     {
-        if (!_recorder.IsRecording)
+        var result = await _modelManager.ReloadAsync();
+        ModelStatusText = result.Success
+            ? (_modelManager.IsActive ? $"Active: {result.Message}" : result.Message)
+            : $"Not loaded: {result.Message}";
+        ModelPath = _modelManager.ModelPath;
+    }
+
+    partial void OnPersonalModelEnabledChanged(bool value)
+    {
+        _settings.SaveSetting(PersonalModelManager.EnabledSetting, value);
+        _ = ReloadModelAsync();
+    }
+
+    partial void OnPersonalStrengthChanged(double value)
+    {
+        // Blend is a live evaluation control: apply immediately rather than on reload, so A/B
+        // comparison is instant.
+        _modelManager.Blend = (float)(value / 100.0);
+    }
+
+    private void OnRawExpressions(FacePipelineEvents.NewRawExpressionsEvent e)
+    {
+        // Runs under the event bus lock on the processing tick: copy and return.
+        if (_hasCorrectedValues)
             return;
 
-        StatusText = $"Recording {_recorder.CurrentSessionId} - {_recorder.FramesWritten} frames";
+        // With no corrector installed, personal == stock so the panel shows a passthrough.
+        var count = Math.Min(e.rawResult.Length, _latestStock.Length);
+        Array.Copy(e.rawResult, _latestStock, count);
+        Array.Copy(e.rawResult, _latestPersonal, count);
+    }
+
+    private void OnCorrectedExpressions(FacePipelineEvents.NewCorrectedExpressionsEvent e)
+    {
+        _hasCorrectedValues = true;
+        var count = Math.Min(e.rawResult.Length, _latestStock.Length);
+        Array.Copy(e.rawResult, _latestStock, count);
+        Array.Copy(e.correctedResult, _latestPersonal, Math.Min(e.correctedResult.Length, count));
+    }
+
+    private void RefreshStatus()
+    {
+        if (_recorder.IsRecording)
+            StatusText = $"Recording {_recorder.CurrentSessionId} - {_recorder.FramesWritten} frames";
+
+        for (var i = 0; i < Comparison.Count; i++)
+            Comparison[i].Update(_latestStock[i], _latestPersonal[i]);
+
+        if (SortByDelta)
+            SortComparisonByDelta();
+    }
+
+    /// <summary>
+    /// Surfaces the expressions the personal model is changing most - the fastest way to see what
+    /// it actually learned, and to spot it moving something it should not.
+    /// </summary>
+    private void SortComparisonByDelta()
+    {
+        var ordered = Comparison.OrderByDescending(r => r.AbsoluteDelta).ToList();
+        for (var target = 0; target < ordered.Count; target++)
+        {
+            var current = Comparison.IndexOf(ordered[target]);
+            if (current != target)
+                Comparison.Move(current, target);
+        }
     }
 
     /// <summary>
@@ -180,6 +282,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         _statusTimer.Stop();
         _faceEventBus.Unsubscribe(_frameHandler);
+        _faceEventBus.Unsubscribe(_rawHandler);
+        _faceEventBus.Unsubscribe(_correctedHandler);
 
         if (_recorder.IsRecording)
             _recorder.StopSessionAsync().GetAwaiter().GetResult();

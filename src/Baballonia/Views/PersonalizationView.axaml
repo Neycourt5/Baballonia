@@ -89,6 +89,66 @@
       </controls:ContentExample>
 
       <controls:ContentExample>
+        <StackPanel Spacing="12">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Personal model" />
+
+          <CheckBox Content="Use personal model" IsChecked="{Binding PersonalModelEnabled}" />
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <TextBlock VerticalAlignment="Center" Text="Strength" Width="70" />
+            <Slider
+                Width="240"
+                Maximum="100"
+                Minimum="0"
+                TickFrequency="25"
+                Value="{Binding PersonalStrength}" />
+            <TextBlock
+                VerticalAlignment="Center"
+                Text="{Binding PersonalStrength, StringFormat='{}{0:F0}%'}" />
+          </StackPanel>
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="0% is exactly the stock model and 100% is fully personalized, so this slider is the quickest A/B test. It is an evaluation control, not a substitute for training." />
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <Button Command="{Binding ReloadModelCommand}" Content="Reload model" />
+          </StackPanel>
+
+          <TextBlock FontWeight="SemiBold" Text="{Binding ModelStatusText}" TextWrapping="Wrap" />
+          <TextBlock Opacity="0.6" Text="{Binding ModelPath}" TextWrapping="Wrap" />
+        </StackPanel>
+      </controls:ContentExample>
+
+      <controls:ContentExample>
+        <StackPanel Spacing="12">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Stock vs personal" />
+          <CheckBox Content="Sort by largest change" IsChecked="{Binding SortByDelta}" />
+
+          <Grid ColumnDefinitions="180,70,70,70">
+            <TextBlock Grid.Column="0" FontWeight="SemiBold" Text="Expression" />
+            <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="Stock" />
+            <TextBlock Grid.Column="2" FontWeight="SemiBold" Text="Personal" />
+            <TextBlock Grid.Column="3" FontWeight="SemiBold" Text="Delta" />
+          </Grid>
+
+          <ItemsControl ItemsSource="{Binding Comparison}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate>
+                <Grid ColumnDefinitions="180,70,70,70">
+                  <TextBlock Grid.Column="0" Text="{Binding Name}" />
+                  <TextBlock Grid.Column="1" Text="{Binding Stock, StringFormat='{}{0:F2}'}" />
+                  <TextBlock Grid.Column="2" Text="{Binding Personal, StringFormat='{}{0:F2}'}" />
+                  <TextBlock Grid.Column="3" Text="{Binding Delta, StringFormat='{}{0:+0.00;-0.00; 0.00}'}" />
+                </Grid>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </controls:ContentExample>
+
+      <controls:ContentExample>
         <StackPanel Spacing="8">
           <TextBlock FontSize="16" FontWeight="SemiBold" Text="How to record" />
           <TextBlock
