@@ -116,6 +116,7 @@ public partial class App : Application
             // Personalization: inert unless a calibration session or personal model activates it.
             services.AddSingleton<ExpressionOverrideService>();
             services.AddSingleton<IExpressionOverrideSource>(sp => sp.GetRequiredService<ExpressionOverrideService>());
+            services.AddSingleton<DatasetRecorderService>();
 
             // Core Services
             services.AddTransient<IIdentityService, IdentityService>();
