@@ -8,13 +8,22 @@ should be able to continue without any prior conversation.
 ## Current Status
 
 ```
-Current phase: P0 COMPLETE. P1 not started.
-Branch: main (5 commits ahead of upstream 84eca8c, not pushed)
-Build: OK.  Personalization tests: 45/45 pass.
+Current phase: P0 COMPLETE. P1 COMPLETE (except real-data validation).
+Branch: main (8 commits ahead of upstream 84eca8c, not pushed)
+Build: OK.  Suite: 82 passed / 9 failed (all 9 pre-existing, see Tests Run).
+Personalization tests: 65/65 pass.  Python: 7/7 pass.
 ```
 
-P0 delivered the capture and interception infrastructure: schema lock, pipeline hooks, calibration
-override path, dataset recorder, and a minimal capture page. No machine learning yet — that is P1.
+P0 delivered capture and interception: schema lock, pipeline hooks, calibration override path,
+dataset recorder, capture page.
+
+P1 delivered the full training and inference loop: a Python package that turns recorded sessions
+into a trained ONNX adapter, and a C# runtime that loads, validates, blends and displays it.
+
+**The one thing not yet done is running it on real footage.** Every piece is tested — including
+end-to-end on synthetic data with injected defects — but no session has been recorded from an actual
+face camera, so no model has been trained on a real face. That is the next milestone and it needs
+the user, not the agent.
 
 ---
 
@@ -106,6 +115,31 @@ touchpoints. Guided sessions are intentionally not offered yet.
 ### Prerequisite — build repair  (commit `d9bdb61`)
 The test project could not restore or compile before this work (see Decisions).
 
+### P1-1 — Python training package  (commit `76e33bc`)
+`training/babble_personal/`: `schema.py` (45 names + the SHA-256 shared with C#), `dataset.py`
+(session discovery, **session-level** splitting), `labels.py` (weighted targets, cue-lag
+cross-correlation), `models.py` (`OutputMlpAdapter` ~29k, `ImageResidualAdapter` ~44k, masked Huber +
+residual shrinkage), `train.py`, `evaluate.py` (per-expression MAE, neutral false activation,
+cross-talk), `export.py` (ONNX + metadata + torch/ORT parity assert).
+
+Both adapters initialise to exact identity and predict a residual, so an untrained or unsupervised
+adapter is a no-op.
+
+`training/tests/test_pipeline_smoke.py` runs the real code path on synthetic sessions with
+deliberately injected defects and asserts they get fixed.
+
+### P1-2 — Personal model runtime  (commit `cfa00a6`)
+`PersonalModelCorrector` (own CPU session, borrows the stock input tensor, `lerp(stock, personal,
+blend)`, self-disables on failure) and `PersonalModelManager` (settings, background load,
+validation, hot reload, graceful fallback on every rejection path).
+
+Page gained: enable toggle, strength slider, reload button, and a live stock/personal/delta table
+sorted by largest change (fed from the corrected event, drained at 4 Hz).
+
+Test fixtures in `src/Baballonia.Tests/Assets/PersonalModels/` are real ONNX files exported by the
+trainer — valid, schema-mismatched, and metadata-stripped — so the load/validate/infer path is
+tested for real rather than mocked. Regenerate them with the snippet in Decisions #9.
+
 ---
 
 ## Files Changed
@@ -148,13 +182,26 @@ src/Baballonia.Tests/IpCameraCaptureFactoryTest.cs         stale using (build re
 
 ```
 <sdk>\dotnet.exe test src/Baballonia.Tests/Baballonia.Tests.csproj
-  Total: 70   Passed: 61   Failed: 9
+  Total: 91   Passed: 82   Failed: 9      (was 70/61/9 before this work)
 
 <sdk>\dotnet.exe test ... --filter "FullyQualifiedName~Personalization|FullyQualifiedName~FaceProcessingPipelineCorrector"
-  Total: 45   Passed: 45   Failed: 0
+  Total: 65   Passed: 65   Failed: 0
 
 <sdk>\dotnet.exe build src/Baballonia.Desktop/Baballonia.Desktop.csproj
   Build succeeded. 0 Errors, 132 Warnings (all pre-existing).
+
+%LOCALAPPDATA%\babble-train-venv\Scripts\python training\tests\test_pipeline_smoke.py
+  7/7 passed
+```
+
+The Python smoke test is the meaningful one for the ML side: it fabricates sessions containing known
+defects and asserts the trained adapter removes them.
+
+```
+  false JawOpen while neutral      stock 0.299  ->  personal 0.007
+  underestimated MouthSmileLeft    MAE   0.126  ->  personal 0.032
+  torch/ORT parity                 max abs diff 2.98e-07
+  both adapters export             image + stock -> personal
 ```
 
 **The 9 failures are all pre-existing and unrelated to personalization** — firmware/hardware and
@@ -172,10 +219,20 @@ commit `d9bdb61`.
 
 ## Benchmarks
 
-None measured yet. **Do not record estimates as measurements.** The plan's latency figures
-(≈0.05 ms baseline A, ≈0.3–0.8 ms model B) are estimates awaiting the P1 benchmark.
+Measured on this machine, CPU execution provider, after warmup, via
+`PersonalModelCorrectorTest` (500 iterations for A, 200 for B). Reproduce with:
+`dotnet test --filter "FullyQualifiedName~Latency" --logger "console;verbosity=detailed"`.
 
-One measured behavioral fact: the sender loop's real cadence is **~64 Hz, not 100 Hz** —
+| Adapter | params | p50 | p95 |
+|---|---|---|---|
+| `output_mlp_v1` (baseline A) | 29k | 0.033 ms | 0.065 ms |
+| `image_residual_v1` (model B) | 44k | 0.211 ms | 0.335 ms |
+
+Both sit comfortably inside the 10 ms processing tick, and both matched the plan's estimates
+(≈0.05 ms / 0.3–0.8 ms). **Still unmeasured:** whole-tick p50/p95 with a corrector installed while a
+real camera is running, and the same with `AppSettings_UseGPU` on. Those need hardware.
+
+One further measured fact: the sender loop's real cadence is **~64 Hz, not 100 Hz** —
 `Task.Delay(10)` quantizes to the Windows ~15.6 ms timer. Harmless (VRChat consumes values
 stepwise) but do not design anything assuming true 100 Hz.
 
@@ -214,6 +271,38 @@ recorded labels derived from one source.
 **6. Dataset root is APPDATA, not Documents** (as planned) — this machine's Documents is
 OneDrive-synced and thousands of small JPEGs would cause sync churn and file locks.
 
+**8. Baseline A carries a zero-weighted image tap.**
+- Plan expected: both adapters export the same graph signature.
+- Actual: `torch.onnx.export` prunes inputs nothing consumes, so the output-only model lost its
+  `image` input and would have forced the C# runtime to branch per adapter type.
+- Decision: `OutputMlpAdapter` multiplies one pixel by a permanently-zero buffer.
+- Reason: keeps the input live at O(1) cost, contributes exactly 0.0, and preserves one runtime code
+  path. A test pins that both models export `image + stock -> personal`.
+
+**9. C# tests use real ONNX fixtures**, checked in at
+`src/Baballonia.Tests/Assets/PersonalModels/` (~400 KB total, random weights - not personal data).
+Mocks would not have caught schema/shape/metadata handling, which is the whole point of that code.
+Regenerate after a schema change:
+
+```python
+# with the training venv, from the repo root
+import torch, tempfile, onnx, sys
+from pathlib import Path
+sys.path.insert(0, "training")
+from babble_personal import models, schema, export
+out = Path("src/Baballonia.Tests/Assets/PersonalModels")
+m = models.build_model("a")
+with torch.no_grad():
+    m.net[-1].bias[schema.INDEX_OF["JawOpen"]] = -1.0        # fixtures assert these effects
+    m.net[-1].bias[schema.INDEX_OF["MouthSmileLeft"]] = 1.0
+ck = Path(tempfile.mkdtemp()) / "m.pt"
+torch.save({"state_dict": m.state_dict(), "adapter_type": m.adapter_type}, ck)
+export.export(ck, out / "validAdapter.onnx", parity_samples=4)
+# then: copy validAdapter.onnx twice, setting schema hash to "0"*64 in one
+# (schemaMismatchAdapter.onnx) and clearing metadata_props in the other (noMetadataAdapter.onnx);
+# and export a build_model("b") the same way as imageAdapter.onnx
+```
+
 **7. Upstream bugs observed and deliberately NOT fixed** (out of scope, documented so nobody
 "rediscovers" them): One Euro filter is not cleared when disabled (`FacePipelineManager.LoadFilter`
 returns early); `FaceProcessingPipeline` never disposes the source `frame` Mat; `RunUpdate` shadows
@@ -224,12 +313,19 @@ rather than overrides the base method; `OscQueryServiceWrapper` is dead code tha
 
 ## Known Problems / Watch Items
 
-- **Not yet exercised against real hardware.** Everything is unit-tested; no session has been
-  recorded from an actual face camera. First real run should confirm the logged unique-fps matches
-  the camera and that the preview shows the expected crop.
+- **Nothing has been run against a real face camera.** This is the single biggest gap. All ML
+  evidence so far is from synthetic data with injected defects, which proves the machinery works but
+  says nothing about whether it helps this user's actual tracking. First real run should confirm:
+  logged unique-fps matches the camera, the preview shows the expected crop, and a model trained on
+  real neutral sessions reduces neutral false activation.
 - **`AppSettings_OSCPrefix` must be empty** for avatar-guided calibration: the VRCFT module matches
   bare addresses (`/cheekPuffLeft`). The planned preflight assert is **not implemented yet** — add it
   with the cue engine in P2.
+- **Model B's value is unproven.** It is implemented, exported and benchmarked, but nothing has yet
+  shown it beats baseline A, because that comparison needs real data. Do not assume the image branch
+  is worth its cost until measured on held-out real sessions.
+- The debug comparison table re-sorts 45 rows at 4 Hz via `ObservableCollection.Move`. Fine in
+  practice; if it ever feels janky, sort a view rather than the collection.
 - Recorder `Dispose()` blocks on the writer drain via `GetAwaiter().GetResult()`. Fine at shutdown,
   but do not call it on a UI-critical path.
 - 132 build warnings are pre-existing upstream noise (nullability, CA rules).
@@ -246,49 +342,54 @@ d9bdb61  build: make Baballonia.Tests restore and compile again
 d20df3b  personalization: add avatar-guided calibration override path
 e6340d2  personalization: add dataset recorder
 ebfae7f  personalization: add minimal capture page
+15455e6  docs: add approved plan and P0 handoff log
+76e33bc  personalization: add local training package
+cfa00a6  personalization: add personal model runtime, blend and debug view
 ```
 Nothing pushed. No history rewritten.
+
+User-facing guide: `PERSONALIZATION_GUIDE.md` (record → train → export → install → compare,
+plus troubleshooting and a privacy summary).
 
 ---
 
 ## NEXT EXACT TASK
 
-Begin **P1** (plan §7, §11). In order:
+**This step needs the user and a face camera; it is not agent work.** Do not start P2 before it,
+because P2's design depends on the answer.
 
-1. Create the Python package skeleton at `training/` per plan §7:
-   `babble_personal/{schema.py,dataset.py,labels.py,models.py,train.py,evaluate.py,export.py}`
-   plus a pinned `requirements.txt` (torch 2.7.1 CPU, onnx 1.18.0, onnxruntime 1.22.0, numpy,
-   opencv-python-headless, tqdm) and a README.
-   - `schema.py` must reproduce the C# hash **exactly**: the 45 names joined by `"\n"`, UTF-8
-     encoded, no trailing newline, lowercase hex SHA-256. Add a test asserting the literal hash
-     value matches the one `PersonalizationSchema.Sha256` produces.
-   - Create the venv **outside** the OneDrive-synced repo, e.g.
-     `py -3.13 -m venv %LOCALAPPDATA%\babble-train-venv`.
+### Step 1 — First real-data run (validates everything built so far)
 
-2. `dataset.py`: discover session folders, load `session.json` / `labels.jsonl` / frames, and
-   **split by session, never by frame** (adjacent frames are near-duplicates and would fake
-   validation).
+1. Start the face camera, open the **Personalization** page, confirm the preview shows a sensible
+   mouth crop.
+2. Record **2 × Neutral** (~45 s each, relaxed face) and **2 × Speech** (60–90 s), ideally with a
+   small headset reposition between them.
+3. Check `%APPDATA%\ProjectBabble\PersonalDataset\` — inspect one `session.json` (does
+   `EffectiveFps` match the camera?), skim `labels.jsonl`, open a few frames.
+4. Train baseline A, export, install, and compare with the Strength slider
+   (see `PERSONALIZATION_GUIDE.md` for exact commands).
 
-3. `models.py` + `train.py`: baseline A only — `OutputMlpAdapter` (stock[45] → 128 → 128 → 45
-   residual, ~29k params), masked Huber loss plus the residual-shrinkage term (λ_r = 1e-2) that
-   makes stock passthrough the zero-cost default.
+**Record the outcome in this file**, especially the neutral false-activation rate before and after.
+That single number is the first genuine evidence the project works on a real face.
 
-4. `export.py`: emit ONNX with inputs `image [1,1,224,224]` + `stock [1,45]`, output
-   `personal [1,45]`, graph-level `Clip(stock + r, 0, 1)`, and metadata
-   (`personal_adapter_version`, `adapter_type`, `expression_names`, `expression_schema_sha256`,
-   `input_normalization`, `input_size`, `base_model_md5`, `trained_utc`). Assert torch↔ORT parity
-   within 1e-4 on ~32 random samples.
-   (Baseline A ignores the image input; keep the input present so the C# runtime path is identical
-   for both model types.)
+### Step 2 — Supervision experiment, before writing any cue code
 
-5. C# side: `PersonalModelCorrector` (own `InferenceSession`, **CPU EP**, self-disables on first
-   exception) and `PersonalModelManager` (settings `PersonalModel_Enabled` / `PersonalModel_Path` /
-   `PersonalModel_Blend`, background load, reject on schema-hash or tensor-shape mismatch → log +
-   `SetCorrector(null)`).
+Plan §12.1. With the cue mechanism already built (`ExpressionOverrideService`), drive a few
+step-holds manually, record simultaneously, and check whether the stock output channel for the cued
+expression actually tracks the commanded level after lag correction
+(`labels.estimate_cue_lag_seconds` returns the correlation).
 
-6. **Measure and record** in this file: tick p50/p95 with a random-weight model B installed, CPU and
-   with `AppSettings_UseGPU` toggled. Real numbers only.
+* Correlation ≳0.6 and monotonic across levels → build the full guided cue engine as planned.
+* Otherwise → fall back to 0/50/100 three-level holds, and record that decision here.
 
-Before P2 guided capture, run the plan's cheap supervision experiment (§12.1) **before** writing cue
-code: record a few guided ramps and check the stock output channels actually correlate with the cue
-signal after lag correction. If they do not, switch to the 0/50/100 step-hold fallback.
+This costs one ~10-minute recording session and determines whether the guided-capture design is
+sound. Do not skip it and train on cue data that may be meaningless.
+
+### Step 3 — P2 guided capture (only after Step 2)
+
+Build `GuidedCaptureRoutine` on top of the existing override service: cue list, phase state machine
+publishing `CuePhase` snapshots, `KeepAlive()` each UI tick, audio cues, and a
+`IReadOnlyCueStateSource` implementation so the recorder stamps commanded targets into
+`labels.jsonl`. Add the **`AppSettings_OSCPrefix` must be empty** preflight assert here.
+
+Then compare model A vs model B on real held-out sessions and ship whichever wins.
