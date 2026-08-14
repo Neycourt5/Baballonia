@@ -702,6 +702,96 @@ def format_report(
     return "\n".join(lines)
 
 
+@dataclass
+class CoverageRow:
+    """How much supervision one expression actually received, and of what kind."""
+
+    name: str
+    dim: int
+    positive_frames: int = 0   # confidently labelled at a non-zero value
+    zero_frames: int = 0       # confidently labelled at zero
+    weak_frames: int = 0       # some opinion, but below the confident threshold
+    levels: tuple[float, ...] = ()   # distinct non-zero values commanded
+
+    @property
+    def has_positive(self) -> bool:
+        """Whether anything ever taught this expression what being *on* looks like."""
+        return self.positive_frames > 0
+
+    @property
+    def total_frames(self) -> int:
+        return self.positive_frames + self.zero_frames + self.weak_frames
+
+
+def coverage_report(label_set, *, min_weight: float = 0.9) -> list[CoverageRow]:
+    """Per-expression supervision census.
+
+    The question this answers is the one that decides what to record next, and the one that caps
+    what a from-scratch model could ever learn: *which expressions has anything actually taught?*
+
+    A dimension with only zero-target frames has been taught to stay quiet and nothing else. The
+    residual adapters (A/B/C) survive that because "no opinion" resolves to the stock prediction,
+    but the gap is invisible in every accuracy metric - a dimension can score perfectly by being
+    right about zero forever - so it needs its own report.
+    """
+    rows: list[CoverageRow] = []
+
+    for dim in range(schema.EXPRESSION_COUNT):
+        weights = label_set.weights[:, dim]
+        targets = label_set.targets[:, dim]
+
+        confident = weights >= min_weight
+        positive = confident & (targets > 1e-6)
+        zero = confident & (targets <= 1e-6)
+        weak = (weights > 0) & ~confident
+
+        commanded = np.unique(np.round(targets[positive], 3)) if positive.any() else np.array([])
+
+        rows.append(CoverageRow(
+            name=schema.EXPRESSION_NAMES[dim],
+            dim=dim,
+            positive_frames=int(positive.sum()),
+            zero_frames=int(zero.sum()),
+            weak_frames=int(weak.sum()),
+            levels=tuple(float(v) for v in commanded),
+        ))
+
+    return rows
+
+
+def format_coverage_report(rows: Sequence[CoverageRow], *, show_all: bool = False) -> str:
+    """Human-readable census, leading with what is missing rather than what is present."""
+    taught = [r for r in rows if r.has_positive]
+    untaught = [r for r in rows if not r.has_positive]
+
+    lines = [
+        "Supervision coverage (which expressions has anything taught?)",
+        f"  {len(taught)}/{len(rows)} expressions have been shown at a non-zero value",
+    ]
+
+    if taught:
+        lines.append(f"  {'expression':<24}{'on-frames':>11}{'zero-frames':>13}{'levels':>18}")
+        for row in sorted(taught, key=lambda r: -r.positive_frames):
+            levels = ", ".join(f"{v:g}" for v in row.levels) if row.levels else "-"
+            lines.append(f"  {row.name:<24}{row.positive_frames:>11}{row.zero_frames:>13}"
+                         f"{levels:>18}")
+
+    if untaught:
+        lines.append("")
+        lines.append(f"  {len(untaught)} expression(s) have only ever been labelled zero:")
+        # Only the first line matters for a decision; the full list is noise at 30+ entries.
+        names = [r.name for r in untaught]
+        shown = names if show_all else names[:12]
+        for chunk in range(0, len(shown), 4):
+            lines.append("    " + ", ".join(shown[chunk:chunk + 4]))
+        if not show_all and len(names) > len(shown):
+            lines.append(f"    ... and {len(names) - len(shown)} more")
+        lines.append("    Guided capture is what teaches these; a residual model falls back to "
+                     "stock behaviour on them.")
+
+    return "\n".join(lines)
+
+
 def collect_cued_dims(sessions: Sequence) -> tuple[np.ndarray, list[list[int]]]:
     """Rows that are settled cue holds, and the dimensions each of them commanded.
 

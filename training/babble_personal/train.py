@@ -321,6 +321,11 @@ def main(argv: list[str] | None = None) -> int:
         described = ", ".join(schema.EXPRESSION_NAMES[d] for d in fp_dims)
         print(f"  false-positive penalty: {args.fp_penalty:g} on {described}")
 
+    # Printed before training: it decides what to record next, and no accuracy metric can show it
+    # (an expression scores perfectly by being right about zero forever).
+    print()
+    print(evaluate.format_coverage_report(evaluate.coverage_report(train_labels)))
+
     if train_labels.coverage() == 0:
         print("\nERROR: no supervised cells. Record a neutral session (or a guided one) - speech "
               "alone with pseudo-labels disabled supervises nothing.")
@@ -500,6 +505,7 @@ def main(argv: list[str] | None = None) -> int:
         cross_talk_stock=cross_talk_stock,
         cross_talk_personal=cross_talk_personal,
         hard_examples=hard_example_block,
+        coverage=evaluate.coverage_report(train_labels),
     )
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
@@ -563,6 +569,7 @@ def _build_summary(
     cross_talk_stock=None,
     cross_talk_personal=None,
     hard_examples=None,
+    coverage=None,
 ) -> dict:
     """Machine-readable outcome for the app's results screen.
 
@@ -624,6 +631,18 @@ def _build_summary(
         summary["cross_talk"] = None
 
     summary["hard_examples"] = hard_examples
+
+    if coverage is not None:
+        taught = [r for r in coverage if r.has_positive]
+        summary["coverage"] = {
+            "expressions_taught": len(taught),
+            "expressions_total": len(coverage),
+            "taught": {r.name: {"positive_frames": r.positive_frames, "levels": list(r.levels)}
+                       for r in taught},
+            "zero_only": [r.name for r in coverage if not r.has_positive],
+        }
+    else:
+        summary["coverage"] = None
 
     summary["verdict"] = _verdict(summary)
     return summary

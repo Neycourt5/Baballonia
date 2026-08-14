@@ -152,6 +152,78 @@ public sealed class GuidedCaptureRoutine
     // Routine construction
     // =============================================================================================
 
+    /// <summary>Timing shared by every routine, so passes stay comparable to each other.</summary>
+    public sealed record CueTiming(
+        double HoldSeconds = 3.0,
+        double RestSeconds = 2.0,
+        double TransitionSeconds = 0.75,
+        double LeadInSeconds = 5.0)
+    {
+        public static readonly CueTiming Default = new();
+    }
+
+    /// <summary>
+    /// Builds the step list for one or more cues, back to back.
+    /// </summary>
+    /// <remarks>
+    /// Every cue contributes the same shape - lead-in, then per level per repetition
+    /// transition/hold/transition/rest - so a multi-expression pass is exactly a concatenation and
+    /// nothing downstream has to know whether the session covered one expression or eight.
+    /// </remarks>
+    public static IReadOnlyList<CueStep> BuildRoutine(
+        IReadOnlyList<GuidedCue> cues,
+        int repetitions = 3,
+        CueTiming? timing = null)
+    {
+        if (cues.Count == 0)
+            throw new ArgumentException("A routine needs at least one cue.", nameof(cues));
+        if (repetitions < 1)
+            throw new ArgumentOutOfRangeException(nameof(repetitions));
+
+        timing ??= CueTiming.Default;
+        var steps = new List<CueStep>();
+
+        foreach (var cue in cues)
+        {
+            var dims = cue.Dims;
+            var neutral = new float[PersonalizationSchema.ExpressionCount];
+
+            // Lead-in: the avatar sits at neutral while the user finds it and settles. Labelled as
+            // a rest so the settled part still supplies known-closed frames rather than being
+            // wasted. In a multi-cue pass it doubles as "get ready for the next expression".
+            steps.Add(new CueStep($"{cue.Id}LeadIn", "rest", dims, neutral, neutral,
+                timing.LeadInSeconds, 0f, 0, cue.LeadInInstruction));
+
+            for (var rep = 0; rep < repetitions; rep++)
+            {
+                // EffectiveLevels, not Levels: the raw property is nullable and means "use the
+                // shared default ladder", which is the case for most of the catalogue.
+                foreach (var level in cue.EffectiveLevels)
+                {
+                    // Distinct id per level. The labeller measures its settle-in trim from where
+                    // segment identity last changed, so two holds sharing an id would let the
+                    // second inherit the first's start time and skip its trim.
+                    var id = $"{cue.Id}{(int)Math.Round(level * 100)}";
+                    var target = cue.TargetAt(level);
+
+                    steps.Add(new CueStep(id, "transition", dims, neutral, target,
+                        timing.TransitionSeconds, level, rep, cue.ApproachInstruction(level)));
+
+                    steps.Add(new CueStep(id, "hold", dims, target, target,
+                        timing.HoldSeconds, level, rep, cue.HoldInstruction(level)));
+
+                    steps.Add(new CueStep(id, "transition", dims, target, neutral,
+                        timing.TransitionSeconds, level, rep, "And relax..."));
+
+                    steps.Add(new CueStep(id, "rest", dims, neutral, neutral,
+                        timing.RestSeconds, level, rep, cue.RestInstruction));
+                }
+            }
+        }
+
+        return steps;
+    }
+
     /// <summary>
     /// The JawOpen routine: the one the user's actual complaint calls for.
     /// </summary>
@@ -169,49 +241,9 @@ public sealed class GuidedCaptureRoutine
         double transitionSeconds = 0.75,
         double leadInSeconds = 5.0)
     {
-        levels ??= DefaultLevels;
+        var cue = levels is null ? GuidedCues.JawOpen : GuidedCues.JawOpen with { Levels = levels };
 
-        var jaw = PersonalizationSchema.IndexOf("JawOpen");
-        int[] dims = [jaw];
-        var neutral = new float[PersonalizationSchema.ExpressionCount];
-
-        float[] At(float level)
-        {
-            var vector = new float[PersonalizationSchema.ExpressionCount];
-            vector[jaw] = level;
-            return vector;
-        }
-
-        var steps = new List<CueStep>
-        {
-            // Lead-in: the avatar sits at neutral while the user finds it and settles. Labelled as a
-            // rest so the settled part still supplies known-closed frames rather than being wasted.
-            new("JawOpenLeadIn", "rest", dims, neutral, neutral, leadInSeconds, 0f, 0,
-                "Look at your avatar and relax your face."),
-        };
-
-        for (var rep = 0; rep < repetitions; rep++)
-        {
-            foreach (var level in levels)
-            {
-                var id = $"JawOpen{(int)Math.Round(level * 100)}";
-                var target = At(level);
-                var percent = (int)Math.Round(level * 100);
-
-                steps.Add(new CueStep(id, "transition", dims, neutral, target, transitionSeconds,
-                    level, rep, $"Open your jaw to match the avatar ({percent}%)..."));
-
-                steps.Add(new CueStep(id, "hold", dims, target, target, holdSeconds,
-                    level, rep, $"Hold it - match the avatar's mouth ({percent}%)."));
-
-                steps.Add(new CueStep(id, "transition", dims, target, neutral, transitionSeconds,
-                    level, rep, "And relax..."));
-
-                steps.Add(new CueStep(id, "rest", dims, neutral, neutral, restSeconds,
-                    level, rep, "Rest. Let your mouth close naturally."));
-            }
-        }
-
-        return steps;
+        return BuildRoutine([cue], repetitions,
+            new CueTiming(holdSeconds, restSeconds, transitionSeconds, leadInSeconds));
     }
 }

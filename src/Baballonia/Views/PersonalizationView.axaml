@@ -188,11 +188,23 @@
               TextWrapping="Wrap"
               Text="Your avatar opens its jaw by a set amount and you copy it. Because the app chose the amount, it knows what your face should have been doing - which is the one thing plain recordings cannot tell it. Put your headset on and watch your avatar in a mirror before starting." />
 
-          <StackPanel IsVisible="{Binding !IsGuidedRunning}" Orientation="Horizontal" Spacing="12">
-            <Button
-                Command="{Binding StartGuidedJawCalibrationCommand}"
-                Content="Start jaw calibration (~1 min)"
-                IsEnabled="{Binding CanStartGuided}" />
+          <StackPanel IsVisible="{Binding !IsGuidedRunning}" Spacing="8">
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <TextBlock VerticalAlignment="Center" Text="Cover" Width="50" />
+              <ComboBox
+                  ItemsSource="{Binding GuidedRoutines}"
+                  SelectedIndex="{Binding SelectedGuidedRoutineIndex}"
+                  Width="260" />
+              <Button
+                  Command="{Binding StartGuidedJawCalibrationCommand}"
+                  Content="Start"
+                  IsEnabled="{Binding CanStartGuided}" />
+            </StackPanel>
+
+            <TextBlock
+                Opacity="0.7"
+                Text="{Binding GuidedRoutineDescription}"
+                TextWrapping="Wrap" />
           </StackPanel>
 
           <StackPanel IsVisible="{Binding IsGuidedRunning}" Spacing="8">

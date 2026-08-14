@@ -81,6 +81,33 @@ CO_ACTIVATION_EXCLUSIONS: dict[int, tuple[int, ...]] = {
         schema.INDEX_OF["MouthPucker"],
         schema.INDEX_OF["JawOpen"],
     ),
+    # Pulling the lip corners down also drags the lower lip and often the chin.
+    schema.INDEX_OF["MouthFrownLeft"]: (
+        schema.INDEX_OF["MouthFrownRight"],
+        schema.INDEX_OF["MouthLowerDownLeft"],
+        schema.INDEX_OF["MouthLowerDownRight"],
+        schema.INDEX_OF["MouthShrugLower"],
+    ),
+    schema.INDEX_OF["MouthFrownRight"]: (
+        schema.INDEX_OF["MouthFrownLeft"],
+        schema.INDEX_OF["MouthLowerDownLeft"],
+        schema.INDEX_OF["MouthLowerDownRight"],
+        schema.INDEX_OF["MouthShrugLower"],
+    ),
+    # Sliding the mouth sideways carries the jaw with it to some degree.
+    schema.INDEX_OF["MouthLeft"]: (
+        schema.INDEX_OF["JawLeft"],
+    ),
+    schema.INDEX_OF["MouthRight"]: (
+        schema.INDEX_OF["JawRight"],
+    ),
+    # A tongue cannot come out through a closed mouth. Without this exclusion every TongueOut hold
+    # would also teach "and the jaw was shut", which is both false and the exact failure this
+    # project is trying to fix.
+    schema.INDEX_OF["TongueOut"]: (
+        schema.INDEX_OF["JawOpen"],
+        schema.INDEX_OF["MouthClose"],
+    ),
 }
 
 

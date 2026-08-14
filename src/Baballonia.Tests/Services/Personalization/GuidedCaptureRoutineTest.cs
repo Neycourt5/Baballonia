@@ -264,4 +264,223 @@ public class GuidedCaptureRoutineTest
 
         CollectionAssert.AreEqual(new[] { 0.25f, 0.75f }, levels.ToList());
     }
+
+    // =============================================================================================
+    // The cue catalogue
+    // =============================================================================================
+
+    /// <summary>
+    /// Every cue must produce both halves of the discrimination: frames where the expression is
+    /// commanded on, and frames where it is commanded off, in the same session under the same
+    /// lighting. Neutral recordings supply only the second kind, which is why "be quieter" was
+    /// previously the only thing the corpus could teach.
+    /// </summary>
+    [TestMethod]
+    public void EveryCueCommandsBothOnAndOffStates()
+    {
+        foreach (var cue in GuidedCues.All)
+        {
+            var steps = GuidedCaptureRoutine.BuildRoutine([cue], repetitions: 1);
+
+            var holds = steps.Where(s => s.Phase == "hold").ToList();
+            var rests = steps.Where(s => s.Phase == "rest").ToList();
+
+            Assert.IsTrue(holds.Count > 0, $"{cue.Id} has no holds");
+            Assert.IsTrue(rests.Count > 0, $"{cue.Id} has no rests");
+
+            foreach (var dim in cue.Dims)
+            {
+                Assert.IsTrue(holds.Any(h => h.To[dim] > 0), $"{cue.Id} never commands {dim} on");
+                Assert.IsTrue(rests.All(r => r.To[dim] == 0), $"{cue.Id} rests do not release {dim}");
+            }
+        }
+    }
+
+    [TestMethod]
+    public void NoCueMovesAnExpressionItDidNotDeclare()
+    {
+        // The labeller trusts Dims to decide what a cue is claiming. A vector that moves an
+        // undeclared expression would be supervised as "stay at rest" while visibly not at rest.
+        foreach (var cue in GuidedCues.All)
+        {
+            foreach (var step in GuidedCaptureRoutine.BuildRoutine([cue], repetitions: 1))
+            {
+                for (var dim = 0; dim < PersonalizationSchema.ExpressionCount; dim++)
+                {
+                    if (cue.Dims.Contains(dim)) continue;
+
+                    Assert.AreEqual(0f, step.To[dim],
+                        $"{cue.Id}/{step.Phase} moves undeclared expression {dim}");
+                    Assert.AreEqual(0f, step.From[dim], $"{cue.Id}/{step.Phase} (from)");
+                }
+            }
+        }
+    }
+
+    [TestMethod]
+    public void EveryCueGivesEachLevelItsOwnId()
+    {
+        // Shared ids would let a second hold inherit the first's start time and skip the
+        // settle-in trim - the exact aliasing bug M1 fixed on the phase boundary.
+        foreach (var cue in GuidedCues.All)
+        {
+            var byLevel = GuidedCaptureRoutine.BuildRoutine([cue], repetitions: 1)
+                .Where(s => s.Phase == "hold")
+                .GroupBy(s => s.Level)
+                .ToDictionary(g => g.Key, g => g.Select(s => s.CueId).Distinct().ToList());
+
+            Assert.AreEqual(cue.EffectiveLevels.Count, byLevel.Count, $"{cue.Id} level count");
+
+            var allIds = byLevel.Values.SelectMany(v => v).Distinct().ToList();
+            Assert.AreEqual(cue.EffectiveLevels.Count, allIds.Count,
+                $"{cue.Id} reuses a cue id across levels");
+        }
+    }
+
+    [TestMethod]
+    public void CueIdsAreUniqueAcrossTheCatalogue()
+    {
+        // Two cues sharing an id would merge into one segment in the labeller's eyes.
+        var ids = GuidedCues.All.Select(c => c.Id).ToList();
+
+        CollectionAssert.AllItemsAreUnique(ids);
+    }
+
+    [TestMethod]
+    public void TongueIsCommandedAsBinary()
+    {
+        // A tongue is out or it is not; a commanded 50 % would be a label nobody can reproduce.
+        Assert.IsTrue(GuidedCues.TongueOut.IsBinary);
+        Assert.AreEqual(1, GuidedCues.TongueOut.EffectiveLevels.Count);
+        Assert.AreEqual(1.0f, GuidedCues.TongueOut.EffectiveLevels[0]);
+    }
+
+    [TestMethod]
+    public void CombinationCuesCommandTheJawGentlyRatherThanFully()
+    {
+        // Both expressions at maximum is usually not a pose a person can hold, and an unholdable
+        // cue produces confident wrong labels.
+        var jaw = PersonalizationSchema.IndexOf("JawOpen");
+
+        foreach (var cue in GuidedCues.CombinationPass)
+        {
+            Assert.IsTrue(cue.Dims.Contains(jaw), $"{cue.Id} should involve the jaw");
+
+            var full = cue.TargetAt(1.0f);
+            var primary = cue.Dims.First(d => d != jaw);
+
+            Assert.IsTrue(full[jaw] < full[primary],
+                $"{cue.Id} commands the jaw as hard as the primary expression");
+            Assert.IsTrue(full[jaw] > 0, $"{cue.Id} does not open the jaw at all");
+        }
+    }
+
+    [TestMethod]
+    public void CombinationCuesDriveEveryExpressionTheyName()
+    {
+        foreach (var cue in GuidedCues.CombinationPass)
+        {
+            var target = cue.TargetAt(1.0f);
+            foreach (var dim in cue.Dims)
+                Assert.IsTrue(target[dim] > 0, $"{cue.Id} declares {dim} but never moves it");
+        }
+    }
+
+    [TestMethod]
+    public void TargetsStayInTheUnitRange()
+    {
+        foreach (var cue in GuidedCues.All)
+            foreach (var level in cue.EffectiveLevels)
+                Assert.IsTrue(cue.TargetAt(level).All(v => v is >= 0f and <= 1f), cue.Id);
+    }
+
+    [TestMethod]
+    public void EveryCueCarriesInstructionsForEveryPhase()
+    {
+        foreach (var cue in GuidedCues.All)
+            foreach (var step in GuidedCaptureRoutine.BuildRoutine([cue], repetitions: 1))
+                Assert.IsFalse(string.IsNullOrWhiteSpace(step.Instruction),
+                    $"{cue.Id}/{step.Phase} has no instruction");
+    }
+
+    [TestMethod]
+    public void AMultiCueRoutineIsTheConcatenationOfItsParts()
+    {
+        // Nothing downstream should be able to tell a multi-expression pass from several
+        // single-expression ones stitched together.
+        var separate = GuidedCues.CorePass
+            .SelectMany(c => GuidedCaptureRoutine.BuildRoutine([c], repetitions: 2))
+            .ToList();
+        var combined = GuidedCaptureRoutine.BuildRoutine(GuidedCues.CorePass, repetitions: 2);
+
+        Assert.AreEqual(separate.Count, combined.Count);
+        for (var i = 0; i < separate.Count; i++)
+        {
+            Assert.AreEqual(separate[i].CueId, combined[i].CueId, $"step {i}");
+            Assert.AreEqual(separate[i].Phase, combined[i].Phase, $"step {i}");
+        }
+    }
+
+    [TestMethod]
+    public void TheFullPassRunsToCompletionInAReasonableTime()
+    {
+        var choice = GuidedRoutineChoice.All.First(c => c.Id == "core");
+        var steps = choice.Build();
+        var routine = Build(steps.ToArray());
+
+        var pushed = 0;
+        for (var i = 0; i < 200_000 && !routine.IsFinished; i++)
+        {
+            if (routine.Tick() is not null) pushed++;
+            Advance(0.05);
+        }
+
+        Assert.IsTrue(routine.IsFinished);
+        Assert.AreEqual(steps.Count, pushed, "every step should be commanded exactly once");
+        Assert.IsTrue(routine.TotalSeconds is > 120 and < 420,
+            $"full pass is {routine.TotalSeconds:F0}s - long enough to be useful, short enough to finish");
+    }
+
+    [TestMethod]
+    public void RoutineChoicesAreWellFormed()
+    {
+        Assert.IsTrue(GuidedRoutineChoice.All.Count >= 4);
+        CollectionAssert.AllItemsAreUnique(GuidedRoutineChoice.All.Select(c => c.Id).ToList());
+
+        foreach (var choice in GuidedRoutineChoice.All)
+        {
+            Assert.IsTrue(choice.Cues.Count > 0, $"{choice.Id} covers nothing");
+            Assert.IsFalse(string.IsNullOrWhiteSpace(choice.DisplayName), choice.Id);
+            Assert.IsFalse(string.IsNullOrWhiteSpace(choice.Description), choice.Id);
+            Assert.IsTrue(choice.EstimatedSeconds > 0, choice.Id);
+            Assert.IsTrue(choice.Build().Count > 0, choice.Id);
+        }
+    }
+
+    [TestMethod]
+    public void TheFirstOfferedRoutineIsTheFullPass()
+    {
+        // It is the default selection, so it has to be the one most users should run.
+        Assert.AreEqual("core", GuidedRoutineChoice.All[0].Id);
+    }
+
+    [TestMethod]
+    public void EstimatedTimeMatchesTheBuiltRoutine()
+    {
+        foreach (var choice in GuidedRoutineChoice.All)
+        {
+            var actual = choice.Build().Sum(s => s.DurationSeconds);
+
+            Assert.AreEqual(choice.EstimatedSeconds, actual, 0.01,
+                $"{choice.Id}: the picker would misreport how long this takes");
+        }
+    }
+
+    [TestMethod]
+    public void CuesCanBeLookedUpById()
+    {
+        Assert.AreEqual(GuidedCues.Smile.Id, GuidedCues.ById("Smile")!.Id);
+        Assert.AreEqual(GuidedCues.Smile.Id, GuidedCues.ById("smile")!.Id);
+        Assert.IsNull(GuidedCues.ById("NotACue"));
+    }
 }

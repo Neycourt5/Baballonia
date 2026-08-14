@@ -110,6 +110,31 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private string _guidedStatus = "";
     [ObservableProperty] private bool _canStartGuided;
 
+    /// <summary>
+    /// What a guided session will cover. The full pass is the useful default; single expressions
+    /// exist so a specific weakness can be topped up without sitting through everything again.
+    /// </summary>
+    public IReadOnlyList<GuidedRoutineChoice> GuidedRoutines { get; } = GuidedRoutineChoice.All;
+
+    [ObservableProperty] private int _selectedGuidedRoutineIndex;
+    [ObservableProperty] private string _guidedRoutineDescription = "";
+
+    partial void OnSelectedGuidedRoutineIndexChanged(int value) => UpdateGuidedRoutineDescription();
+
+    private GuidedRoutineChoice SelectedGuidedRoutine =>
+        GuidedRoutines[Math.Clamp(SelectedGuidedRoutineIndex, 0, GuidedRoutines.Count - 1)];
+
+    private void UpdateGuidedRoutineDescription()
+    {
+        var choice = SelectedGuidedRoutine;
+        var minutes = choice.EstimatedSeconds / 60.0;
+        var length = minutes >= 1
+            ? $"about {minutes:F0} minute{(minutes < 1.5 ? "" : "s")}"
+            : $"about {choice.EstimatedSeconds:F0} seconds";
+
+        GuidedRoutineDescription = $"{choice.Description} Takes {length}.";
+    }
+
     // ---- quick correction ---------------------------------------------------------------------
 
     /// <summary>
@@ -250,6 +275,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         _personalModelEnabled = _modelManager.Enabled;
         _personalStrength = _modelManager.Blend * 100.0;
         _useEmbeddingRunner = _settings.ReadSetting<bool>(PersonalModelManager.EmbeddingRunnerSetting);
+
+        UpdateGuidedRoutineDescription();
 
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _statusTimer.Tick += (_, _) => OnTick();
@@ -491,8 +518,9 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             return;
         }
 
-        var routine = new GuidedCaptureRoutine(GuidedCaptureRoutine.BuildJawOpenRoutine());
-        var result = _guided.Start(routine, notes: "Guided JawOpen calibration");
+        var choice = SelectedGuidedRoutine;
+        var routine = new GuidedCaptureRoutine(choice.Build());
+        var result = _guided.Start(routine, notes: $"Guided calibration: {choice.DisplayName}");
 
         GuidedStatus = result.Started
             ? "Watch your avatar and copy what it does."
