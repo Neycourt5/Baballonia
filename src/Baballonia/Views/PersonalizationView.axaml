@@ -130,6 +130,53 @@
         </StackPanel>
       </controls:ContentExample>
 
+      <!-- ======================= QUICK CORRECTION ====================== -->
+      <!--
+        A primary control, not an Advanced one. This is the loop the user runs while actually
+        wearing the headset: notice the avatar's jaw hanging open, say so, carry on. It lives here
+        rather than under Advanced because it is used far more often than anything below it.
+      -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Quick correction" />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="If your avatar's mouth hangs open while your real mouth is closed, press this straight afterwards. It saves the last few seconds as an example of what the tracker got wrong." />
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <Button
+                Command="{Binding FlagMouthClosedCommand}"
+                Content="My mouth was closed"
+                IsEnabled="{Binding CanFlagCorrection}" />
+            <ComboBox
+                ItemsSource="{Binding CorrectionWindows}"
+                SelectedIndex="{Binding SelectedCorrectionWindowIndex}"
+                VerticalAlignment="Center"
+                Width="150" />
+          </StackPanel>
+
+          <TextBlock
+              FontWeight="SemiBold"
+              IsVisible="{Binding CorrectionStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Text="{Binding CorrectionStatus}"
+              TextWrapping="Wrap" />
+
+          <TextBlock
+              IsVisible="{Binding CanFlagCorrection}"
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="{Binding SavedCorrectionCount, StringFormat='Corrections saved so far: {0}. They are used the next time you train.'}" />
+
+          <TextBlock
+              IsVisible="{Binding !CanFlagCorrection}"
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="Start the face camera on the Home page to use quick corrections." />
+        </StackPanel>
+      </controls:ContentExample>
+
       <!-- =========================== TRAINING ========================== -->
       <controls:ContentExample>
         <StackPanel Spacing="10">

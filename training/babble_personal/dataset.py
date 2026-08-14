@@ -49,6 +49,10 @@ class FrameRecord:
     image_path: Path
     cue: dict | None = None
 
+    #: What the personal model emitted at capture time. Present only in correction sessions, where
+    #: the point of the recording is that this value was wrong. Never a label - it is the mistake.
+    personal: np.ndarray | None = None
+
     def load_image(self) -> np.ndarray:
         """Grayscale float32 [1, H, W] scaled to [0,1] - the same normalization the stock model uses."""
         raw = cv2.imread(str(self.image_path), cv2.IMREAD_GRAYSCALE)
@@ -66,6 +70,9 @@ class Session:
     metadata: dict
     frames: list[FrameRecord] = field(default_factory=list)
 
+    #: Contents of correction.json for user-flagged sessions; None for every other type.
+    correction: dict | None = None
+
     @property
     def session_type(self) -> str:
         return str(self.metadata.get("SessionType", "Unknown"))
@@ -81,6 +88,27 @@ class Session:
     @property
     def is_speech(self) -> bool:
         return self.session_type.lower() == "speech"
+
+    @property
+    def is_correction(self) -> bool:
+        """A stretch the user flagged as wrong while actually using the tracker."""
+        return self.session_type.lower() == "correction"
+
+    def corrected_dims(self) -> list[int]:
+        """Expression indices this correction speaks about. Empty for non-correction sessions."""
+        if not self.correction:
+            return []
+        return [int(d) for d in self.correction.get("CorrectedDims",
+                                                    self.correction.get("corrected_dims", []))]
+
+    def correction_target(self) -> float:
+        if not self.correction:
+            return 0.0
+        raw = self.correction.get("Target", self.correction.get("target", 0.0))
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 0.0
 
     def __len__(self) -> int:
         return len(self.frames)
@@ -129,6 +157,12 @@ def load_session(path: Path, *, verify_schema: bool = True) -> Session:
                 f"got {stock.shape}"
             )
 
+        personal = record.get("personal")
+        if personal is not None:
+            personal = np.asarray(personal, dtype=np.float32)
+            if personal.shape != (schema.EXPRESSION_COUNT,):
+                personal = None
+
         frames.append(
             FrameRecord(
                 index=index,
@@ -136,13 +170,18 @@ def load_session(path: Path, *, verify_schema: bool = True) -> Session:
                 stock=stock,
                 image_path=image_path,
                 cue=record.get("cue"),
+                personal=personal,
             )
         )
 
     if missing:
         print(f"  warning: {path.name} - {missing} labels had no matching image and were skipped")
 
-    return Session(session_id=path.name, path=path, metadata=metadata, frames=frames)
+    correction_path = path / "correction.json"
+    correction = json.loads(read_json_text(correction_path)) if correction_path.exists() else None
+
+    return Session(session_id=path.name, path=path, metadata=metadata, frames=frames,
+                   correction=correction)
 
 
 def discover_sessions(root: Path, *, verify_schema: bool = True) -> list[Session]:

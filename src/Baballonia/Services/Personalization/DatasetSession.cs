@@ -17,7 +17,54 @@ public enum SessionType
     Guided,
 
     /// <summary>Natural speech. No per-frame priors; used for realistic expression combinations.</summary>
-    Speech
+    Speech,
+
+    /// <summary>
+    /// A stretch the user flagged as wrong while using the tracker, saved from the rolling buffer.
+    /// Supervises only the dimensions the correction names; every other expression is left unlabelled
+    /// because the user asserted one specific thing and may have been emoting freely otherwise.
+    /// </summary>
+    Correction
+}
+
+/// <summary>
+/// What the user asserted when they flagged a moment as wrong. Written as correction.json beside the
+/// frames, and the reason a correction session can be trusted more than any automatic label: it is
+/// the one source where a human looked at the result and said "that was not my face".
+/// </summary>
+public sealed class CorrectionMetadata
+{
+    public int Version { get; init; } = 1;
+
+    /// <summary>Machine-readable action, e.g. <c>mouth_closed</c>.</summary>
+    public string Kind { get; init; } = "";
+
+    /// <summary>Expression indices this correction speaks about. Everything else stays unlabelled.</summary>
+    public IReadOnlyList<int> CorrectedDims { get; init; } = [];
+
+    /// <summary>Value those dimensions should have had.</summary>
+    public float Target { get; init; }
+
+    /// <summary>How far back the user said the mistake extended.</summary>
+    public double WindowSeconds { get; init; }
+
+    public string FlaggedUtc { get; init; } = "";
+
+    /// <summary>Always <c>hard_example</c> today; distinguishes provenance if other sources appear.</summary>
+    public string Source { get; init; } = "hard_example";
+
+    /// <summary>
+    /// Which model produced the mistake. Without it a correction is unattributable: a flag captured
+    /// against an old model may already be fixed, and retraining on it would chase a stale failure.
+    /// </summary>
+    public ModelProvenance? Model { get; init; }
+
+    public sealed class ModelProvenance
+    {
+        public string? AdapterType { get; init; }
+        public string? TrainedUtc { get; init; }
+        public float Blend { get; init; }
+    }
 }
 
 /// <summary>
@@ -99,6 +146,15 @@ public sealed class FrameLabel
     [JsonPropertyName("stock")]
     public float[] Stock { get; init; } = [];
 
+    /// <summary>
+    /// What the personal model actually emitted for this frame, when one was active. Recorded only
+    /// for corrections, where the whole point is that this value was wrong; normal sessions omit it
+    /// so labels.jsonl does not double in size for data no trainer reads.
+    /// </summary>
+    [JsonPropertyName("personal")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public float[]? Personal { get; init; }
+
     /// <summary>Cue state when guided, otherwise null.</summary>
     [JsonPropertyName("cue")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
@@ -142,6 +198,7 @@ public static class PersonalizationPaths
     public static string FramesDirectory(string sessionId) => Path.Combine(SessionDirectory(sessionId), "frames");
     public static string SessionMetadataPath(string sessionId) => Path.Combine(SessionDirectory(sessionId), "session.json");
     public static string LabelsPath(string sessionId) => Path.Combine(SessionDirectory(sessionId), "labels.jsonl");
+    public static string CorrectionPath(string sessionId) => Path.Combine(SessionDirectory(sessionId), "correction.json");
 
     /// <summary>e.g. 20260813_193000_guided - sorts chronologically and says what it is at a glance.</summary>
     public static string NewSessionId(SessionType type, DateTime utcNow) =>

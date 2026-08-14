@@ -217,6 +217,20 @@ def build_labels(
             segment_key = key
             segment_start_ticks = frame.timestamp_ticks
 
+        if session.is_correction:
+            # The user watched the tracker get this wrong and said so. That outranks every
+            # automatic source, hence the highest weight in the table.
+            #
+            # Only the dimensions the correction names are supervised. "My mouth was closed" says
+            # nothing about whether the user was also smiling - and in VR they may well have been -
+            # so a zero prior on the rest of the face would invent supervision that was never given.
+            # An unlabelled cell costs nothing; a confidently wrong one costs a lot.
+            for dim in session.corrected_dims():
+                if 0 <= dim < n_dims:
+                    targets[row, dim] = session.correction_target()
+                    weights[row, dim] = W_MANUAL_CORRECTION
+            continue
+
         if session.is_neutral:
             # Whole face at rest: the strongest and cheapest supervision available.
             weights[row, :] = W_NEUTRAL_SESSION

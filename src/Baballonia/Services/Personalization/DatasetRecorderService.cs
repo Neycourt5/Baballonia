@@ -251,7 +251,7 @@ public sealed class DatasetRecorderService : IDisposable
 
             // The tick re-serves the latest camera Mat, so identical frames arrive repeatedly.
             // A sparse checksum is enough to spot them and costs far less than encoding.
-            var checksum = SparseChecksum(e.transformedFrame);
+            var checksum = FrameChecksum.Sparse(e.transformedFrame);
             if (checksum == _lastChecksum)
                 return;
 
@@ -369,33 +369,6 @@ public sealed class DatasetRecorderService : IDisposable
                 fps);
         }
 
-        /// <summary>
-        /// Samples a fixed grid of pixels instead of hashing the whole image. Consecutive duplicates
-        /// are bit-identical (the same Mat re-served), so a sparse sample separates them reliably at
-        /// a fraction of the cost.
-        /// </summary>
-        private static unsafe ulong SparseChecksum(Mat mat)
-        {
-            if (mat.Empty()) return 0;
-
-            var data = (byte*)mat.DataPointer;
-            var total = (long)mat.Total() * mat.ElemSize();
-            if (total <= 0) return 0;
-
-            const int samples = 64;
-            var stride = Math.Max(1, total / samples);
-
-            ulong hash = 1469598103934665603UL; // FNV-1a offset basis
-            for (long offset = 0; offset < total; offset += stride)
-            {
-                hash ^= data[offset];
-                hash *= 1099511628211UL;
-            }
-
-            // Fold in length so a size change is always visible.
-            hash ^= (ulong)total;
-            return hash;
-        }
     }
 
     private sealed record CapturedFrame(

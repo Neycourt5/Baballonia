@@ -37,6 +37,9 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     private readonly IFacePipelineEventBus _faceEventBus;
     private readonly ILogger<PersonalizationViewModel> _logger;
 
+    /// <summary>Optional so the view model still constructs in tests that do not care about it.</summary>
+    private readonly HardExampleService? _hardExamples;
+
     private readonly Action<FacePipelineEvents.NewTransformedFrameEvent> _frameHandler;
     private readonly Action<FacePipelineEvents.NewRawExpressionsEvent> _rawHandler;
     private readonly Action<FacePipelineEvents.NewCorrectedExpressionsEvent> _correctedHandler;
@@ -72,6 +75,23 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private bool _isRecording;
     [ObservableProperty] private string _recordingStatus = "";
     [ObservableProperty] private string _notes = "";
+
+    // ---- quick correction ---------------------------------------------------------------------
+
+    /// <summary>
+    /// How far back "my mouth was closed" reaches. Five seconds by default: a mistake is noticed a
+    /// beat after it happens, and the window has to cover both the noticing and the reaching.
+    /// </summary>
+    public IReadOnlyList<string> CorrectionWindows { get; } = ["Last 2 seconds", "Last 5 seconds", "Last 10 seconds"];
+
+    [ObservableProperty] private int _selectedCorrectionWindowIndex = 1;
+    [ObservableProperty] private string _correctionStatus = "";
+    [ObservableProperty] private int _savedCorrectionCount;
+    [ObservableProperty] private bool _canFlagCorrection;
+
+    private TimeSpan SelectedCorrectionWindow =>
+        HardExampleService.WindowChoices[
+            Math.Clamp(SelectedCorrectionWindowIndex, 0, HardExampleService.WindowChoices.Count - 1)];
 
     // ---- training -----------------------------------------------------------------------------
 
@@ -144,7 +164,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         PersonalizationEnvironment environment,
         ILocalSettingsService settings,
         IFacePipelineEventBus faceEventBus,
-        ILogger<PersonalizationViewModel> logger)
+        ILogger<PersonalizationViewModel> logger,
+        HardExampleService? hardExamples = null)
     {
         _recorder = recorder;
         _modelManager = modelManager;
@@ -153,6 +174,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         _settings = settings;
         _faceEventBus = faceEventBus;
         _logger = logger;
+        _hardExamples = hardExamples;
 
         foreach (var (name, index) in PersonalizationSchema.ExpressionNames.Select((n, i) => (n, i)))
             Comparison.Add(new ExpressionComparisonRow(index, name));
@@ -210,6 +232,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         SpeechCount = setup.DatasetStatus.SpeechSessions;
         RecordingAdvice = setup.DatasetStatus.NextRecommendation
                           ?? "You have enough recordings to train a good model.";
+
+        SavedCorrectionCount = HardExampleService.CountSaved();
+
+        // Nothing to save unless frames are arriving, so the button says so rather than failing.
+        CanFlagCorrection = _hardExamples != null && _cameraSeenRecently;
 
         CanTrain = setup.CanTrain && !IsBusy;
     }
@@ -295,6 +322,37 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         System.IO.Directory.CreateDirectory(PersonalizationPaths.DatasetRoot);
         Utils.OpenUrl(PersonalizationPaths.DatasetRoot);
+    }
+
+    // =============================================================================================
+    // Quick correction
+    // =============================================================================================
+
+    /// <summary>
+    /// Saves the last few seconds as evidence that the jaw was wrong.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately does not retrain. Corrections are worth most in batches - one is a single
+    /// noisy example, a dozen describe a pattern - and an automatic retrain after every press would
+    /// swap the running model constantly and make it impossible to tell which change helped.
+    /// </remarks>
+    [RelayCommand]
+    private async Task FlagMouthClosedAsync()
+    {
+        if (_hardExamples is null)
+        {
+            CorrectionStatus = "Quick correction is unavailable in this build.";
+            return;
+        }
+
+        var result = await _hardExamples.FlagAsync(CorrectionKind.MouthClosed, SelectedCorrectionWindow);
+        CorrectionStatus = result.Message;
+
+        if (result.Success)
+        {
+            SavedCorrectionCount = HardExampleService.CountSaved();
+            RefreshSetup();
+        }
     }
 
     // =============================================================================================

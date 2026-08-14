@@ -121,6 +121,13 @@ public partial class App : Application
             services.AddSingleton<PersonalizationEnvironment>();
             services.AddSingleton<PersonalTrainingService>();
 
+            // Holds the last ten seconds of tracking in memory (~15 MB, fixed) so a mistake can be
+            // saved after the user notices it. Nothing reaches disk until they press the button.
+            services.AddSingleton(sp => new HardExampleBuffer(
+                sp.GetRequiredService<ILogger<HardExampleBuffer>>(),
+                sp.GetRequiredService<IFacePipelineEventBus>()));
+            services.AddSingleton<HardExampleService>();
+
             // Core Services
             services.AddTransient<IIdentityService, IdentityService>();
             services.AddTransient<IFileService, FileService>();

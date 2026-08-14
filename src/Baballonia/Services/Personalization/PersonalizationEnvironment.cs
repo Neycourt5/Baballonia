@@ -17,7 +17,8 @@ public sealed record DatasetStatus(
     int NeutralSessions,
     int SpeechSessions,
     int GuidedSessions,
-    int TotalFrames)
+    int TotalFrames,
+    int CorrectionSessions = 0)
 {
     /// <summary>
     /// Two of a type is the real threshold, because validation holds out a whole session: with only
@@ -25,6 +26,11 @@ public sealed record DatasetStatus(
     /// </summary>
     public const int RecommendedPerType = 2;
 
+    /// <summary>
+    /// Corrections are excluded on purpose. They are a handful of seconds each and supervise one
+    /// expression, so counting them here would let "you have enough recordings to train" become true
+    /// on evidence that cannot teach the model what a resting face looks like.
+    /// </summary>
     public int TotalSessions => NeutralSessions + SpeechSessions + GuidedSessions;
 
     /// <summary>Enough to train something meaningful at all.</summary>
@@ -122,7 +128,7 @@ public sealed class PersonalizationEnvironment
         if (!Directory.Exists(root))
             return new DatasetStatus(0, 0, 0, 0);
 
-        int neutral = 0, speech = 0, guided = 0, frames = 0;
+        int neutral = 0, speech = 0, guided = 0, correction = 0, frames = 0;
 
         foreach (var directory in Directory.EnumerateDirectories(root))
         {
@@ -136,6 +142,7 @@ public sealed class PersonalizationEnvironment
             if (name.EndsWith("_neutral", StringComparison.Ordinal)) neutral++;
             else if (name.EndsWith("_speech", StringComparison.Ordinal)) speech++;
             else if (name.EndsWith("_guided", StringComparison.Ordinal)) guided++;
+            else if (name.EndsWith("_correction", StringComparison.Ordinal)) correction++;
             else continue;
 
             var framesDirectory = Path.Combine(directory, "frames");
@@ -143,7 +150,7 @@ public sealed class PersonalizationEnvironment
                 frames += Directory.EnumerateFiles(framesDirectory, "*.jpg").Count();
         }
 
-        return new DatasetStatus(neutral, speech, guided, frames);
+        return new DatasetStatus(neutral, speech, guided, frames, correction);
     }
 
     /// <summary>True when the venv exists and has the packages training needs.</summary>
