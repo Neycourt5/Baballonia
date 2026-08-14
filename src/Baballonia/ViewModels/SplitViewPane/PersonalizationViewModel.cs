@@ -13,6 +13,7 @@ using Baballonia.Models;
 using Baballonia.Services;
 using Baballonia.Services.events;
 using Baballonia.Services.Personalization;
+using Baballonia.Services.Personalization.Audio;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -40,6 +41,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     /// <summary>Optional so the view model still constructs in tests that do not care about it.</summary>
     private readonly HardExampleService? _hardExamples;
     private readonly GuidedCalibrationService? _guided;
+    private readonly AudioAssistService? _audio;
 
     /// <summary>
     /// Ticks the cue engine while a guided session runs. Faster than the status timer because it
@@ -83,6 +85,22 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private bool _isRecording;
     [ObservableProperty] private string _recordingStatus = "";
     [ObservableProperty] private string _notes = "";
+
+    // ---- audio expression assist ----------------------------------------------------------------
+
+    /// <summary>
+    /// Whether microphone loudness may amplify mouth movement the tracker already sees.
+    /// </summary>
+    /// <remarks>
+    /// Off by default and strictly additive. The camera remains the only thing that decides what the
+    /// face is doing - audio can make a real movement bigger, never create one - so the worst case
+    /// for a user who leaves this off, or has no microphone, is exactly the tracking they had.
+    /// </remarks>
+    [ObservableProperty] private bool _audioAssistEnabled;
+
+    [ObservableProperty] private double _audioStrength = 50;
+    [ObservableProperty] private string _audioStatus = "";
+    [ObservableProperty] private string _audioDiagnostics = "";
 
     // ---- guided calibration -------------------------------------------------------------------
 
@@ -195,7 +213,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         IFacePipelineEventBus faceEventBus,
         ILogger<PersonalizationViewModel> logger,
         HardExampleService? hardExamples = null,
-        GuidedCalibrationService? guided = null)
+        GuidedCalibrationService? guided = null,
+        AudioAssistService? audio = null)
     {
         _recorder = recorder;
         _modelManager = modelManager;
@@ -206,6 +225,14 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         _logger = logger;
         _hardExamples = hardExamples;
         _guided = guided;
+        _audio = audio;
+
+        if (audio != null)
+        {
+            _audioAssistEnabled = audio.Enabled;
+            _audioStrength = audio.Strength * 100.0;
+            _audioStatus = audio.StatusMessage;
+        }
 
         _guidedTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
         _guidedTimer.Tick += (_, _) => OnGuidedTick();
@@ -399,6 +426,47 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         EmbeddingRunnerStatus = "Embedding model active.";
         RefreshSetup();
+    }
+
+    // =============================================================================================
+    // Audio expression assist
+    // =============================================================================================
+
+    partial void OnAudioAssistEnabledChanged(bool value)
+    {
+        if (_audio is null)
+        {
+            AudioStatus = "Audio assist is unavailable in this build.";
+            return;
+        }
+
+        _audio.SetEnabled(value);
+        AudioStatus = _audio.StatusMessage;
+
+        if (!value)
+            AudioDiagnostics = "";
+    }
+
+    partial void OnAudioStrengthChanged(double value)
+    {
+        if (_audio != null)
+            _audio.Strength = (float)(value / 100.0);
+    }
+
+    /// <summary>Live audio readout, drained on the status timer like the expression table.</summary>
+    private void UpdateAudioDiagnostics()
+    {
+        if (_audio is null || !AudioAssistEnabled || !ShowAdvanced)
+            return;
+
+        var features = _audio.Features;
+        var gain = _audio.CurrentGain;
+
+        AudioDiagnostics =
+            $"{(features.IsVoiced ? "speaking" : "quiet")}   " +
+            $"energy {features.SpeechEnergy:F2}   " +
+            $"pitch {(features.PitchHz > 0 ? $"{features.PitchHz:F0} Hz" : "-")}   " +
+            $"boost x{gain:F2}";
     }
 
     // =============================================================================================
@@ -768,6 +836,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         if (SortByDelta)
             SortComparisonByDelta();
+
+        UpdateAudioDiagnostics();
 
         // The camera is "running" if a frame arrived recently; there is no event when it stops.
         var seen = (DateTime.UtcNow - _lastFrameUtc).TotalSeconds < 2;

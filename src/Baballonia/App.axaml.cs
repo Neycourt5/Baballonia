@@ -11,6 +11,7 @@ using Baballonia.Services;
 using Baballonia.Services.Inference;
 using Baballonia.Services.Inference.Platforms;
 using Baballonia.Services.Personalization;
+using Baballonia.Services.Personalization.Audio;
 using Baballonia.ViewModels;
 using Baballonia.ViewModels.SplitViewPane;
 using Baballonia.Views;
@@ -18,6 +19,7 @@ using CommunityToolkit.Mvvm.DependencyInjection;
 using CommunityToolkit.Mvvm.Messaging;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System;
@@ -135,6 +137,16 @@ public partial class App : Application
                 sp.GetRequiredService<ILogger<HardExampleBuffer>>(),
                 sp.GetRequiredService<IFacePipelineEventBus>()));
             services.AddSingleton<HardExampleService>();
+
+            // Optional audio expression assist. The default source reports silence, which makes the
+            // enhancer an exact passthrough; platforms with a capture backend replace this factory
+            // in their own registration. TryAdd so that replacement wins.
+            services.TryAddSingleton<Func<IAudioFeatureSource>>(_ => () => new NullAudioFeatureSource());
+            services.AddSingleton(sp => new AudioAssistService(
+                sp.GetRequiredService<Func<IAudioFeatureSource>>(),
+                sp.GetRequiredService<ILocalSettingsService>(),
+                enhancer => sp.GetRequiredService<FaceProcessingPipeline>().Enhancer = enhancer,
+                sp.GetRequiredService<ILogger<AudioAssistService>>()));
 
             // Core Services
             services.AddTransient<IIdentityService, IdentityService>();

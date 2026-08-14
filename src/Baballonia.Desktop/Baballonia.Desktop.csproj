@@ -4,6 +4,8 @@
         <!--If you are willing to use Windows/MacOS native APIs you will need to create 3 projects.
         One for Windows with net10.0-windows TFM, one for MacOS with net10.0-macos and one with net10.0 TFM for Linux.-->
         <TargetFramework>net10.0</TargetFramework>
+        <!-- Guards the Windows-only microphone capture backend; see Audio/MicrophoneFeatureSource.cs -->
+        <DefineConstants Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(DefineConstants);WINDOWS</DefineConstants>
         <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
         <ApplicationIcon>Assets\IconOpaque.ico</ApplicationIcon>
         <Company>Paradigm Reality Enhancement Labs</Company>
@@ -36,6 +38,9 @@
 	    <PackageReference Include="Microsoft.ML.OnnxRuntime.DirectML" Version="1.24.3" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
         <PackageReference Include="SkiaSharp.NativeAssets.Win32" Version="3.119.2" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
 		<PackageReference Include="DirectShowLib" Version="1.0.0" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
+        <!-- Microphone capture for the optional audio expression assist. Windows-only, and the
+             feature degrades to "unavailable" everywhere else rather than failing to build. -->
+        <PackageReference Include="NAudio" Version="2.3.0" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />
 
         <!-- macOS-specific -->
         <PackageReference Include="OpenCvSharp4.runtime.osx.10.15-universal" Version="4.7.0.20230224" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />

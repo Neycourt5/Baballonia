@@ -130,6 +130,49 @@
         </StackPanel>
       </controls:ContentExample>
 
+      <!-- ========================== AUDIO ASSIST ======================== -->
+      <!--
+        Strictly additive, and off by default. This can make a movement the tracker already sees
+        bigger; it can never create one. If the tracker says you are not smiling, no amount of
+        shouting puts a smile on your avatar - which is the difference between this and the
+        audio-driven mouth animation it is meant to avoid becoming.
+      -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Audio" />
+
+          <CheckBox
+              Content="Enhance expressions while speaking"
+              IsChecked="{Binding AudioAssistEnabled}" />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="Uses your microphone's loudness to make mouth movements the camera already sees a little larger, so speech reads more clearly across a room. It never invents an expression, only amplifies a real one, and it is ignored entirely when you are not talking. Nothing is recorded or uploaded." />
+
+          <StackPanel IsVisible="{Binding AudioAssistEnabled}" Spacing="6">
+            <TextBlock Text="{Binding AudioStrength, StringFormat='Strength: {0:F0}%'}" />
+            <Slider
+                Maximum="100"
+                Minimum="0"
+                TickFrequency="10"
+                Value="{Binding AudioStrength}" />
+
+            <TextBlock
+                IsVisible="{Binding AudioStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                Opacity="0.7"
+                Text="{Binding AudioStatus}"
+                TextWrapping="Wrap" />
+
+            <TextBlock
+                FontFamily="Consolas,Menlo,monospace"
+                IsVisible="{Binding ShowAdvanced}"
+                Opacity="0.7"
+                Text="{Binding AudioDiagnostics}" />
+          </StackPanel>
+        </StackPanel>
+      </controls:ContentExample>
+
       <!-- ====================== GUIDED CALIBRATION ===================== -->
       <!--
         The only place the dataset gets a correct *non-zero* label. Neutral recordings teach the

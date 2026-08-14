@@ -2,8 +2,13 @@
 using Baballonia.Contracts;
 using Baballonia.Desktop.Calibration;
 using Baballonia.Desktop.Captures;
+using Baballonia.Services.Personalization.Audio;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using System;
+#if WINDOWS
+using Baballonia.Desktop.Audio;
+#endif
 using System.Threading;
 using Velopack;
 using TrainerService = Baballonia.Desktop.Calibration.TrainerService;
@@ -47,6 +52,15 @@ sealed class Program
             collection.AddSingleton<ITrainerService, TrainerService>();
             collection.AddSingleton<EyeCaptureStepFactory>();
             collection.AddSingleton<EyeCalibration>();
+
+#if WINDOWS
+            // Microphone capture for the optional audio expression assist. Registered here because
+            // capture is platform-specific; every other platform keeps the core's null source, which
+            // reports silence and leaves the enhancer as an exact passthrough.
+            collection.AddSingleton<Func<IAudioFeatureSource>>(sp => () =>
+                new MicrophoneFeatureSource(
+                    sp.GetRequiredService<ILoggerFactory>().CreateLogger<MicrophoneFeatureSource>()));
+#endif
         });
 
         try
