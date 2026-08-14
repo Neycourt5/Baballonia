@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Channels;
@@ -285,7 +284,7 @@ public sealed class DatasetRecorderService : IDisposable
             var framesDir = PersonalizationPaths.FramesDirectory(SessionId);
             var encodeParams = new[] { new ImageEncodingParam(ImwriteFlags.JpegQuality, JpegQuality) };
 
-            await using var labels = new StreamWriter(labelsPath, append: true, Encoding.UTF8);
+            await using var labels = new StreamWriter(labelsPath, append: true, PersonalizationPaths.Utf8NoBom);
 
             await foreach (var frame in _channel.Reader.ReadAllAsync())
             {
@@ -359,7 +358,8 @@ public sealed class DatasetRecorderService : IDisposable
 
             await File.WriteAllTextAsync(
                 PersonalizationPaths.SessionMetadataPath(SessionId),
-                JsonSerializer.Serialize(finalized, PersonalizationPaths.IndentedJson));
+                JsonSerializer.Serialize(finalized, PersonalizationPaths.IndentedJson),
+                PersonalizationPaths.Utf8NoBom);
 
             return new SessionSummary(
                 SessionId,

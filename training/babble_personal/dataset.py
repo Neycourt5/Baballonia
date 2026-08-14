@@ -25,6 +25,19 @@ import numpy as np
 
 from . import schema
 
+#: Recorded JSON is UTF-8, but recordings made before the recorder was fixed begin with a UTF-8 BOM
+#: (``EF BB BF``): the labels writer was constructed with ``Encoding.UTF8``, whose preamble *is* the
+#: BOM. ``utf-8-sig`` consumes a leading BOM and is otherwise identical to ``utf-8``, so old and new
+#: recordings both read cleanly. It is deliberately narrow - a BOM anywhere other than byte 0 still
+#: fails loudly, because no writer can legitimately put one there and silently stripping stray
+#: control characters would hide real corruption instead of surfacing it.
+JSON_ENCODING = "utf-8-sig"
+
+
+def read_json_text(path: Path) -> str:
+    """Read a recorded JSON/JSONL file, transparently consuming a leading BOM if one is present."""
+    return path.read_text(encoding=JSON_ENCODING)
+
 
 @dataclass(frozen=True)
 class FrameRecord:
@@ -83,7 +96,7 @@ def load_session(path: Path, *, verify_schema: bool = True) -> Session:
     if not labels_path.exists():
         raise FileNotFoundError(f"{path} has no labels.jsonl")
 
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata = json.loads(read_json_text(metadata_path))
 
     if verify_schema:
         recorded = metadata.get("ExpressionSchemaSha256")
@@ -94,7 +107,7 @@ def load_session(path: Path, *, verify_schema: bool = True) -> Session:
     frames: list[FrameRecord] = []
     missing = 0
 
-    for line in labels_path.read_text(encoding="utf-8").splitlines():
+    for line in read_json_text(labels_path).splitlines():
         line = line.strip()
         if not line:
             continue

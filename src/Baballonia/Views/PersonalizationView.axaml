@@ -135,6 +135,20 @@
         <StackPanel Spacing="10">
           <TextBlock FontSize="16" FontWeight="SemiBold" Text="Train" />
 
+          <StackPanel IsVisible="{Binding !IsBusy}" Spacing="6">
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <TextBlock VerticalAlignment="Center" Text="Model" Width="70" />
+              <ComboBox Width="300" SelectedIndex="{Binding SelectedModelIndex}">
+                <ComboBoxItem Content="A - expressions only (recommended)" />
+                <ComboBoxItem Content="B - expressions + camera image (experimental)" />
+              </ComboBox>
+            </StackPanel>
+            <TextBlock
+                Opacity="0.7"
+                Text="{Binding ModelChoiceDescription}"
+                TextWrapping="Wrap" />
+          </StackPanel>
+
           <Button
               Command="{Binding TrainCommand}"
               Content="Train My Face Model"
@@ -179,6 +193,12 @@
       <controls:ContentExample>
         <StackPanel Spacing="10">
           <TextBlock FontSize="16" FontWeight="SemiBold" Text="Compare" />
+
+          <TextBlock
+              FontWeight="SemiBold"
+              IsVisible="{Binding ActiveModelName, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Text="{Binding ActiveModelName}"
+              TextWrapping="Wrap" />
 
           <StackPanel Orientation="Horizontal" Spacing="12">
             <RadioButton

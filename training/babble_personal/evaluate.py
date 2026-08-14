@@ -46,6 +46,8 @@ class NeutralReport:
     stock_mean_activation: float
     personal_mean_activation: float
     worst_offenders: list[tuple[str, float, float]]  # name, stock rate, personal rate
+    stock_jitter: float = 0.0
+    personal_jitter: float = 0.0
 
 
 def per_expression_mae(
@@ -84,6 +86,23 @@ def per_expression_mae(
     return reports
 
 
+def resting_jitter(values: np.ndarray) -> float:
+    """Mean frame-to-frame movement while the face is still - the "wiggle" the user actually sees.
+
+    A model can score a perfect false-activation rate and still feel bad: an expression that hovers
+    just under the threshold but shivers every frame reads as a twitching face. Averaging the
+    absolute change between consecutive frames catches that, and it is the one number that moved
+    when users complained about wiggle while every other metric said the model was fine.
+
+    Assumes ``values`` are consecutive frames of one session, which is how the neutral report feeds
+    it. Concatenating sessions adds one meaningless step per boundary, which is negligible over
+    thousands of frames.
+    """
+    if len(values) < 2:
+        return 0.0
+    return float(np.abs(np.diff(values, axis=0)).mean())
+
+
 def neutral_report(
     stock: np.ndarray,
     personal: np.ndarray,
@@ -111,6 +130,8 @@ def neutral_report(
         stock_mean_activation=float(stock.mean()),
         personal_mean_activation=float(personal.mean()),
         worst_offenders=[row for row in per_dim[:top_n] if row[1] > 0 or row[2] > 0],
+        stock_jitter=resting_jitter(stock),
+        personal_jitter=resting_jitter(personal),
     )
 
 
@@ -185,6 +206,9 @@ def format_report(
                      f"   personal {neutral.personal_false_activation_rate:.4f}")
         lines.append(f"  mean activation        stock {neutral.stock_mean_activation:.4f}"
                      f"   personal {neutral.personal_mean_activation:.4f}")
+        lines.append(f"  resting jitter         stock {neutral.stock_jitter:.4f}"
+                     f"   personal {neutral.personal_jitter:.4f}"
+                     f"   {'(smoother)' if neutral.personal_jitter <= neutral.stock_jitter else '(WIGGLIER)'}")
 
         if neutral.worst_offenders:
             lines.append("  worst offenders (stock -> personal):")

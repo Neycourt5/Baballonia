@@ -129,6 +129,38 @@ def parameter_count(model: nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
 
 
+def consistency_penalty(residual: torch.Tensor, residual_augmented: torch.Tensor) -> torch.Tensor:
+    """How much the residual moves when only the image's *appearance* changed.
+
+    Zero is the goal: the correction the adapter applies should depend on the shape of the face, not
+    on how bright the room is. Measured on real data, an unregularized model B read illumination as
+    expression (brightness/JawOpen correlation -0.56 on a held-out neutral session), which is the
+    "my mouth looks slightly open sometimes" failure exactly.
+
+    Squared rather than absolute, so the rare large disagreements - the visible glitches - are what
+    gets punished, not the constant small ones.
+    """
+    return (residual - residual_augmented).pow(2).mean()
+
+
+def temporal_penalty(residual: torch.Tensor, previous_residual: torch.Tensor,
+                     valid: torch.Tensor) -> torch.Tensor:
+    """How much the residual jumps between consecutive frames of the same session.
+
+    This penalizes jitter in the *correction*, never in the output. The adapter's job is to undo a
+    per-user bias, which changes slowly if at all; fast movement should keep coming from the stock
+    model. So this can be pushed fairly hard without making the face feel laggy - it constrains the
+    thing that should be smooth and leaves the thing that should be quick alone.
+
+    ``valid`` masks out the first frame of each session, which has no predecessor.
+    """
+    if valid.sum() == 0:
+        return residual.new_zeros(())
+
+    delta = (residual - previous_residual).pow(2).mean(dim=1)
+    return (delta * valid).sum() / valid.sum().clamp_min(1.0)
+
+
 def masked_residual_loss(
     predicted: torch.Tensor,
     residual: torch.Tensor,

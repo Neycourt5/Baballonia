@@ -39,6 +39,8 @@ public sealed record TrainingSummary(
     double? MeanPersonalMae,
     double? NeutralStockFalseActivation,
     double? NeutralPersonalFalseActivation,
+    double? NeutralStockJitter,
+    double? NeutralPersonalJitter,
     string Verdict,
     IReadOnlyList<string> WorstRegressions);
 
@@ -416,6 +418,8 @@ public sealed class PersonalTrainingService(
                 MeanPersonalMae: Number("mean_personal_mae"),
                 NeutralStockFalseActivation: Nested("neutral", "stock_false_activation_rate"),
                 NeutralPersonalFalseActivation: Nested("neutral", "personal_false_activation_rate"),
+                NeutralStockJitter: Nested("neutral", "stock_jitter"),
+                NeutralPersonalJitter: Nested("neutral", "personal_jitter"),
                 Verdict: root.TryGetProperty("verdict", out var verdict) ? verdict.GetString() ?? "unclear" : "unclear",
                 WorstRegressions: regressions);
         }

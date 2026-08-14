@@ -280,10 +280,10 @@ public sealed class PersonalizationEnvironment
         if (modelManager.IsActive)
         {
             var metadata = modelManager.LoadedMetadata;
-            return new SetupItem(true, "Personal model: Active",
-                metadata == null
-                    ? modelManager.ModelPath
-                    : $"{metadata.AdapterType}, trained {metadata.TrainedUtc ?? "unknown"}");
+            return metadata == null
+                ? new SetupItem(true, "Personal model: Active", modelManager.ModelPath)
+                : new SetupItem(true, $"Personal model: Active - {metadata.DisplayName}",
+                    $"{metadata.AdapterType}, trained {metadata.TrainedUtc ?? "unknown"}");
         }
 
         if (!modelManager.Enabled)

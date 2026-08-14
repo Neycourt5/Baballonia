@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from . import dataset as ds
+from . import augment, dataset as ds
 from . import evaluate, labels as lbl, models, schema
 
 
@@ -36,30 +36,102 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=5, help="Early-stopping patience in epochs")
     parser.add_argument("--no-speech-pseudo-labels", action="store_true",
                         help="Drop the weak stock-derived labels from speech sessions")
+    parser.add_argument("--consistency", type=float, default=0.5,
+                        help="Weight on illumination invariance (model B only; 0 disables). Stops "
+                             "the image branch reading brightness as expression.")
+    parser.add_argument("--temporal", type=float, default=0.5,
+                        help="Weight on residual smoothness between consecutive frames (0 disables). "
+                             "Damps correction jitter without slowing the output down.")
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args(argv)
 
 
-def _tensors(sessions, label_set: lbl.LabelSet, need_images: bool) -> TensorDataset:
-    stock = torch.from_numpy(label_set.stock)
-    targets = torch.from_numpy(label_set.targets)
-    weights = torch.from_numpy(label_set.weights)
+def _previous_frame_index(sessions) -> np.ndarray:
+    """For each row, the row of the frame before it *within the same session*.
 
-    if need_images:
-        images = torch.from_numpy(ds.load_images(sessions))
-    else:
-        # Keep the signature identical for both models without paying for image loading.
-        images = torch.zeros((len(label_set), 1, 1, 1), dtype=torch.float32)
+    The first frame of each session points at itself and is masked out by ``_previous_valid``.
+    Crossing a session boundary would pair two unrelated frames and ask the smoothness penalty to
+    make a cut look continuous, which is worse than not applying it at all.
+    """
+    previous, offset = [], 0
+    for session in sessions:
+        for i in range(len(session)):
+            previous.append(offset if i == 0 else offset + i - 1)
+        offset += len(session)
+    return np.asarray(previous, dtype=np.int64)
 
-    return TensorDataset(images, stock, targets, weights)
+
+def _previous_valid(sessions) -> np.ndarray:
+    valid, offset = [], 0
+    for session in sessions:
+        for i in range(len(session)):
+            valid.append(0.0 if i == 0 else 1.0)
+        offset += len(session)
+    return np.asarray(valid, dtype=np.float32)
 
 
-def _run_epoch(model, loader, optimizer, shrinkage, train: bool) -> dict[str, float]:
+class _Batch:
+    """Everything one training step needs, gathered by row index.
+
+    Batching indices rather than tensors is what makes the temporal penalty possible: a shuffled
+    batch of rows can still look up each row's predecessor in the full tensors. It also avoids
+    duplicating the image tensor, which is the largest thing in memory for model B.
+    """
+
+    def __init__(self, sessions, label_set: lbl.LabelSet, need_images: bool):
+        self.stock = torch.from_numpy(label_set.stock)
+        self.targets = torch.from_numpy(label_set.targets)
+        self.weights = torch.from_numpy(label_set.weights)
+        self.previous = torch.from_numpy(_previous_frame_index(sessions))
+        self.valid = torch.from_numpy(_previous_valid(sessions))
+
+        if need_images:
+            self.images = torch.from_numpy(ds.load_images(sessions))
+        else:
+            # Keep the signature identical for both models without paying for image loading.
+            self.images = torch.zeros((len(label_set), 1, 1, 1), dtype=torch.float32)
+
+    def __len__(self) -> int:
+        return len(self.stock)
+
+    def loader(self, batch_size: int, shuffle: bool) -> DataLoader:
+        return DataLoader(TensorDataset(torch.arange(len(self))),
+                          batch_size=batch_size, shuffle=shuffle)
+
+
+def _run_epoch(
+    model,
+    data: "_Batch",
+    loader,
+    optimizer,
+    shrinkage: float,
+    train: bool,
+    *,
+    consistency: float = 0.0,
+    temporal: float = 0.0,
+    generator: torch.Generator | None = None,
+) -> dict[str, float]:
+    """One pass over the data.
+
+    Beyond the supervised fit there are two regularizers, both aimed at the same complaint - "at
+    rest my jaw wiggles and my mouth looks slightly open" - and both phrased as constraints on the
+    *residual* rather than the output, so neither can make the face feel sluggish:
+
+    * **consistency** - the residual must not change when only illumination changed.
+    * **temporal** - the residual must not jump between consecutive frames of a session.
+
+    Both are skipped at validation time: they are training pressure, not something to score.
+    """
     model.train(train)
-    totals = {"loss": 0.0, "fit": 0.0, "shrink": 0.0}
+    totals = {"loss": 0.0, "fit": 0.0, "shrink": 0.0, "consistency": 0.0, "temporal": 0.0}
     batches = 0
 
-    for images, stock, targets, weights in loader:
+    uses_image = getattr(model, "uses_image", False)
+
+    for (index,) in loader:
+        images, stock = data.images[index], data.stock[index]
+        targets, weights = data.targets[index], data.weights[index]
+
         with torch.set_grad_enabled(train):
             residual = model.residual(images, stock)
             predicted = torch.clamp(stock + residual, 0.0, 1.0)
@@ -67,10 +139,34 @@ def _run_epoch(model, loader, optimizer, shrinkage, train: bool) -> dict[str, fl
                 predicted, residual, targets, weights, shrinkage=shrinkage
             )
 
+            consistency_value = 0.0
+            if train and consistency > 0 and uses_image:
+                jittered = augment.photometric_jitter(images, generator=generator)
+                # Same stock vector on purpose: the model must not be able to satisfy this by
+                # leaning on stock, only by making the image branch illumination-invariant.
+                penalty = models.consistency_penalty(residual, model.residual(jittered, stock))
+                loss = loss + consistency * penalty
+                consistency_value = float(penalty.detach())
+
+            temporal_value = 0.0
+            if train and temporal > 0:
+                previous = data.previous[index]
+                penalty = models.temporal_penalty(
+                    residual,
+                    model.residual(data.images[previous], data.stock[previous]),
+                    data.valid[index],
+                )
+                loss = loss + temporal * penalty
+                temporal_value = float(penalty.detach())
+
         if train:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+
+        parts["consistency"] = consistency_value
+        parts["temporal"] = temporal_value
+        parts["loss"] = float(loss.detach())
 
         for key in totals:
             totals[key] += parts[key]
@@ -127,21 +223,27 @@ def main(argv: list[str] | None = None) -> int:
 
     model = models.build_model(args.model)
     need_images = model.uses_image
+
+    # Augmentation draws from its own generator so a run stays reproducible from --seed.
+    generator = torch.Generator().manual_seed(args.seed)
     print(f"\nModel: {model.adapter_type} ({models.parameter_count(model):,} parameters)")
 
-    train_loader = DataLoader(
-        _tensors(train_sessions, train_labels, need_images),
-        batch_size=args.batch_size, shuffle=True,
-    )
+    train_data = _Batch(train_sessions, train_labels, need_images)
+    train_loader = train_data.loader(args.batch_size, shuffle=True)
+
+    consistency = args.consistency if need_images else 0.0
+    if need_images and consistency > 0:
+        print(f"  illumination consistency: {consistency} (model B sees pixels, so it needs this)")
+    if args.temporal > 0:
+        print(f"  residual smoothness: {args.temporal}")
 
     val_labels = None
+    val_data = None
     val_loader = None
     if val_sessions:
         val_labels = lbl.build_labels(val_sessions, use_speech_pseudo_labels=use_pseudo)
-        val_loader = DataLoader(
-            _tensors(val_sessions, val_labels, need_images),
-            batch_size=args.batch_size, shuffle=False,
-        )
+        val_data = _Batch(val_sessions, val_labels, need_images)
+        val_loader = val_data.loader(args.batch_size, shuffle=False)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -157,11 +259,15 @@ def main(argv: list[str] | None = None) -> int:
     _stage("training")
     print(f"\nTraining for up to {args.epochs} epochs (early stop patience {args.patience})")
     for epoch in range(args.epochs):
-        train_stats = _run_epoch(model, train_loader, optimizer, args.shrinkage, train=True)
+        train_stats = _run_epoch(
+            model, train_data, train_loader, optimizer, args.shrinkage, train=True,
+            consistency=consistency, temporal=args.temporal, generator=generator,
+        )
         scheduler.step()
 
         if val_loader is not None:
-            val_stats = _run_epoch(model, val_loader, optimizer, args.shrinkage, train=False)
+            val_stats = _run_epoch(
+                model, val_data, val_loader, optimizer, args.shrinkage, train=False)
             score = val_stats["fit"]
             line = (f"  epoch {epoch + 1:>3}  train {train_stats['loss']:.5f}"
                     f"  val_fit {val_stats['fit']:.5f}  shrink {train_stats['shrink']:.5f}")
@@ -297,6 +403,8 @@ def _build_summary(
             "personal_false_activation_rate": neutral.personal_false_activation_rate,
             "stock_mean_activation": neutral.stock_mean_activation,
             "personal_mean_activation": neutral.personal_mean_activation,
+            "stock_jitter": neutral.stock_jitter,
+            "personal_jitter": neutral.personal_jitter,
         }
 
     summary["verdict"] = _verdict(summary)

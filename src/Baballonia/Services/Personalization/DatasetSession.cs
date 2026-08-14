@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -145,6 +146,23 @@ public static class PersonalizationPaths
     /// <summary>e.g. 20260813_193000_guided - sorts chronologically and says what it is at a glance.</summary>
     public static string NewSessionId(SessionType type, DateTime utcNow) =>
         $"{utcNow:yyyyMMdd_HHmmss}_{type.ToString().ToLowerInvariant()}";
+
+    /// <summary>
+    /// UTF-8 with no byte-order mark, for every personalization JSON file we write.
+    /// <para>
+    /// <c>Encoding.UTF8</c> is <i>not</i> this: its preamble is the BOM, so a <see cref="StreamWriter"/>
+    /// built with it emits <c>EF BB BF</c> at the head of a new file. JSON and JSONL readers are not
+    /// required to tolerate that, and Python's <c>json.loads</c> rejects it outright - which is
+    /// exactly how it broke the trainer. Writing no BOM keeps the files valid for every reader.
+    /// </para>
+    /// <para>
+    /// Also passed on append. <see cref="StreamWriter"/> only skips the preamble when it can seek and
+    /// finds a non-empty file, so a BOM-emitting encoding on a fresh-but-reopened file could put one
+    /// mid-stream. With an empty preamble that hazard does not exist at all, by construction rather
+    /// than by relying on framework behavior.
+    /// </para>
+    /// </summary>
+    public static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
 
     public static readonly JsonSerializerOptions Json = new()
     {

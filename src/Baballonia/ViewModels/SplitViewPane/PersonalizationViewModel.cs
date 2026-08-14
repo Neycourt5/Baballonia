@@ -74,6 +74,37 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private string _notes = "";
 
     // ---- training -----------------------------------------------------------------------------
+
+    /// <summary>
+    /// Which adapter to train. 0 = model A (output-only), 1 = model B (image-conditioned).
+    ///
+    /// A is the default because it is the honest baseline: it sees only the stock 45 values, so it
+    /// can fix systematic bias and cross-talk but nothing that needs to look at the face. B also
+    /// sees the frame, which is the only way to fix errors where the stock outputs are ambiguous -
+    /// at the cost of a slower, more memory-hungry training run and more capacity to overfit. Train
+    /// both and keep whichever wins on your own held-out recordings.
+    /// </summary>
+    [ObservableProperty] private int _selectedModelIndex;
+
+    [ObservableProperty] private string _modelChoiceDescription = OutputOnlyDescription;
+
+    private const string OutputOnlyDescription =
+        "Learns from the 45 expression values only. Fast to train, small, and hard to overfit - " +
+        "it is very good at removing a constant bias, but it never sees your face.";
+
+    private const string ImageConditionedDescription =
+        "Also looks at the camera frame, so it can correct errors the 45 values alone cannot " +
+        "explain. Training takes longer and needs a few GB of RAM. Experimental: check the result " +
+        "against model A before trusting it.";
+
+    /// <summary>The trainer's --model flag for the current selection.</summary>
+    private string SelectedModelKind => TrainingModelChoice.KindForIndex(SelectedModelIndex);
+
+    partial void OnSelectedModelIndexChanged(int value) =>
+        ModelChoiceDescription = value == TrainingModelChoice.ImageConditionedIndex
+            ? ImageConditionedDescription
+            : OutputOnlyDescription;
+
     [ObservableProperty] private bool _isBusy;
     [ObservableProperty] private string _busyMessage = "";
     [ObservableProperty] private bool _canTrain;
@@ -85,6 +116,14 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private string _detailLog = "";
 
     // ---- comparison ---------------------------------------------------------------------------
+
+    /// <summary>
+    /// Which adapter is loaded right now, read from the installed model's own metadata. The Train
+    /// dropdown cannot answer this: it holds the choice for the *next* run, so after switching it
+    /// without retraining the two would disagree. This is the authoritative one.
+    /// </summary>
+    [ObservableProperty] private string _activeModelName = "";
+
     [ObservableProperty] private bool _personalModelEnabled;
     [ObservableProperty] private double _personalStrength = 100;
     [ObservableProperty] private bool _showAdvanced;
@@ -156,6 +195,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         ToolsReady = setup.TrainingTools.Ready;
         ModelStatus = setup.Model.Summary;
         ModelReady = setup.Model.Ready;
+
+        var loaded = _modelManager.LoadedMetadata;
+        ActiveModelName = loaded == null
+            ? ""
+            : $"Currently loaded: {loaded.DisplayName}";
 
         // Offer setup only when it can actually succeed: scripts located and Python available.
         CanSetUpTools = !setup.TrainingTools.Ready
@@ -260,9 +304,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [RelayCommand]
     private async Task TrainAsync()
     {
+        var kind = SelectedModelKind;
+
         await RunWorkAsync(
             "Starting...",
-            (progress, token) => _trainingService.TrainAsync("a", progress, token));
+            (progress, token) => _trainingService.TrainAsync(kind, progress, token));
 
         PersonalModelEnabled = _modelManager.Enabled;
     }
@@ -350,6 +396,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         var lines = new List<string>();
 
+        // Which architecture actually produced this result. Without it the dropdown is the only
+        // hint, and that shows the *next* run's choice rather than what was just trained.
+        if (!string.IsNullOrEmpty(summary.AdapterType))
+            lines.Add($"Trained: {TrainingModelChoice.DisplayName(summary.AdapterType)}.");
+
         if (summary.NeutralStockFalseActivation is { } stockNeutral &&
             summary.NeutralPersonalFalseActivation is { } personalNeutral)
         {
@@ -359,6 +410,15 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         if (summary.MeanStockMae is { } stockMae && summary.MeanPersonalMae is { } personalMae)
             lines.Add($"Average expression error: {stockMae:F3} before, {personalMae:F3} after.");
+
+        // The "my jaw wiggles while resting" number. A model can score a perfect false-activation
+        // rate and still shiver just under the threshold, so this is reported on its own.
+        if (summary.NeutralStockJitter is { } stockJitter &&
+            summary.NeutralPersonalJitter is { } personalJitter)
+        {
+            lines.Add($"Twitchiness while resting: {stockJitter:F4} before, {personalJitter:F4} after " +
+                      $"({(personalJitter <= stockJitter ? "steadier" : "shakier")}).");
+        }
 
         lines.Add($"{summary.ExpressionsImproved} expressions improved, " +
                   $"{summary.ExpressionsRegressed} got worse" +

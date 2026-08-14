@@ -22,6 +22,13 @@ public sealed record PersonalModelMetadata(
     string? BaseModelMd5,
     string? RoiSettings)
 {
+    /// <summary>
+    /// "Model A" / "Model B" plus what that means, for the status line. The adapter type is the
+    /// only reliable record of which architecture is actually installed - the training dropdown
+    /// shows what the *next* run will use, which is not necessarily what is loaded right now.
+    /// </summary>
+    public string DisplayName => TrainingModelChoice.DisplayName(AdapterType);
+
     public static PersonalModelMetadata FromSession(InferenceSession session)
     {
         var map = session.ModelMetadata.CustomMetadataMap;

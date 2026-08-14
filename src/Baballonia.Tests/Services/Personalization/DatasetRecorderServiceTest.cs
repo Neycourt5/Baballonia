@@ -285,6 +285,90 @@ public class DatasetRecorderServiceTest
         Assert.AreEqual(0f, label.Cue.Target[4], 1e-6);
     }
 
+
+    /// <summary>
+    /// A BOM at the head of labels.jsonl broke the first real training run: Python's json.loads
+    /// rejects it outright ("Unexpected UTF-8 BOM"). The cause was <c>Encoding.UTF8</c>, whose
+    /// preamble *is* the BOM, being handed to the StreamWriter. Both files must stay BOM-free.
+    /// </summary>
+    [TestMethod]
+    public async Task RecordedJsonFiles_ContainNoByteOrderMark()
+    {
+        var id = StartSession();
+        PublishFrames(3);
+        await _recorder.StopSessionAsync();
+
+        foreach (var path in new[]
+                 {
+                     PersonalizationPaths.LabelsPath(id),
+                     PersonalizationPaths.SessionMetadataPath(id)
+                 })
+        {
+            var bytes = await File.ReadAllBytesAsync(path);
+
+            Assert.IsTrue(bytes.Length >= 3, $"{Path.GetFileName(path)} is unexpectedly short.");
+            Assert.IsFalse(
+                bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF,
+                $"{Path.GetFileName(path)} starts with a UTF-8 BOM; strict JSON readers reject it.");
+
+            // A BOM anywhere else would be worse still, so assert on the whole file rather than
+            // only its head.
+            Assert.AreEqual(-1, IndexOfBom(bytes),
+                $"{Path.GetFileName(path)} contains a BOM at byte {IndexOfBom(bytes)}.");
+        }
+    }
+
+    /// <summary>
+    /// The labels writer opens with <c>append: true</c>. StreamWriter only suppresses its preamble
+    /// when it can seek and finds a non-empty file, so a BOM-emitting encoding could put a BOM
+    /// mid-stream if a session's file were ever reopened while still empty. An encoding whose
+    /// preamble is empty makes that impossible by construction, which is what this pins down.
+    /// </summary>
+    [TestMethod]
+    public async Task Utf8NoBom_NeverEmitsBom_AcrossReopenAndAppend()
+    {
+        Assert.AreEqual(0, PersonalizationPaths.Utf8NoBom.GetPreamble().Length,
+            "The personalization encoding must have an empty preamble.");
+
+        var path = Path.Combine(Path.GetTempPath(), $"babble-bom-{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            // Three separate opens: one on a missing file, one on an empty file, one on a
+            // non-empty file. Only the encoding's preamble decides whether a BOM appears.
+            for (var open = 0; open < 3; open++)
+            {
+                await using var writer =
+                    new StreamWriter(path, append: true, PersonalizationPaths.Utf8NoBom);
+
+                if (open == 1)
+                    continue; // reopened, wrote nothing: the empty-file case.
+
+                await writer.WriteLineAsync($"{{\"i\":{open},\"stock\":[]}}");
+            }
+
+            var bytes = await File.ReadAllBytesAsync(path);
+            Assert.AreEqual(-1, IndexOfBom(bytes),
+                $"A BOM appeared at byte {IndexOfBom(bytes)} after reopening the file.");
+
+            foreach (var line in await File.ReadAllLinesAsync(path))
+                Assert.IsNotNull(JsonSerializer.Deserialize<FrameLabel>(line),
+                    $"Line did not parse as strict JSON: {line}");
+        }
+        finally
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+    }
+
+    /// <summary>Byte offset of the first UTF-8 BOM, or -1. Anywhere at all is a defect.</summary>
+    private static int IndexOfBom(byte[] bytes)
+    {
+        for (var i = 0; i + 2 < bytes.Length; i++)
+            if (bytes[i] == 0xEF && bytes[i + 1] == 0xBB && bytes[i + 2] == 0xBF)
+                return i;
+        return -1;
+    }
+
     private static float[] BuildTarget(float value, params int[] dims)
     {
         var v = new float[N];

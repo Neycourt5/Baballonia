@@ -39,6 +39,7 @@ public class PersonalTrainingOrchestrationTest
 
     private readonly List<string> _createdSessions = [];
     private string? _modelBackup;
+    private string? _previousBackup;
     private HashSet<string> _runsBefore = [];
 
     [TestInitialize]
@@ -49,6 +50,30 @@ public class PersonalTrainingOrchestrationTest
         _runsBefore = Directory.Exists(runs)
             ? Directory.EnumerateDirectories(runs).ToHashSet(StringComparer.OrdinalIgnoreCase)
             : [];
+
+        // Take the user's installed personal model out of harm's way FIRST, and record that it
+        // existed. Cleanup uses _modelBackup to decide between "restore what was here" and "delete
+        // the file this test installed" - so failing to set it here silently turns cleanup into a
+        // deletion of a real, expensively-trained model. That is exactly what used to happen.
+        // These tests run against the real data directories, so this must hold even when the test
+        // body skips: [TestCleanup] runs after Assert.Inconclusive too.
+        _modelBackup = null;
+        var installed = PersonalizationPaths.DefaultPersonalModelPath;
+        if (File.Exists(installed))
+        {
+            _modelBackup = Path.Combine(Path.GetTempPath(),
+                $"babble-personal-model-backup-{Guid.NewGuid():N}.onnx");
+            File.Copy(installed, _modelBackup, overwrite: true);
+        }
+
+        _previousBackup = null;
+        var previousRollback = Path.ChangeExtension(installed, ".previous.onnx");
+        if (File.Exists(previousRollback))
+        {
+            _previousBackup = Path.Combine(Path.GetTempPath(),
+                $"babble-personal-previous-backup-{Guid.NewGuid():N}.onnx");
+            File.Copy(previousRollback, _previousBackup, overwrite: true);
+        }
     }
 
     /// <summary>
@@ -76,10 +101,18 @@ public class PersonalTrainingOrchestrationTest
                 File.Delete(model);
             }
 
-            // Installing keeps one rollback copy; that is test residue here.
+            // Installing keeps one rollback copy. Restore the user's if there was one; otherwise
+            // whatever is there now is this test's residue.
             var previous = Path.ChangeExtension(model, ".previous.onnx");
-            if (File.Exists(previous))
+            if (_previousBackup != null)
+            {
+                File.Copy(_previousBackup, previous, overwrite: true);
+                File.Delete(_previousBackup);
+            }
+            else if (File.Exists(previous))
+            {
                 File.Delete(previous);
+            }
         }
         catch { /* best effort */ }
 
@@ -179,6 +212,51 @@ public class PersonalTrainingOrchestrationTest
             pipelineManager, settings.Object, NullLogger<PersonalModelManager>.Instance);
 
         return (manager, pipeline);
+    }
+
+
+    /// <summary>
+    /// The cleanup in this class used to delete the user's real installed personal model, because
+    /// <c>_modelBackup</c> was never populated and cleanup's "no backup" branch is a delete. It ran
+    /// on every test in the class, including skipped ones, so simply running the suite destroyed a
+    /// trained model that takes minutes of recording and training to reproduce.
+    ///
+    /// This test stands in for the user's model: it plants a file at the real install path, lets a
+    /// full initialize/cleanup cycle run over it, and asserts the file survived byte for byte.
+    /// </summary>
+    [TestMethod]
+    public void Cleanup_RestoresAnAlreadyInstalledModel_RatherThanDeletingIt()
+    {
+        var installed = PersonalizationPaths.DefaultPersonalModelPath;
+
+        if (File.Exists(installed))
+            Assert.Inconclusive("A real personal model is installed; not touching it to run this test.");
+
+        Directory.CreateDirectory(Path.GetDirectoryName(installed)!);
+
+        // Stand-in for a real trained model. Contents are arbitrary but must come back unchanged.
+        var sentinel = new byte[] { 0x42, 0x41, 0x42, 0x42, 0x4C, 0x45, 0x00, 0x01, 0x02, 0x03 };
+        File.WriteAllBytes(installed, sentinel);
+
+        try
+        {
+            // A second initialize/cleanup cycle, exactly as another test method in this class
+            // would trigger. Initialize must notice the file; Cleanup must put it back.
+            Initialize();
+            Cleanup();
+
+            Assert.IsTrue(File.Exists(installed),
+                "Cleanup deleted an already-installed personal model. Retraining one is expensive; " +
+                "the test suite must never destroy user data.");
+            CollectionAssert.AreEqual(sentinel, File.ReadAllBytes(installed),
+                "The restored model does not match what was installed before the test.");
+        }
+        finally
+        {
+            if (File.Exists(installed)) File.Delete(installed);
+            var previous = Path.ChangeExtension(installed, ".previous.onnx");
+            if (File.Exists(previous)) File.Delete(previous);
+        }
     }
 
     [TestMethod]
