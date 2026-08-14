@@ -5,10 +5,9 @@ A practical guide to training Baballonia to recognise **your** face on **your** 
 This is not slider calibration. You record real footage of your face, a small model learns where the
 stock model gets your expressions wrong, and that correction runs live in front of VRChat.
 
-> **Status:** capture, training and runtime all work, and the whole thing is driven from one page
-> in the app — no terminal needed. Avatar-guided calibration is built at the plumbing level but the
-> on-screen cue sequence is not written yet, so today you record Neutral and Speech sessions.
-> See [What Doesn't Exist Yet](#10-what-doesnt-exist-yet).
+> **Status:** capture, training, runtime, quick corrections, guided jaw calibration and the optional
+> audio enhancement all work, and the whole thing is driven from one page in the app — no terminal
+> needed. See [What Doesn't Exist Yet](#13-what-doesnt-exist-yet) for the honest gaps.
 
 ---
 
@@ -22,6 +21,10 @@ Everything below is detail. The actual workflow is:
 4. Press **Record Speech** (talk ~1 min), **Stop**. Do it twice.
 5. Press **Train My Face Model** and wait a few minutes.
 6. Use the **Stock / Personal** switch to compare.
+
+Then, once that works: press **Start jaw calibration** and copy your avatar for a minute, and press
+**My mouth was closed** whenever you catch the tracker getting it wrong. Both make the next training
+run better in ways more Neutral recordings cannot.
 
 That's it. Nothing else in this document is required reading.
 
@@ -38,8 +41,11 @@ That's it. Nothing else in this document is required reading.
 7. [Improving it](#7-improving-it)
 8. [Troubleshooting](#8-troubleshooting)
 9. [Privacy and your data](#9-privacy-and-your-data)
-10. [What doesn't exist yet](#10-what-doesnt-exist-yet)
-11. [Command line (optional)](#11-command-line-optional)
+10. [Fixing mistakes as they happen](#10-fixing-mistakes-as-they-happen)
+11. [Guided calibration](#11-guided-calibration)
+12. [Audio enhancement (optional)](#12-audio-enhancement-optional)
+13. [What doesn't exist yet](#13-what-doesnt-exist-yet)
+14. [Command line (optional)](#14-command-line-optional)
 
 ---
 
@@ -176,12 +182,15 @@ Installing the model...
 It usually takes a few minutes. **Show Details** reveals the full technical log at any point, and
 **Cancel** stops it cleanly.
 
-By default this trains the **output-only** model, which learns purely from the relationships between
-the stock model's own numbers. It is the cheap, honest baseline: if it fixes your problem, there is
-no reason to use anything bigger. The image-conditioned model — which also looks at the camera
-picture and can fix mistakes that need visual information — is available from the command line
-(see [section 11](#11-command-line-optional)) and will get a UI option once there is real-world
-evidence it earns its keep.
+The **Model** dropdown picks what to train:
+
+| Choice | What it sees | When to use it |
+|---|---|---|
+| **A — expressions only** | The stock model's 45 numbers | The cheap, honest baseline. Very good at removing a constant bias; it never sees your face. |
+| **B — expressions + camera image** | Also the camera frame | Can fix mistakes that need visual information. Slower to train, more to overfit. |
+
+Train both and keep whichever wins on your own held-out recordings — the results screen tells you
+which did better. In practice B has been the better one here, but that is a measurement, not a rule.
 
 ---
 
@@ -339,24 +348,97 @@ returns to stock immediately.
 
 ---
 
-## 10. What doesn't exist yet
+## 10. Fixing mistakes as they happen
 
-Being explicit so nothing surprises you:
+The tracker will occasionally get something wrong — most commonly, your avatar's jaw hanging
+slightly open while your mouth is closed. That moment is the single most useful piece of training
+data you can produce, because it is a real failure of your real model, and you are the only one who
+knows it happened.
 
-- **Guided expression capture.** The plan calls for your VRChat avatar to demonstrate target
-  expressions while you imitate it, with the commanded values becoming training labels. The
-  mechanism that drives the avatar is built and tested; the on-screen cue sequence is not written.
-  Only Neutral and Speech recording is available today.
-- **The review/correction tool** for hand-fixing individual frames.
-- **Automatic hard-example capture** ("save the last 10 seconds, that looked wrong").
-- **Localization** — this page is English-only.
+The problem is timing: by the time you have noticed, the moment has passed. So the app keeps the
+last ten seconds of tracking in memory (nothing is written to disk unless you say so).
 
-Current measured inference cost, for reference: the output-only model adds about 0.03 ms per frame
-and the image-conditioned model about 0.2 ms, against a 10 ms budget.
+### Quick correction
+
+When you see it happen, press **My mouth was closed** on the Personalization page. That saves the
+last few seconds — 5 by default, or pick 2 or 10 — as an example of what went wrong.
+
+It records only the claim you actually made. "My mouth was closed" says something about your jaw and
+nothing about the rest of your face; if you happened to be smiling, that is left unlabelled rather
+than wrongly recorded as neutral.
+
+Collect a handful, then press **Train My Face Model** as usual. Corrections carry more weight than
+any other label, because they are the only ones a human checked.
+
+Nothing retrains automatically. A single correction is one noisy example; a dozen describe a
+pattern, and training when you choose makes it possible to tell whether they helped.
 
 ---
 
-## 11. Command line (optional)
+## 11. Guided calibration
+
+Recording yourself resting teaches the model what "nothing" looks like. Nothing in a Neutral or
+Speech session teaches it what a *correct* open jaw looks like — which is the other half of telling
+those two apart.
+
+Guided calibration fixes that. Your avatar opens its jaw by an amount the app chose, you copy it,
+and because the app knows what it asked for, it knows what your face should have been doing.
+
+1. Put your headset on with VRChat running and your avatar visible in a mirror.
+2. Press **Start jaw calibration** on the Personalization page.
+3. Copy what the avatar does. Hold each pose while it holds; relax when it relaxes.
+
+It takes about a minute. The on-screen text tells you what to do at each moment.
+
+**If it refuses to start** and mentions an OSC prefix, clear that setting first. With a prefix set
+your avatar would not move at all, and the recording would be labelled as expressions you never
+made — which is worse than not recording.
+
+Copying an avatar works far better than being told "open your jaw 50%", because nobody knows what
+half a jaw feels like, but everybody can imitate a face.
+
+---
+
+## 12. Audio enhancement (optional)
+
+Accurate tracking can still look *subtle* — your mouth is doing the right thing, just not very much
+of it, which reads as flat from across a room.
+
+**Personalization → Audio → Enhance expressions while speaking** uses your microphone's loudness to
+make mouth movements the camera already sees a little larger while you talk.
+
+It cannot invent an expression. If the tracker says you are not smiling, no amount of shouting puts
+a smile on your avatar — audio only scales up movement that is genuinely there. The camera stays the
+only thing deciding what your face is doing.
+
+Off by default. With it off, or with no microphone, tracking is exactly what it was. Nothing is
+recorded or uploaded; audio is analysed for loudness and pitch and immediately discarded.
+
+If the enhancement seems to arrive slightly before or after your voice, adjust the sync offset in
+settings (`AudioAssist_SyncOffsetMs`, default 50 ms).
+
+---
+
+## 13. What doesn't exist yet
+
+Being explicit so nothing surprises you:
+
+- **In-VR correction buttons.** Quick corrections are a desktop button today, so you have to peek
+  out of the headset. Driving it from an avatar toggle or a hotkey is planned.
+- **Guided calibration beyond the jaw.** Smile, frown, pucker and the rest are designed but not
+  built; the jaw routine comes first because it is the actual remaining problem.
+- **The review tool** for hand-fixing individual frames.
+- **Audio phoneme assist** (matching mouth shapes to speech sounds). Deliberately later — simple
+  loudness-based enhancement has to prove itself first.
+- **Localization** — this page is English-only.
+
+Measured costs, for reference, against a 10 ms per-frame budget: the output-only model adds about
+0.03 ms, the image-conditioned model about 0.2 ms, the correction buffer under 1 ms, and audio
+enhancement under 0.001 ms (its analysis runs on a separate thread).
+
+---
+
+## 14. Command line (optional)
 
 The app drives the same tools you can run yourself. Nothing is hidden, and using the CLI does not
 conflict with the buttons — the app picks up whatever model you install.
@@ -396,8 +478,11 @@ Each run folder contains `metrics.txt` (the full report), `summary.json` (what t
 ```
 Setup      Personalization → Set Up Training Tools   (once)
 Record     Record Neutral ×2, Record Speech ×2
+Guided     Start jaw calibration  (~1 min, avatar visible in a mirror)
 Train      Train My Face Model
 Compare    Stock / Personal
+Fix        My mouth was closed    (right after you see it go wrong)
+Audio      Enhance expressions while speaking  (optional, off by default)
 Undo       switch to Stock, or delete
            %APPDATA%\ProjectBabble\Models\personalFaceModel.onnx
 ```

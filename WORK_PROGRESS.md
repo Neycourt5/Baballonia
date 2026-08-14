@@ -8,14 +8,71 @@ should be able to continue without any prior conversation.
 ## Current Status
 
 ```
-Current phase: P0 COMPLETE. P1 COMPLETE. Guided workflow (UX layer) COMPLETE.
-               First real recordings made; first training attempt hit a dataset
-               encoding bug, now FIXED. Re-run of training is the next step.
-Branch: main (10 commits ahead of upstream 84eca8c, not pushed)
-Build: OK.  Suite: 97 passed / 9 failed (all 9 pre-existing, see Tests Run).
-Personalization tests: 74/74 pass (filter run).  Python: 8/8 smoke + 8/8 encoding.
-Recordings on disk: 4 sessions (2 neutral, 2 speech), 6,375 frames.
+Current phase: PHASE 2 IMPLEMENTED (M1-M5, M7 all complete and committed).
+               Everything that can be built and verified without the home PC is done.
+               The project is now blocked on real-data validation, not on code.
+Branch: main (19 commits ahead of upstream 84eca8c, not pushed)
+Build: OK (core, Desktop, tests).
+Suite: 205 passed / 9 failed / 2 skipped.  The 9 are the same pre-existing
+       hardware failures (serial board, firmware JSON, missing BabbleTrainer.exe);
+       the 2 skips need PyTorch state or real recordings.
+Python: 8 smoke + 9 regularizer + 8 encoding + 14 labels + 24 metrics
+        + 11 corrections + 17 embedding = 91 checks, all passing.
+Recordings (HOME PC): 4+ sessions (2 neutral, 2 speech + later additions), ~6,375 frames.
 ```
+
+**What changed on 2026-08-14 (this session).** Six milestones implemented on the work PC, each
+committed separately with its reasoning. Both toolchains turned out to be available here (.NET SDK
+10.0.302 at `%LOCALAPPDATA%\Microsoft\dotnet\dotnet.exe`, and the training venv), so everything is
+built *and* tested rather than merely written.
+
+| Milestone | Commit | What it adds |
+|---|---|---|
+| M1 | `92065ad` | JawOpen metrics that measure persistence, not just rate; settle-trim bug fix; opt-in targeted loss options; summary.json v2 |
+| M2 | `faf90cf` | 10-second in-memory ring buffer and the "My mouth was closed" button; correction sessions at weight 2.0 |
+| M3 | `9f546f7` | Model C offline tooling: derived embedding graph, backfill, the C head, and a fair-comparison harness |
+| M4 | `c2efe40` | Guided jaw calibration — the first non-zero supervision in the project |
+| M5 | `26467e1` | Model C runtime (secondary output, staleness check, fallback chain), feature-flagged **off** |
+| M7 | `7dc366e` | Optional audio expression assist, **off** by default |
+
+Three real bugs were found by the new tests rather than by inspection, and are worth recording
+because each would have been silent in production:
+
+1. **The settle-trim aliasing** (M1). A `rest` phase shares its cue id and repetition with the
+   `hold` before it, so keying the trim on those alone made the rest look like a continuation and
+   skipped its trim entirely — labelling the frames where the user is *relaxing out of* an
+   expression as "face at rest" at full confidence.
+2. **The embedding output name** (M5). `derive_embedding` was exposing the tensor under its internal
+   PyTorch-export name, so the C# runtime looked for `embedding` and found nothing. It now taps it
+   through an Identity node with a stable name.
+3. **Pitch had no support window** (M7). Pitch was estimated over a 20 ms window, which cannot
+   contain two periods of a 60 Hz fundamental, so it silently returned nothing and voice was never
+   detected at all.
+
+**REAL-WORLD VALIDATION (2026-08-13/14, home PC — authoritative):**
+
+- **Personalization works on the user's actual face.** The personalized tracker produces a very
+  large subjective improvement over stock Baballonia in real VRChat use. This is no longer a
+  speculative proof of concept.
+- **Model B (image-conditioned) noticeably beats Model A (output-only) in actual VR use.** This is
+  direct evidence that visual information in the camera image corrects errors that cannot be
+  recovered from the stock 45-vector alone. Preserve this finding: B is the baseline to beat.
+- **Remaining problem #1 — intermittent false JawOpen:** the avatar's jaw/mouth sometimes hangs
+  slightly open when the real mouth is closed/neutral. Intermittent, and now the single most
+  noticeable tracking problem.
+- **Remaining problem #2 — rare false TongueOut:** brief, rare, much less annoying. Fix naturally
+  if the same architecture covers it; do not let it distract from JawOpen.
+- The old flood of calibration/crop/slider problems is greatly reduced by personalization.
+
+**Model naming (standardized):** **A** = output-only residual adapter (stock 45 → MLP). **B** =
+image-conditioned residual adapter (camera image + stock 45, own small CNN). **C** =
+shared-embedding adapter (Baballonia's internal 1280-d visual embedding + stock 45). **D** =
+partial/full fine-tuning of the stock visual network — documented endgame research only, not
+scheduled.
+
+Two machines are in play: the **home PC** holds the real dataset, trained models, camera and
+VRChat; the **work PC** is code/planning only. Items below marked **HOME-PC VALIDATION REQUIRED**
+need the user physically present at the home PC; everything else is agent-safe.
 
 P0 delivered capture and interception: schema lock, pipeline hooks, calibration override path,
 dataset recorder, capture page.
@@ -23,15 +80,635 @@ dataset recorder, capture page.
 P1 delivered the full training and inference loop: a Python package that turns recorded sessions
 into a trained ONNX adapter, and a C# runtime that loads, validates, blends and displays it.
 
-**Real footage now exists; no model has been trained on it yet.** Four sessions were recorded
-successfully, and the first training attempt failed on a *data encoding* bug (UTF-8 BOM), not on
-anything ML-related. That bug is fixed and covered by tests (see **BUGFIX — UTF-8 BOM** below), and
-the recordings load cleanly. Training on a real face is still the next milestone and it needs the
-user, not the agent.
+---
+
+# PHASE 2 PLAN — approved 2026-08-14 (ACTIVE HANDOFF for Opus 5 Medium)
+
+This section is the implementation handoff. It was produced after a full repo audit at HEAD
+`84d71c8` plus a verified in-memory ONNX experiment. Everything below the "Approved milestone
+ordering" is the work queue; the exact first task is at the end of this section.
+
+## Session-verified facts (2026-08-14, work PC)
+
+**Model C feasibility — CONFIRMED BY EXPERIMENT.** `src/Baballonia/faceModel.onnx`: input
+`x.1 [1,1,224,224]`, output `1210 [N,45]`. The tensor
+`/model/global_pool/flatten/Flatten_output_0` is a clean **[N,1280]** embedding feeding the final
+`Gemm(model.classifier.weight [45,1280])`. Appending it as a second graph output (in memory,
+onnx + ORT-CPU): checker passes, stock output **bit-identical**, embedding `[1,1280]` emitted,
+**no measurable overhead** (stock p50 9.05 ms vs derived 8.64 ms — within noise; the stock forward
+itself dominates any budget). Recomputing expressions as `embedding @ W.T + b` matches ≤1.4e-6.
+The ONE unvalidated runtime assumption is **DirectML multi-output** (needs home PC GPU).
+
+**C# integration points (audited):**
+- `DefaultInferenceRunner.Run()` is hardcoded single-output (`results[0]`,
+  `src/Baballonia/Services/DefaultInferenceRunner.cs:182-194`); `IInferenceRunner` has no
+  multi-output concept. This is Model C's main touch point.
+- The corrector already borrows the exact input `DenseTensor` the stock session consumed
+  (`FaceProcessingPipeline.cs:58`) — zero-copy pattern to preserve.
+- Face model path is hardcoded in `FacePipelineManager.CreateInference()`; the eye side
+  (`EyeHome_EyeModel` + `EyePipelineManager.LoadInferenceAsync`) is the hot-reload pattern to
+  imitate for the derived-model swap.
+- `DatasetRecorderService` has **no ring buffer**; `IReadOnlyCueStateSource` has **no production
+  implementation** (DI resolves null); **no cue engine exists** (only the tested override
+  plumbing); the OSC-prefix preflight is **not implemented**; `StartRecording` passes
+  `camera: null` so camera geometry never lands in session.json.
+- No audio/microphone code exists anywhere in `src/`.
+- `PersonalTrainingService.TrainAsync` passes only `--data --model --out` (trainer defaults fill
+  the rest); export is never given `--roi`.
+
+**Python package (audited):**
+- Param counts: A `output_mlp_v1` = 28,205; B `image_residual_v1` = 44,389 (docstring "~48k" is
+  wrong; README's ~44k is right).
+- **BUG (fix in M1):** `labels.py` settle-trim key is `(session_id, cue_id, rep)` — omits phase —
+  so a `rest` phase sharing a hold's cue id+rep inherits the hold's start time and is never
+  trimmed, and holds at different levels under one id/rep alias each other.
+- Dead code to bring alive: `evaluate.cross_talk` (implemented, never called),
+  `labels.apply_corrections` / `W_MANUAL_CORRECTION=2.0` (no ingestion path),
+  `labels.estimate_cue_lag_seconds` (never called). `evaluate.py` has no CLI (README claims one).
+- `per_expression_mae` scores only weight≥0.9 cells — today that is exclusively zero-target
+  neutral frames; no JawOpen-specific or persistence metrics exist anywhere.
+- Exports are fixed batch 1, opset 17, inputs `image`+`stock` → `personal`, in-graph clip.
+- Schema: JawOpen = index 4, TongueOut = 33, tongue = 33–44; sha `c35805d0…392e` pinned
+  identically in C# and Python.
+
+## Approved milestone ordering (user-confirmed 2026-08-14)
+
+```
+M1  JawOpen metrics + labels fixes + JawOpen-targeted loss options    [agent-safe]
+M2  Hard-example ring buffer + "My mouth was closed" desktop button   [agent-safe code]
+M3  Model C offline spike (Python-only fair B-vs-C comparison)        [agent-safe code]
+M4  Avatar-guided JawOpen calibration MVP (cue engine)                [agent-safe code]
+M5  Model C runtime in C#   — ONLY IF the M3 spike wins (or ties with a clearly
+                              better JawOpen block)
+M6  B capacity (B-Medium, maybe B-Large) — ONLY IF C loses/unclear
+M7  Audio Expressiveness Assist — architecture documented below; build only after
+    M1–M5 are stable
+M8+ Expand guided cues (Smile/Frown/Pucker/Funnel/MouthL-R/TongueOut, then
+    cross-talk-driven combos); active-learning polish
+D   Stock-model fine-tuning: OPTIONAL ENDGAME RESEARCH only — no upstream training
+    code/checkpoint exists; catastrophic-forgetting + rebase risk; revisit only if
+    A/B/C + hard examples + guided supervision all demonstrably ceiling.
+```
+
+Rationale for deviations from the earlier phase list: hard-example capture **compounds with
+elapsed time** (every VR session passively accumulates labeled real failures — the rarest data in
+the project) and is model-agnostic, so it ships early. Model C is split into a ~30-minute
+zero-C#-risk offline spike before any runtime investment. B-capacity is demoted to conditional:
+growing B's scratch CNN (trained on ~6k highly correlated frames) competes with a free pretrained
+1280-d embedding; run it only if C disappoints. The JawOpen-specific B improvements that attack
+the actual complaint (loss/weighting) still land first, in M1.
+
+## M1 — Evaluation upgrade + labels fixes + JawOpen loss treatment
+
+Files: `training/babble_personal/labels.py`, `evaluate.py`, `train.py`, `models.py`; C# tail in
+`PersonalTrainingService.cs` + `PersonalizationView.axaml`(+VM).
+
+1. **labels.py trim fix**: replace the `hold_started_at` dict with sequential segment tracking —
+   track `current_segment = (session_id, cue_id, rep, phase, round(level,4))` +
+   `segment_start_ticks`, reset on any change; trim the first 0.5 s of both `hold` and `rest`
+   segments. New test `training/tests/test_labels_trim.py` (standalone `main()` runner like the
+   existing tests): a rest sharing a hold's cue id+rep must have its first 0.5 s at weight 0 —
+   must FAIL against current code first. Add a `dim_boost` kwarg to `build_labels`.
+2. **evaluate.py new metrics**:
+   - `activation_runs(values, ticks, threshold=0.15)` → per-session false-activation run
+     durations; stats `runs_per_minute, mean_run_s, p95_run_s, max_run_s`. Persistence is the
+     real complaint: one 2-second jaw hang ≫ twenty 1-frame blips at equal FP rate.
+   - `DimReport` for JawOpen(4) and TongueOut(33), stock-vs-personal paired:
+     *closed set* (neutral sessions ∪ correction windows ∪ guided rest post-trim): `fp_rate`,
+     `mean_closed`, `p95_closed`, `max_closed` + run stats.
+     *Sensitivity guardrail* (anti-dead-zone): guided-hold `mean_at_level[]`, `open_separation`
+     (mean@1.0 − mean_closed); speech `std`, `range = p95−p05`, and
+     `range_retention = personal_range / stock_range` (flag < 0.8).
+     *Monotonicity* on guided data: Spearman ρ of commanded level vs per-hold-segment mean +
+     pairwise ordering accuracy.
+   - Wire the existing `cross_talk` into train.py's evaluation when guided sessions exist.
+   - New CLI: `python -m babble_personal.evaluate --data ROOT [--sessions …] [--onnx PATH]
+     [--json OUT]` — scores any exported model (or stock passthrough) on chosen sessions;
+     detects v1 (image+stock) vs v2 (stock+embedding) signatures from the ONNX inputs.
+3. **train.py / summary.json v2**: `summary_version: 2` + blocks `jaw_open`, `tongue_out`,
+   `cross_talk|null`, `hard_examples|null`. New CLI options, all default-off/conservative, none of
+   which are dead zones (desired behavior stays: closed → ≈0, slightly open → small, open →
+   strong):
+   - `--dim-boost "JawOpen=2.0,TongueOut=1.5"` — weight (never target) emphasis on those dims in
+     zero-target rows.
+   - `--fp-penalty 0.25 --fp-dims "JawOpen,TongueOut"` — asymmetric false-positive term over
+     supervised zero-target cells: `fp_penalty * mean(relu(predicted)^2)`. Guardrail: the summary
+     must print `range_retention` beside `fp_rate` so any sensitivity trade is visible.
+   - `--hard-negative-boost` (default 0) — oversample neutral/correction rows whose *stock*
+     JawOpen > 0.3 (decision-boundary frames) via `WeightedRandomSampler`.
+   - Add an `fp` component to the loss metrics dict.
+4. **C# tail**: `TrainingSummary`/`ReadSummary` gain nullable v2 fields (all `TryGetProperty`,
+   v1-tolerant); Compare section gains two headline lines: "False jaw-open at rest: X% → Y%" and
+   "Longest false open: Xs → Ys".
+5. **HOME recording guidance** (diversity over volume, ~90 s each). **Wear the headset normally —
+   do not deliberately reposition it.** A headset cannot be re-seated identically to the precision
+   a 224×224 mouth crop resolves, so recording across separate sittings covers real placement drift
+   by itself; deliberately odd angles spend model capacity on situations that never occur. What to
+   record: neutral ×3 in different room lighting (attacks the measured brightness↔JawOpen
+   correlation of −0.56, the one variable that is genuinely worth varying on purpose); **silent-hold
+   probe** (jaw silently held open 10 s / closed 10 s, ×3 — tests the predicted context-gate failure
+   from the first-training analysis); speech variety (reading vs conversation vs exaggerated).
+   Note the real hazard is changing the **ROI/crop settings** after recording — that is an actual
+   domain shift and requires re-recording, unlike normal headset wear.
+
+**HOME-PC VALIDATION REQUIRED:** retrain on the real corpus; record the JawOpen block (fp_rate,
+p95 run duration, range_retention) stock vs current B — these are the baseline numbers every
+later milestone is judged against.
+
+## M2 — Hard-example capture ("My mouth was closed")
+
+New files in `src/Baballonia/Services/Personalization/`:
+
+1. **`HardExampleBuffer.cs`** — in-memory ring, 300 entries (10 s @ the existing 30 fps cap).
+   Entry = preallocated `byte[50176]` raw Gray8 224×224 (copy via `Marshal.Copy`; assert
+   `Mat.IsContinuous()`) + ticks + `float[45]` stock + `float[45]` personal + checksum.
+   **≈15.2 MB total, allocated once, zero steady-state GC.** Raw bytes, not JPEG — encoding
+   happens only at persist time, never near the tick. Subscribes to `NewRawExpressionsEvent` +
+   `NewCorrectedExpressionsEvent` (same-tick ordered pair — attach corrected to the newest raw
+   entry; no pairing key needed). Reuse the 30 fps cap + sparse FNV dedupe logic (duplicate the
+   ~30 lines privately from the recorder; comment the duplication — cheaper to rebase than a
+   shared refactor). `Snapshot(TimeSpan window)` deep-copies matching entries under a short lock;
+   persistence runs entirely off the lock. Setting `PersonalModel_HardExampleBuffer`, default ON.
+   The buffer is never written to disk except on an explicit user flag.
+2. **`HardExampleService.cs`** — `FlagAsync(CorrectionKind kind, TimeSpan window)` (default
+   **5 s**; UI offers 2/5/10 s): snapshot → background-write a standard session directory
+   `<yyyyMMdd_HHmmss>_correction` (new `SessionType.Correction` in `DatasetSession.cs`) with the
+   normal layout (frames JPEG q95; labels.jsonl rows also carrying the model's answer via a new
+   null-suppressed `FrameLabel.Personal` field) **plus `correction.json`**:
+   ```json
+   { "version": 1, "kind": "mouth_closed", "corrected_dims": [4], "target": 0.0,
+     "window_seconds": 5.0, "flagged_utc": "…", "source": "hard_example",
+     "model": { "adapter_type": "image_residual_v1", "trained_utc": "…", "blend": 1.0 } }
+   ```
+   Model provenance stamped from `PersonalModelManager.LoadedMetadata` at flag time. 3 s debounce
+   between flags. The data architecture is dimension-generic — a future "Tongue was not out" /
+   "I was neutral" / "This was a smile" flag is just another `kind` + `corrected_dims`/`target`;
+   only the first UI is JawOpen-specific.
+3. **Trainer ingestion**: `dataset.py` reads `correction.json` → `Session.is_correction`;
+   `labels.py` correction branch: corrected dims get the correction target at
+   `W_MANUAL_CORRECTION` (2.0 — the dead constant becomes live); **all other dims weight 0
+   (fully masked)** — the user asserted only "mouth closed"; they may have been emoting otherwise
+   in VR, so weak zero-priors on other dims would be actively wrong. Correction sessions are
+   auto-discovered by the existing session discovery; the default last-per-type holdout gives a
+   genuine hard-example holdout once ≥2 exist, scored by M1's `hard_examples` summary block.
+4. **UX (user-decided 2026-08-14)**: **desktop window button only for MVP** — "My mouth was
+   closed" button + 2/5/10 s window selector in the main Personalization section (it is a primary
+   loop, not Advanced). OSC avatar-toggle and a global hotkey are deferred follow-ups, documented
+   here so they are not re-litigated. Retraining stays the explicit **[Improve My Model]** action
+   (= the existing Train button) — never automatic.
+
+**HOME-PC VALIDATION REQUIRED:** flag real false-JawOpen moments (brief headset-peek to click is
+acceptable for MVP), verify the persisted window brackets the actual failure, retrain via
+[Improve My Model], and record the hard_examples holdout numbers before/after.
+
+## M3 — Model C offline spike (Python only; zero C# risk)
+
+Purpose: decide whether the pretrained 1280-d embedding beats B's scratch CNN **before** paying
+for any runtime work.
+
+1. **`training/babble_personal/derive_embedding.py`**: load the stock model → append
+   `/model/global_pool/flatten/Flatten_output_0` as a second graph output named `embedding`
+   (after the existing output so ordering is stable; `--tensor` overridable) → `onnx.checker` →
+   ORT-CPU parity (stock output must be bit-identical — verified achievable this session) →
+   write `faceModelWithEmbedding.onnx` + sidecar `faceModelWithEmbedding.json`
+   `{base_model_md5, embedding_source_tensor, tool_version}`. **Never modifies the stock file.**
+   Staleness policy: the derived model is invalid unless sidecar md5 == md5 of the current stock
+   file → refuse + regenerate. Never silently use an embedding from a mismatched base model.
+2. **`compute_embeddings.py`** (backfill for existing recordings): per session, decode frames in
+   labels order, batch through the derived model (CPU) → `embeddings.bin` (little-endian
+   **float16**, 1280 per row ≈ 2.5 KB/frame ≈ 7.7 MB per 3000-frame session) + `embeddings.json`
+   `{dim, dtype, count, source: "backfill", model_md5}`. Known bounded skew: backfill uses
+   JPEG-decoded frames while recorded stock vectors came from the live pre-JPEG tensor; q95 keeps
+   it small; a `--verify-against-live` mode quantifies it once live capture exists (M5). The M5
+   live recorder writes the same two files with `source: "live"` — one convention, one loader.
+3. **`models.py` C head** — `EmbeddingHeadAdapter`, `adapter_type = "embedding_head_v1"`,
+   `uses_embedding=True`:
+   `LayerNorm(1280) → Linear(1280,256) → SiLU → Dropout(0.1) → concat stock45 →
+   Linear(301,128) → SiLU → Linear(128,45)` zero-init → residual → clamp. ≈374k params; offer
+   `--c-width 128` (≈190k) for the grid. AdamW weight decay applies; the temporal penalty works
+   unchanged (previous-row lookup already exists); photometric consistency is N/A (no pixels) —
+   replace with `--embedding-noise 0.01` (Gaussian noise relative to per-dim std, same
+   residual-invariance idea). Small uniform refactor: `residual(image, stock, embedding=None)`
+   across all models; `_Batch` loads embeddings when `uses_embedding`; `--model c` errors with
+   the backfill command line if a train session lacks embeddings.
+4. **`export.py` v2**: embedding models export inputs `stock`+`embedding` → `personal` (no
+   vestigial image input); `personal_adapter_version = 2` for this type only (A/B stay v1 — old
+   builds cleanly refuse C via the existing version check); metadata adds `embedding_dim`,
+   `requires_embedding`, `embedding_source_model_md5`. Parity check feeds random stock+embedding.
+5. **`experiment.py`** — fair-comparison harness (also serves M6):
+   `python -m babble_personal.experiment --data ROOT --models b c --seeds 0 1 2
+   --val-sessions <pinned ids>` → identical splits + label config per run → markdown/CSV table:
+   params, analytic FLOPs, train wall-time, ONNX size, val fit, neutral FAR, resting jitter, the
+   full JawOpen block, cross-talk, MAE — mean±spread over seeds.
+6. **Decision gate (record the outcome here):** C wins → M5. C ties but the JawOpen block is
+   clearly better → M5. C loses across seeds → skip M5, run M6. Subjective VR remains the final
+   arbiter after whichever runtime ships. Architecture elegance is not a success metric — if C
+   does not beat B, keep B.
+
+**HOME-PC VALIDATION REQUIRED:** the spike run itself (~30 min: derive + backfill + experiment) —
+the dataset lives there. All code is written and synthetic-tested on the work PC first.
+
+## M4 — Avatar-guided JawOpen calibration MVP
+
+The core loop: the app commands a known JawOpen target → the existing override path drives the
+avatar through OSC→VRCFT → the user imitates what they SEE (no guessing what "50% jaw" feels
+like) → the commanded vector is the label. Holds matter more than transitions. Both known-open
+AND known-closed supervision are produced — exactly the "closed but Babble thinks open" vs
+"actually open" discrimination the JawOpen problem needs.
+
+1. **`GuidedCaptureRoutine.cs`** — table-driven state machine over the existing tested
+   `ExpressionOverrideService`. JawOpen routine (3 reps): 5 s lead-in (override active at neutral
+   so the avatar settles) → per level in {0.5, 1.0}: prep 1 s → transition 0.75 s → **hold 3 s** →
+   transition 0.75 s → rest 2 s. **Distinct cue ids per level** (`JawOpen50`, `JawOpen100`),
+   `Dims=[4]` — belt-and-braces with the M1 trim fix. UI-thread DispatcherTimer: `KeepAlive()`
+   each tick, `PushPhase` on change; all three existing stop-safety layers apply unchanged. The
+   routine starts/stops the recorder session itself (`SessionType.Guided`). **Implements the
+   OSC-prefix preflight** (refuse to start if `AppSettings_OSCPrefix` is non-empty — the standing
+   watch item) + requires an active video source. Start with 0/0.5/1.0 levels (the safer first
+   experiment); expand to finer levels only if the monotonicity metrics justify it.
+2. **`CueStateSource.cs`** — the missing production `IReadOnlyCueStateSource`: holds the current
+   `CuePhase` (volatile); `CurrentCue()` interpolates the commanded vector at call time (same
+   math as `ExpressionOverrideService`) and returns a `FrameLabel.CueLabel` with
+   `source: "avatar"`. Register in DI (`App.axaml.cs`) and pass into `DatasetRecorderService`.
+3. **Trainer**: wire the dead `estimate_cue_lag_seconds` as a per-rep diagnostic printed for
+   guided sessions — correlation ≳0.6 with monotone plateaus validates the whole guided design
+   (this IS the original plan-§12.1 experiment, now run on the first real session). Optional
+   `--min-cue-corr` rep gate (default off). **Ordinal supervision experiment** (optional, default
+   off): `--ordinal` margin ranking loss over hold-frame pairs at different commanded levels —
+   teaches `1.0 attempt > 0.5 attempt > neutral` ordering without trusting exact human
+   intensities. Add only if it demonstrably improves supervision.
+4. VM/View: "Guided: Jaw calibration (~1 min)" button + live instruction text in Recordings.
+   Expansion path (M8+): Smile, Frown, Pucker, Funnel, MouthLeft/Right, TongueOut, then combos
+   chosen by measured cross-talk — new routine-table rows only.
+
+**HOME-PC VALIDATION REQUIRED:** first guided session watching the avatar in a VRChat mirror;
+check per-rep cue-lag correlation ≥0.6 and monotone stock plateaus; then retrain and read the new
+monotonicity/sensitivity metrics. Fallback if correlation is poor: two-level 0/1.0 holds only.
+
+## M5 — Model C runtime in C# (conditional on the M3 gate)
+
+Minimal blast radius: eye path untouched, `IInferenceRunner` untouched.
+
+1. **`DefaultInferenceRunner`** (additive, ~35 lines): a `SecondaryOutputName` property; when set
+   and present in `OutputMetadata`, allocate a `_secondaryTensor` and identify the primary output
+   by name; in `Run()`, iterate results by name — copy secondary, return primary exactly as
+   today. **When `SecondaryOutputName` is null the behavior is byte-for-byte current** (the eye
+   path cannot regress). Implements new `IEmbeddingSource { DenseTensor<float>? GetEmbedding(); }`
+   (interface lives in `Services/Personalization/`, keeping upstream `Contracts/` untouched).
+   `InferenceFactory.CreateWithSecondaryOutput(path, name)`.
+2. **Model store + fallback chain**: setting `PersonalModel_UseEmbeddingRunner` (default false
+   until DirectML validation passes, then flip ON so every future recording is C-trainable).
+   `FacePipelineManager.CreateInference()`: if enabled → `EmbeddingModelStore.TryGetValid()`
+   (`%APPDATA%\ProjectBabble\Models\faceModelWithEmbedding.onnx` exists AND sidecar md5 == md5 of
+   the current stock model) → load with the secondary output; any miss/mismatch/exception → log +
+   plain stock. Regeneration via `PersonalTrainingService.RegenerateEmbeddingModelAsync()`
+   (child-process `derive_embedding` — C requires training tools anyway). GUI: Advanced →
+   "Enable embedding runner (Model C)" (regenerates if stale, hot-reloads via the existing
+   `LoadInferenceAsync` pattern).
+   **Fallback chain C→B→stock**: `PersonalModelManager.ReloadAsync` gains one rung — if the
+   primary personal model fails validation/load, try `.previous.onnx` (typically the last B) with
+   a logged warning; if that fails, corrector = null (stock). `SupportedAdapterVersion` → 2; v2
+   validation requires inputs `stock[1,45]` + `embedding[1,1280]` AND an active embedding runner
+   (exposed as `FacePipelineManager.EmbeddingActive`).
+3. **Corrector**: new `IEmbeddingAwareCorrector : IExpressionCorrector` + `EmbeddingModelCorrector`
+   (mirror of `PersonalModelCorrector`: own CPU session, blend lerp, self-disable on exception;
+   null embedding → stock passthrough + one-time warning). Pipeline block:
+   `var emb = (InferenceService as IEmbeddingSource)?.GetEmbedding();` then dispatch on the
+   interface. `PersonalModelCorrector` (A/B) untouched.
+4. **Live embedding recording**: `NewRawExpressionsEvent` gains a defaulted `float[]? embedding =
+   null` parameter (additive, no caller breaks); the pipeline attaches a 1280-float copy only when
+   the runner is active; the recorder writes `embeddings.bin` float16 + `embeddings.json`
+   (`source: "live"`), row-aligned with labels.jsonl by construction (same writer iteration).
+5. **DirectML validation** (**HOME-PC VALIDATION REQUIRED** — the one unvalidated assumption):
+   guarded MSTest (`Inconclusive` without DML) asserting derived-model DML outputs match CPU
+   ≤1e-3 for both outputs; manual checklist: UseGPU on → derived model → 10 min live tracking →
+   tick p50/p95 vs stock baseline. Any DML failure ⇒ automatic fallback to plain stock on DML
+   (C disabled while GPU on, clearly logged). Never run a second CPU backbone pass just for
+   embeddings — one forward pass is the whole point.
+
+## M6 — B capacity experiment (only if C loses/unclear)
+
+`ImageResidualAdapter` gains width parameters → `--model b-medium` (`image_residual_m_v1`,
+channels 1→12→24→48→96, hidden 192, ≈100–130k params) and `--model b-large`
+(`image_residual_l_v1`, 1→16→32→64→128, hidden 256, ≈250–300k) — distinct adapter_type strings
+for provenance; `TrainingModelChoice` extended additively. Protocol: the same `experiment.py`
+harness — identical pinned splits, seeds {0,1,2}, full M1 metric table + params/FLOPs/train-time/
+ONNX-size/C#-latency-bench. B-Medium first; B-Large only on a monotone improvement trend. Honest
+expectation to record: the corpus, not capacity, is the likely bottleneck — this experiment exists
+to prove that cheaply if C hasn't already made it moot. Prefer the smallest model with the best
+generalization.
+
+## M7 — Audio Expressiveness Assist (architecture decided; build later)
+
+**Placement: a second nullable stage in `FaceProcessingPipeline`, after the corrector, BEFORE the
+One Euro filter** — `IExpressionEnhancer? Enhancer`, identical volatile/fail-safe/null-means-off
+pattern as `Corrector`. Reasoning: (a) the filter smooths gain steps and audio-buffer zipper
+noise before anything reaches VRChat; (b) the recording tap (`NewRawExpressionsEvent`) is
+upstream, so training data is never audio-contaminated; (c) the calibration remap stays last so
+the user's range mapping still applies; (d) a null slot = bit-identical output — "off equals the
+exact visual path" holds by construction. Rejected alternative (after filter, in
+`ParameterSenderService`): puts unsmoothed gain modulation on the wire and grows an upstream file.
+
+Mode 1 (first): local WASAPI/NAudio capture on its own thread → `IAudioFeatureSource` ring of
+`{rms, voicedProb, ticks}` — transient features only, no audio ever stored, no cloud, no speech
+recognition → `ProsodyEnhancer`: `out_i = corrected_i * (1 + k·smoothedLoudness)` on jaw∪mouth
+dims only — amplifies movement already away from neutral, never invents it (Smile = 0 stays 0
+regardless of shouting), clamp [0,1]. Sync: sample the newest audio feature older than a
+configurable ~50 ms offset; features stale >250 ms ⇒ gain decays to 1 (fail-safe to visual-only);
+mic unavailable ⇒ visual tracking unaffected. GUI: one toggle "Enhance expressions while
+speaking" (default OFF); strength/sync-offset under Advanced. Mode 2 (viseme-class hints that
+mildly reinforce visually-supported shapes, e.g. strong "oo" evidence nudging Funnel/Pucker the
+tracker already sees) is explicitly deferred until Mode 1 is proven; multimodal model training is
+documented as a distant experiment, not the initial implementation. Audio must never re-create
+canned viseme behavior that fights the tracked face.
+
+## Unified supervision (the full label-source table after M1–M4)
+
+| Source | target | weight | notes |
+|---|---|---|---|
+| Neutral session, all dims | 0 | 1.0 | |
+| Speech pseudo (jaw∪mouth) | stock | 0.3 | drop to 0 via flag if circularity shows |
+| Guided hold, cued dims | commanded | 1.0 (tongue 0.4) | after 0.5 s settle trim (M1 fix) |
+| Guided rest | 0 | 1.0 | now also trimmed (the M1 bug fix) |
+| Guided transitions | — | 0 | masked |
+| Guided uncued dims | 0 | 0.25 | minus co-activation exclusions |
+| **Hard example, corrected dims** | correction target | **2.0** | all other dims weight 0 |
+| Ordinal (optional) | ranking pairs | `--ordinal` | ordering only, no magnitudes |
+
+Every sample records provenance (`SessionType`, `correction.json`, cue `source`); the trainer
+never flattens sources into equally trusted targets.
+
+## GUI integration (keep the current philosophy)
+
+Main page additions only: M2 "My mouth was closed" button + 2/5/10 s selector (main section);
+M1 two JawOpen headline lines in Compare; M4 "Guided: Jaw calibration (~1 min)" in Recordings;
+M5 "Enable embedding runner (Model C)" under Advanced; the Train dropdown gains C (and B-Medium
+if M6 runs) with plain-language descriptions. [Improve My Model] = the existing Train button.
+Normal users never see ONNX/embedding/parameter-count jargon outside Advanced.
+
+## Performance budget (measured, not estimated)
+
+Stock forward ~9 ms CPU (work-PC measurement; home GPU differs) dominates the tick; A 0.03 ms,
+B 0.21 ms (home CPU, warm); C head ≈0.4 MFLOP ⇒ expected ≪1 ms CPU (bench in M3's harness and via
+the existing C# latency-test pattern in M5); embedding extraction is free (same forward pass —
+verified). Ring buffer: one ≤50 KB memcpy at ≤30 fps (~1.5 MB/s), 15.2 MB fixed allocation.
+Still unmeasured: whole-tick p50/p95 with a live camera (HOME checklist). Audio (M7) runs on its
+own thread and never blocks the visual loop.
+
+## Risks & rollback
+
+| Risk | Mitigation / cheapest resolver |
+|---|---|
+| DirectML multi-output misbehaves | M5 guarded test + 10-min home checklist; auto-fallback to stock-on-DML designed in |
+| Embedding lacks info the stock model discarded (C ceiling) | the M3 spike answers this for ~30 min of home compute, zero C# risk |
+| FP penalty suppresses genuine opens (dead face) | range_retention + sensitivity metrics printed beside fp_rate in every summary; silent-hold VR check |
+| Backfill vs live embedding skew | `compute_embeddings --verify-against-live` on the first live-embedding session |
+| Guided labels garbage (user can't track cues) | per-rep cue-lag correlation diagnostic; `--min-cue-corr` gate; fallback to 0/1.0 levels |
+| Ring-buffer tick cost | fixed prealloc; disable setting; latency test |
+| Stale derived model after an upstream model update | sidecar md5 check ⇒ refuse + regenerate; never silently mismatch |
+| Rebase surface growth | only additive edits to `DefaultInferenceRunner` + one defaulted event param; everything else is new files under `Services/Personalization/` or `training/` |
+| Training RAM as the corpus grows | eager loading is fine to ~10k frames (~2 GB); lazy loading is noted future work, not built now |
+
+Every feature fails safe to the previous known-good path: buffer off ⇒ no behavioral change;
+C invalid ⇒ `.previous.onnx` (B) ⇒ stock; guided inactive ⇒ normal tracking; audio off or mic
+dead ⇒ exact visual path; personalization off ⇒ stock Baballonia.
+
+## IMPLEMENTATION RECORD — what M1–M7 actually built (2026-08-14)
+
+Read this before touching any of it; the reasoning matters more than the file list.
+
+### M1 — measuring the actual complaint (`92065ad`)
+
+`activation_runs` measures false activations **in time**. This exists because a false-activation
+rate cannot distinguish one two-second jaw hang from forty single-frame flickers, and only the first
+is what the user notices. `DimReport` pairs that with the guardrail in the other direction: any
+model can win every false-positive metric by refusing to move the expression at all, so range
+retention and open/closed separation are computed from the same run and printed beside it. The
+warning only fires where there was real movement to lose — flagging the tongue during ordinary
+speech, which is mostly sensor noise, would train the reader to ignore it.
+
+Three opt-in knobs, all default-off: `--dim-boost` (symmetric weight emphasis, never touches a
+target), `--fp-penalty` (asymmetric, charges only overshoot above a *confident* zero, on named
+dimensions only), `--hard-negative-boost` (oversamples confidently-zero frames the stock model is
+already firing on). The asymmetric one is the one capable of producing a dead face, which is exactly
+why range retention is printed next to it.
+
+`TrainingSummaryReader` was extracted so the C#/Python contract is testable against literal JSON.
+That seam fails silently: a renamed key does not crash, it just makes a number vanish from the
+results screen.
+
+### M2 — turning real mistakes into labels (`faf90cf`)
+
+`HardExampleBuffer` holds 10 seconds as a fixed ring of preallocated frames (~15 MB, no
+steady-state garbage, ~50 KB memcpy per tick, measured under 1 ms). Raw bytes rather than JPEG
+because encoding belongs at save time on a background thread.
+
+The subtle part is pairing. The pipeline publishes the raw event then the corrected event on the
+same tick, so "attach the correction to the newest entry" is only right when that entry came from
+*this* tick — and it did not, whenever the frame was rejected as a duplicate or over-rate. Without
+the guard, tick N+1's prediction silently overwrites tick N's, producing evidence that looks valid
+and blames the wrong picture. Tested directly.
+
+**Only the named dimension is supervised, at weight 2.0.** The button says "my mouth was closed" —
+a claim about the jaw and nothing else. The user may have been mid-sentence or smiling; labelling
+the other 44 expressions as neutral would manufacture supervision they never gave, at the highest
+weight in the system, on frames chosen precisely because the model was confused. An unlabelled cell
+costs nothing; a confidently wrong one costs a lot.
+
+No auto-retrain: corrections are worth most in batches, and swapping the model after every press
+would make it impossible to tell what helped.
+
+### M3 — Model C offline (`9f546f7`)
+
+Verified against the real `faceModel.onnx`: exposing the 1280-d embedding leaves the 45 stock values
+**bit-identical**, and `embedding @ classifier.weight.T + bias` reproduces them to 1e-4 — which
+confirms the exposed tensor really is the classifier's input rather than some other layer of the
+right shape. Parity is asserted at exactly zero, because adding an output computes nothing new, so
+any drift would mean every recording describes a different model than the one running.
+
+Embeddings are a float16 binary sidecar (~2.5 KB/frame). JSON would add ~25 KB per line to
+labels.jsonl and destroy its readability for debugging.
+
+`EmbeddingHeadAdapter` is ~375k params with LayerNorm (the embedding's scale is uncontrolled) and
+dropout (1280 inputs against a small personal corpus is the one place here where overfitting is a
+real risk). Zero-initialised, so an untrained adapter is an exact passthrough like A and B.
+
+`experiment.py` exists because "B versus C" is only a real question if nothing else differs, and by
+default nothing is held fixed — `split_sessions` picks the holdout itself, so two runs can silently
+score against different data.
+
+### M4 — the first non-zero supervision (`c2efe40`)
+
+Every high-confidence label before this was zero. Neutral sessions say "all expressions at rest";
+speech pseudo-labels echo the stock model at low weight. So the adapter could learn to quieten a
+resting face and nothing else — the ceiling P1 hit.
+
+The jaw routine alternates commanded openings with rests, producing known-open **and** known-closed
+frames in one session under identical lighting. Neutral recordings supply only the second kind.
+
+Each level gets its own cue id (`JawOpen50`, `JawOpen100`), which is belt-and-braces with M1's trim
+fix. `CueStateSource` and the override service read the same immutable snapshot on their own clocks,
+so the value sent to the avatar and the value written to the dataset are the same number by
+construction — tested mid-transition, where a separately-computed target would diverge silently.
+
+The **OSC-prefix preflight** is finally implemented: with a prefix set, the VRCFT module never
+matches, the avatar never moves, and the recorder fills with neutral faces labelled as expressions.
+Nothing about that fails at the time, so it refuses to start.
+
+### M5 — Model C runtime, flag off (`26467e1`)
+
+`DefaultInferenceRunner.SecondaryOutputName` is additive: null takes a fast path that is byte for
+byte what it always did, so the eye pipeline and the plain stock path are untouched.
+
+`EmbeddingModelStore` refuses a derived model whose sidecar MD5 does not match the current stock
+file. This is the failure worth engineering against: a derived graph from a different network still
+loads, still runs, still emits 1280 numbers — describing a different feature space. No exception, no
+visibly broken output, just a face that is subtly wrong.
+
+`PersonalModelManager` gained one rung of fallback to `.previous.onnx`, so the likely mistake —
+installing a C adapter with the runner off — lands on the model that was working an hour ago rather
+than dropping to stock with no explanation.
+
+### M7 — audio, off by default (`7dc366e`)
+
+It multiplies, it never adds. `MouthSmileLeft = 0` stays 0 no matter how loudly the user shouts.
+That is the difference between this and the viseme-driven mouth animation it must not become.
+
+Placed after the corrector and before the One Euro filter: the filter smooths gain changes, the
+recording tap upstream stays audio-free so training data can never be contaminated, and the
+calibration remap stays last.
+
+Old-fashioned DSP rather than a model — microseconds, predictable on untested audio, and
+transparently incapable of transcription. Voice detection requires loudness **and** periodicity;
+either alone is wrong too often, and a false positive moves the avatar's mouth while the user is
+silent.
+
+Measured: analysis 0.06 ms per 20 ms window on its own thread; enhancement under 0.001 ms per tick.
 
 ---
 
-## Project goal (unchanged)
+## What is agent-safe now vs HOME-PC
+
+**All agent-safe work is done.** M1–M5 and M7 are implemented, tested and committed. There is no
+remaining task that can be meaningfully advanced without the real camera, dataset, headset or GPU.
+
+---
+
+# NEXT EXACT TASK — HOME PC, in this order
+
+Every item below needs the home machine. They are ordered by how much they unblock: 1 and 2 are
+prerequisites for judging anything else, 3 is the architecture decision, and 4–6 are validation of
+features that are already built and switched off.
+
+Record the outcome of each **in this file** as you go. The numbers are the point; without them the
+next session is guessing again.
+
+### 1. Rebuild and reinstall
+
+The last build predates all of this. From the repo root:
+
+```
+%LOCALAPPDATA%\Microsoft\dotnet\dotnet.exe publish src/Baballonia.Desktop/Baballonia.Desktop.csproj ^
+    -c Release -r win-x64 --self-contained true -o bin\Baballonia-v5
+```
+
+Per the build convention, that is a **new** folder — leave `bin\Baballonia-v4` intact as the
+fallback. Verify `Modules\` has 4 capture DLLs and `training\babble_personal\` is present.
+
+### 2. Establish the JawOpen baseline (M1)
+
+Train on the existing corpus and read the new report. This is the first time the project has a
+number for the actual complaint.
+
+* Press **Train My Face Model** (model B).
+* Record here: `jaw_open.stock_fp_rate` vs `personal_fp_rate`, **`stock_runs.max_seconds` vs
+  `personal_runs.max_seconds`** (the longest single false opening — the number that best matches
+  what you notice), and `range_retention`.
+* The Compare card now states these in plain language; `metrics.txt` in the run folder has the
+  full block.
+
+**Then record the sessions M1's guidance asks for**, which are what the later milestones need:
+neutral ×3 in *different room lighting* (this attacks the measured brightness↔JawOpen correlation
+of −0.56, and lighting is the one variable genuinely worth varying on purpose), a **silent-hold
+probe** (jaw held open silently 10 s, then closed 10 s, ×3 — this tests the context-gate weakness
+predicted after the first training run and never checked), and speech variety. Wear the headset
+normally; do not reposition it deliberately.
+
+### 3. The Model C decision (M3) — the architecture gate
+
+About 30 minutes, entirely offline, no VR needed.
+
+```
+set PY=%LOCALAPPDATA%\babble-train-venv\Scripts\python
+cd /d <repo>\training
+
+%PY% -m babble_personal.derive_embedding --stock ..\src\Baballonia\faceModel.onnx
+%PY% -m babble_personal.compute_embeddings --data "%APPDATA%\ProjectBabble\PersonalDataset" ^
+     --model ..\src\Baballonia\faceModelWithEmbedding.onnx
+%PY% -m babble_personal.experiment --data "%APPDATA%\ProjectBabble\PersonalDataset" ^
+     --models b c --seeds 0 1 2 --out "%APPDATA%\ProjectBabble\PersonalTraining\experiment"
+```
+
+**Paste the resulting table into this file.** The gate, decided in advance so the result cannot be
+rationalised after the fact:
+
+* C wins, or ties with a clearly better JawOpen block → adopt C (continue to step 6).
+* C loses across seeds → **keep B**, and run the B-capacity experiment (M6) instead. Architecture
+  elegance is not a success metric.
+
+### 4. Hard examples (M2)
+
+Use VRChat normally. When the avatar's jaw hangs open while your mouth is closed, press
+**My mouth was closed** on the Personalization page straight afterwards (a brief headset peek is
+fine for now — in-VR triggers were deferred by your decision). Collect a handful over a session or
+two, then retrain and record the `hard_examples` block before and after.
+
+### 5. Guided calibration (M4)
+
+Start VRChat with a VRCFT avatar, clear `AppSettings_OSCPrefix` if set (the app refuses to start
+otherwise, and explains why), and press **Start jaw calibration**. Watch your avatar in a mirror
+and copy it for about a minute.
+
+Then train and read the **cue-tracking table printed before training starts**:
+
+* Mean correlation ≳0.6 → the guided design holds; expand to more expressions later.
+* Much lower → either the avatar is not rendering the cue or the intensities are not reproducible.
+  Fall back to two-level 0/1.0 holds and record that decision here.
+
+This is the experiment the entire guided-capture design rests on, and it is cheap.
+
+### 6. Model C runtime + DirectML (M5) — only if step 3 adopted C
+
+The one runtime assumption never verified: everything was tested on CPU.
+
+* Advanced → tick **"Use the face model's visual features"**. It builds the derived model itself.
+* Train with model C, confirm it loads, and check `EmbeddingRunnerDirectMlTest`-style behaviour by
+  turning **UseGPU on** and running 10 minutes of live tracking.
+* Record whole-tick p50/p95 with a real camera, GPU on and off. If DirectML misbehaves, the
+  designed response is automatic fallback to the plain stock model — confirm that happens rather
+  than a crash.
+
+### 7. Audio assist (M7) — independent of everything above
+
+Personalization → Audio → **Enhance expressions while speaking**. Talk normally and A/B the
+toggle. Watch for the boost leading or lagging your voice; if it does, adjust
+`AudioAssist_SyncOffsetMs` (default 50 ms). Confirm that with it off, tracking is exactly what it
+was.
+
+---
+
+## Deferred by decision, not by omission
+
+* **In-VR correction triggers** (OSC avatar parameter, global hotkey). You chose desktop-button-only
+  for the MVP. The OSC route needs one synced bool on your avatar and a menu toggle; the service is
+  already dimension-generic, so adding it is a trigger, not a redesign.
+* **M6, the B-capacity ladder** (B-Medium/B-Large). Conditional on step 3: only worth running if C
+  loses, since growing B's scratch CNN competes with a pretrained embedding that is free.
+* **Audio phoneme/viseme assist.** Interfaces are shaped for a second feature source, but it stays a
+  later experiment until prosody is validated in real use.
+* **Model D.** Unchanged: optional endgame research, not scheduled.
+
+---
 
 Learn a **user-specific correction model** for the face pipeline: it sees the camera image plus the
 stock model's 45 raw outputs and emits corrected outputs. Trained locally (PyTorch → ONNX), loaded
@@ -815,10 +1492,12 @@ plus troubleshooting and a privacy summary).
 
 ---
 
-## NEXT EXACT TASK
+## [SUPERSEDED 2026-08-14] Former next task — kept for history
 
-**This step needs the user and a face camera; it is not agent work.** Do not start P2 before it,
-because P2's design depends on the answer.
+**Superseded by the PHASE 2 PLAN section near the top of this file.** Step 1 below was completed
+(models A and B trained on real data; results recorded in the sections above and validated in VR).
+Steps 2–3 are absorbed into milestone M4 of the Phase 2 plan (which also fixes the labels.py
+settle-trim bug first, in M1). Do not work from this section.
 
 ### Step 1 — First real-data run (validates everything built so far)
 
