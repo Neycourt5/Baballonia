@@ -1,5 +1,6 @@
 ﻿using Baballonia.Services.events;
 using Baballonia.Services.Inference.Enums;
+using OpenCvSharp;
 using System;
 
 namespace Baballonia.Services.Inference;
@@ -11,51 +12,85 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
 
     public bool StabilizeEyes { get; set; } = true;
 
+    /// <summary>
+    /// Runs one eye inference tick.
+    /// </summary>
+    /// <remarks>
+    /// Every native buffer this method creates is released in the finally block. It previously
+    /// leaked the 8-channel temporal stack on every tick and disposed the transformed frame twice,
+    /// while returning early on six paths without releasing the camera frame at all - which at
+    /// ~100 ticks a second is a large amount of native memory churn for a method that is supposed
+    /// to be the cheap half of the pipeline.
+    /// </remarks>
     public float[]? RunUpdate()
     {
         var frame = VideoSource?.GetFrame(ColorType.Gray8);
-        if(frame == null)
+        if (frame == null)
             return null;
 
-        if (_fastCorruptionDetector.IsCorrupted(frame).isCorrupted)
-            return null;
+        Mat? transformed = null;
+        Mat? collected = null;
 
-        eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
-
-        var transformed = ImageTransformer?.Apply(frame);
-        if(transformed == null)
-            return null;
-
-        eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
-
-        var collected = _imageCollector.Apply(transformed);
-        transformed.Dispose();
-        if (collected == null)
-            return null;
-
-        if (InferenceService == null)
-            return null;
-
-        ImageConverter?.Convert(collected, InferenceService.GetInputTensor());
-
-        var inferenceResult = InferenceService?.Run();
-        if(inferenceResult == null)
-            return null;
-
-        if (Filter != null)
+        try
         {
-            inferenceResult = Filter.Filter(inferenceResult);
+            if (_fastCorruptionDetector.IsCorrupted(frame).isCorrupted)
+                return null;
+
+            eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
+
+            transformed = ImageTransformer?.Apply(frame);
+            if (transformed == null)
+                return null;
+
+            eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
+
+            collected = _imageCollector.Apply(transformed);
+            if (collected == null)
+                return null;   // still filling the temporal queue
+
+            if (InferenceService == null)
+                return null;
+
+            ImageConverter?.Convert(collected, InferenceService.GetInputTensor());
+
+            var inferenceResult = InferenceService.Run();
+            if (inferenceResult == null)
+                return null;
+
+            // Published before the filter and before ProcessExpressions, so subscribers see what
+            // the model actually said. The post-processing below is deliberately lossy - it fuses
+            // the two eyes' vertical gaze into one value and lets a closed eye borrow the other's
+            // yaw - and none of that can be undone from the outside.
+            eyePipelineEventBus.Publish(new EyePipelineEvents.NewRawExpressionsEvent(
+                transformed, inferenceResult, DateTime.UtcNow.Ticks));
+
+            if (Filter != null)
+            {
+                inferenceResult = Filter.Filter(inferenceResult);
+            }
+
+            ProcessExpressions(ref inferenceResult);
+
+            eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
+
+            return inferenceResult;
         }
-
-        ProcessExpressions(ref inferenceResult);
-
-        eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
-
-        frame.Dispose();
-        transformed.Dispose();
-
-        return inferenceResult;
+        finally
+        {
+            frame.Dispose();
+            transformed?.Dispose();
+            collected?.Dispose();
+        }
     }
+
+    /// <summary>
+    /// Drops the temporal frame history. Call when the camera changes.
+    /// </summary>
+    /// <remarks>
+    /// Without this, frames from the previous camera stay in the queue and get stacked with new
+    /// ones, so the model is handed four "consecutive" frames spanning a camera switch.
+    /// </remarks>
+    public void ResetTemporalState() => _imageCollector.Reset();
 
     private bool ProcessExpressions(ref float[] arKitExpressions)
     {
