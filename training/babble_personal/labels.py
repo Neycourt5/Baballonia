@@ -155,13 +155,47 @@ def estimate_cue_lag_seconds(
     return best_lag / fps, best_corr
 
 
+def _segment_key(session: Session, frame) -> tuple | None:
+    """Identity of the contiguous cue segment a frame belongs to, or None outside a cue.
+
+    Includes **phase and level**, not just the cue id and repetition. That matters: a ``rest`` phase
+    normally shares its cue id and repetition with the ``hold`` it follows, so keying on id+rep alone
+    makes the rest look like a continuation of the hold and its settle-in period is never trimmed.
+    Two holds at different levels under one id+rep alias the same way.
+    """
+    cue = frame.cue
+    if cue is None:
+        return None
+
+    try:
+        level = round(float(cue.get("level", 0.0)), 4)
+    except (TypeError, ValueError):
+        level = 0.0
+
+    return (
+        session.session_id,
+        str(cue.get("id", "")),
+        int(cue.get("rep", 0) or 0),
+        str(cue.get("phase", "")).lower(),
+        level,
+    )
+
+
 def build_labels(
     sessions: Sequence[Session],
     *,
     use_speech_pseudo_labels: bool = True,
     hold_settle_trim: float = HOLD_SETTLE_TRIM_SECONDS,
+    dim_boost: dict[int, float] | None = None,
 ) -> LabelSet:
-    """Build targets and weights for every frame in ``sessions``."""
+    """Build targets and weights for every frame in ``sessions``.
+
+    ``dim_boost`` multiplies the final weight of specific expressions, so a dimension the user
+    actually complains about (JawOpen) can carry more of the loss than the other forty-four. It is
+    deliberately **symmetric** - it emphasises being right about zeros and about genuine openings
+    equally, and never touches a target. Asymmetric "punish false positives harder" pressure lives in
+    the training loss (``--fp-penalty``), where it is visible and separately tunable.
+    """
     n_dims = schema.EXPRESSION_COUNT
     frames = list(iter_frames(sessions))
     n = len(frames)
@@ -170,11 +204,18 @@ def build_labels(
     weights = np.zeros((n, n_dims), dtype=np.float32)
     stock = np.zeros((n, n_dims), dtype=np.float32)
 
-    # Hold phases need to know when they started, to trim the settle-in period.
-    hold_started_at: dict[tuple[str, str, int], int] = {}
+    # Cue segments are contiguous in recording order, so the settle-in trim is measured from the
+    # frame where the segment identity last changed rather than from a per-key memo.
+    segment_key: tuple | None = None
+    segment_start_ticks: int = 0
 
     for row, (session, frame) in enumerate(frames):
         stock[row] = frame.stock
+
+        key = _segment_key(session, frame)
+        if key != segment_key:
+            segment_key = key
+            segment_start_ticks = frame.timestamp_ticks
 
         if session.is_neutral:
             # Whole face at rest: the strongest and cheapest supervision available.
@@ -212,11 +253,11 @@ def build_labels(
             continue
 
         if phase in ("hold", "rest"):
-            key = (session.session_id, str(cue.get("id", "")), int(cue.get("rep", 0)))
-            start = hold_started_at.setdefault(key, frame.timestamp_ticks)
-            elapsed = (frame.timestamp_ticks - start) / TICKS_PER_SECOND
+            elapsed = (frame.timestamp_ticks - segment_start_ticks) / TICKS_PER_SECOND
 
-            # Still moving into the expression: record nothing rather than something wrong.
+            # Still moving into the expression: record nothing rather than something wrong. This
+            # applies to rest phases too - relaxing out of a hold takes just as long as moving into
+            # one, and the frames in between show neither the cue nor a resting face.
             if elapsed < hold_settle_trim:
                 continue
 
@@ -240,7 +281,63 @@ def build_labels(
                     targets[row, dim] = 0.0
                     weights[row, dim] = W_UNCUED_DIM
 
+    if dim_boost:
+        for dim, factor in dim_boost.items():
+            if 0 <= int(dim) < n_dims:
+                weights[:, int(dim)] *= float(factor)
+
     return LabelSet(targets=targets, weights=weights, stock=stock)
+
+
+def parse_dim_boost(text: str | None) -> dict[int, float]:
+    """Parse ``"JawOpen=2.0,TongueOut=1.5"`` into ``{4: 2.0, 33: 1.5}``.
+
+    Names rather than indices on the command line: an index typo silently reweights the wrong
+    expression, whereas an unknown name fails immediately.
+    """
+    if not text:
+        return {}
+
+    boosts: dict[int, float] = {}
+    for chunk in text.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+
+        name, _, value = chunk.partition("=")
+        name = name.strip()
+        if name not in schema.INDEX_OF:
+            raise ValueError(f"Unknown expression '{name}' in --dim-boost. "
+                             f"Expected one of the 45 canonical names, e.g. JawOpen.")
+
+        try:
+            factor = float(value)
+        except ValueError:
+            raise ValueError(f"--dim-boost entry '{chunk}' has no numeric weight (use Name=2.0).")
+
+        if factor < 0:
+            raise ValueError(f"--dim-boost weight for {name} must not be negative.")
+
+        boosts[schema.INDEX_OF[name]] = factor
+
+    return boosts
+
+
+def parse_dims(text: str | None) -> tuple[int, ...]:
+    """Parse ``"JawOpen,TongueOut"`` into ``(4, 33)``."""
+    if not text:
+        return ()
+
+    dims: list[int] = []
+    for chunk in text.split(","):
+        name = chunk.strip()
+        if not name:
+            continue
+        if name not in schema.INDEX_OF:
+            raise ValueError(f"Unknown expression '{name}'. Expected a canonical name, e.g. JawOpen.")
+        dims.append(schema.INDEX_OF[name])
+
+    return tuple(dims)
 
 
 def apply_corrections(labels: LabelSet, corrections: Sequence[dict], frame_offset: int = 0) -> LabelSet:

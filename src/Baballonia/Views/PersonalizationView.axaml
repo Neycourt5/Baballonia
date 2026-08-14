@@ -126,7 +126,7 @@
           <TextBlock
               Opacity="0.7"
               TextWrapping="Wrap"
-              Text="Neutral: let your face rest for about 45 seconds. Speech: talk naturally for a minute. Record on different days and with slightly different headset positions so the model does not learn one exact camera angle." />
+              Text="Neutral: let your face rest for about 45 seconds. Speech: talk naturally for a minute. Wear the headset the way you normally do - just record across a few separate sittings, so the model sees the small shifts that happen anyway when you take it off and put it back on." />
         </StackPanel>
       </controls:ContentExample>
 

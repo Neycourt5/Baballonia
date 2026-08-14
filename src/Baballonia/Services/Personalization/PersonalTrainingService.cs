@@ -28,7 +28,32 @@ public enum TrainingStage
 /// <param name="Message">Friendly description of what is happening.</param>
 public sealed record TrainingProgress(TrainingStage Stage, string Message);
 
+/// <summary>
+/// How one watched expression behaved, stock versus personal (summary.json v2 and later).
+///
+/// A false-activation rate alone cannot describe the user's actual complaint: one jaw that hangs
+/// open for two seconds and forty single-frame flickers score the same rate but feel nothing alike.
+/// <see cref="LongestFalseRunSeconds"/> is what separates them.
+///
+/// <see cref="RangeRetention"/> is the guardrail in the other direction. Any model can win every
+/// false-positive number by refusing to move the expression at all, which reads as a dead face; a
+/// value well below 1 means the improvement was bought by flattening real movement.
+/// </summary>
+public sealed record WatchedExpressionSummary(
+    string Name,
+    int ClosedFrames,
+    double? StockFalseActivation,
+    double? PersonalFalseActivation,
+    double? StockLongestFalseRunSeconds,
+    double? PersonalLongestFalseRunSeconds,
+    double? RangeRetention,
+    bool SuppressionWarning);
+
 /// <summary>Measured outcome of a training run, read from the trainer's summary.json.</summary>
+/// <remarks>
+/// Every field beyond the v1 set is nullable and read defensively, so a summary written by an older
+/// trainer still loads and simply reports nothing for the newer metrics.
+/// </remarks>
 public sealed record TrainingSummary(
     string AdapterType,
     int Parameters,
@@ -42,7 +67,13 @@ public sealed record TrainingSummary(
     double? NeutralStockJitter,
     double? NeutralPersonalJitter,
     string Verdict,
-    IReadOnlyList<string> WorstRegressions);
+    IReadOnlyList<string> WorstRegressions,
+    int SummaryVersion = 1,
+    WatchedExpressionSummary? JawOpen = null,
+    WatchedExpressionSummary? TongueOut = null,
+    double? CrossTalkStock = null,
+    double? CrossTalkPersonal = null,
+    int HardExampleFrames = 0);
 
 /// <param name="Success">Whether a model was trained, exported and installed.</param>
 /// <param name="Message">Friendly headline, safe to show directly.</param>
@@ -385,43 +416,7 @@ public sealed class PersonalTrainingService(
 
         try
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(path));
-            var root = document.RootElement;
-
-            double? Number(string name) =>
-                root.TryGetProperty(name, out var element) && element.ValueKind == JsonValueKind.Number
-                    ? element.GetDouble()
-                    : null;
-
-            double? Nested(string parent, string name) =>
-                root.TryGetProperty(parent, out var section) &&
-                section.TryGetProperty(name, out var element) &&
-                element.ValueKind == JsonValueKind.Number
-                    ? element.GetDouble()
-                    : null;
-
-            var regressions = root.TryGetProperty("worst_regressions", out var list)
-                ? list.EnumerateArray()
-                    .Select(e => e.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "")
-                    .Where(s => s.Length > 0)
-                    .ToList()
-                : [];
-
-            return new TrainingSummary(
-                AdapterType: root.TryGetProperty("adapter_type", out var t) ? t.GetString() ?? "" : "",
-                Parameters: (int)(Number("parameters") ?? 0),
-                ValidatedOnHeldOutSessions: root.TryGetProperty("validated_on_held_out_sessions", out var v)
-                                            && v.ValueKind == JsonValueKind.True,
-                ExpressionsImproved: (int)(Number("expressions_improved") ?? 0),
-                ExpressionsRegressed: (int)(Number("expressions_regressed") ?? 0),
-                MeanStockMae: Number("mean_stock_mae"),
-                MeanPersonalMae: Number("mean_personal_mae"),
-                NeutralStockFalseActivation: Nested("neutral", "stock_false_activation_rate"),
-                NeutralPersonalFalseActivation: Nested("neutral", "personal_false_activation_rate"),
-                NeutralStockJitter: Nested("neutral", "stock_jitter"),
-                NeutralPersonalJitter: Nested("neutral", "personal_jitter"),
-                Verdict: root.TryGetProperty("verdict", out var verdict) ? verdict.GetString() ?? "unclear" : "unclear",
-                WorstRegressions: regressions);
+            return TrainingSummaryReader.Parse(File.ReadAllText(path));
         }
         catch (Exception ex)
         {

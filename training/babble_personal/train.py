@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, WeightedRandomSampler
 
 from . import augment, dataset as ds
 from . import evaluate, labels as lbl, models, schema
@@ -42,6 +43,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--temporal", type=float, default=0.5,
                         help="Weight on residual smoothness between consecutive frames (0 disables). "
                              "Damps correction jitter without slowing the output down.")
+    parser.add_argument("--dim-boost", default=None, metavar="Name=W,...",
+                        help="Weight specific expressions more heavily, e.g. 'JawOpen=2.0'. "
+                             "Symmetric: emphasises being right about zeros and about genuine "
+                             "openings equally.")
+    parser.add_argument("--fp-penalty", type=float, default=0.0,
+                        help="Asymmetric cost for firing where the label says zero, on --fp-dims. "
+                             "0 disables. Watch range retention in the report when raising it.")
+    parser.add_argument("--fp-dims", default="JawOpen,TongueOut",
+                        help="Expressions --fp-penalty applies to")
+    parser.add_argument("--hard-negative-boost", type=float, default=0.0,
+                        help="Oversample confidently-zero frames where the stock model is already "
+                             "firing on a watched expression - the decision-boundary cases. "
+                             "0 disables.")
+    parser.add_argument("--hard-negative-threshold", type=float, default=0.3,
+                        help="Stock value above which a confidently-zero frame counts as hard")
     parser.add_argument("--seed", type=int, default=0)
     return parser.parse_args(argv)
 
@@ -94,9 +110,41 @@ class _Batch:
     def __len__(self) -> int:
         return len(self.stock)
 
-    def loader(self, batch_size: int, shuffle: bool) -> DataLoader:
-        return DataLoader(TensorDataset(torch.arange(len(self))),
-                          batch_size=batch_size, shuffle=shuffle)
+    def hard_negative_weights(self, dims: Sequence[int], boost: float,
+                              threshold: float) -> torch.Tensor | None:
+        """Sampling weight per row, raised on frames that sit on the decision boundary.
+
+        A "hard negative" here is a frame we know should read zero on a watched expression, where
+        the stock model is already firing anyway. Those are the frames the corrector has to get
+        right to fix an intermittent false activation, and in a corpus dominated by easy resting
+        frames they are rare enough to be drowned out. Returns None when nothing qualifies, so the
+        caller falls back to plain shuffling rather than silently training on a degenerate sampler.
+        """
+        if boost <= 0 or not dims:
+            return None
+
+        index = torch.as_tensor(list(dims), dtype=torch.long)
+        confident_zero = (self.weights.index_select(1, index) > 0) & \
+                         (self.targets.index_select(1, index) <= 1e-6)
+        firing = self.stock.index_select(1, index) > threshold
+        hard = (confident_zero & firing).any(dim=1)
+
+        if not bool(hard.any()):
+            return None
+
+        return torch.where(hard, torch.full_like(hard, 1.0 + boost, dtype=torch.float32),
+                           torch.ones(len(self), dtype=torch.float32))
+
+    def loader(self, batch_size: int, shuffle: bool,
+               sample_weights: torch.Tensor | None = None) -> DataLoader:
+        dataset = TensorDataset(torch.arange(len(self)))
+
+        if sample_weights is not None:
+            # Replacement sampling keeps the epoch the same length while changing what it contains.
+            sampler = WeightedRandomSampler(sample_weights, num_samples=len(self), replacement=True)
+            return DataLoader(dataset, batch_size=batch_size, sampler=sampler)
+
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
 
 def _run_epoch(
@@ -109,6 +157,8 @@ def _run_epoch(
     *,
     consistency: float = 0.0,
     temporal: float = 0.0,
+    fp_penalty: float = 0.0,
+    fp_dims: Sequence[int] = (),
     generator: torch.Generator | None = None,
 ) -> dict[str, float]:
     """One pass over the data.
@@ -123,7 +173,7 @@ def _run_epoch(
     Both are skipped at validation time: they are training pressure, not something to score.
     """
     model.train(train)
-    totals = {"loss": 0.0, "fit": 0.0, "shrink": 0.0, "consistency": 0.0, "temporal": 0.0}
+    totals = {"loss": 0.0, "fit": 0.0, "shrink": 0.0, "consistency": 0.0, "temporal": 0.0, "fp": 0.0}
     batches = 0
 
     uses_image = getattr(model, "uses_image", False)
@@ -148,6 +198,15 @@ def _run_epoch(
                 loss = loss + consistency * penalty
                 consistency_value = float(penalty.detach())
 
+            # Scored at validation as well as training: it is a real property of the model, and
+            # seeing it on held-out data is how an over-aggressive setting gets caught.
+            fp_value = 0.0
+            if fp_penalty > 0 and len(fp_dims):
+                penalty = models.false_positive_penalty(predicted, targets, weights, fp_dims)
+                if train:
+                    loss = loss + fp_penalty * penalty
+                fp_value = float(penalty.detach())
+
             temporal_value = 0.0
             if train and temporal > 0:
                 previous = data.previous[index]
@@ -166,6 +225,7 @@ def _run_epoch(
 
         parts["consistency"] = consistency_value
         parts["temporal"] = temporal_value
+        parts["fp"] = fp_value
         parts["loss"] = float(loss.detach())
 
         for key in totals:
@@ -213,8 +273,19 @@ def main(argv: list[str] | None = None) -> int:
               "than reality.")
 
     use_pseudo = not args.no_speech_pseudo_labels
-    train_labels = lbl.build_labels(train_sessions, use_speech_pseudo_labels=use_pseudo)
+    dim_boost = lbl.parse_dim_boost(args.dim_boost)
+    fp_dims = lbl.parse_dims(args.fp_dims) if args.fp_penalty > 0 else ()
+
+    train_labels = lbl.build_labels(train_sessions, use_speech_pseudo_labels=use_pseudo,
+                                    dim_boost=dim_boost)
     print(f"\nTraining labels:\n{train_labels.describe()}")
+
+    if dim_boost:
+        described = ", ".join(f"{schema.EXPRESSION_NAMES[d]}x{w:g}" for d, w in dim_boost.items())
+        print(f"  weight boost: {described}")
+    if fp_dims:
+        described = ", ".join(schema.EXPRESSION_NAMES[d] for d in fp_dims)
+        print(f"  false-positive penalty: {args.fp_penalty:g} on {described}")
 
     if train_labels.coverage() == 0:
         print("\nERROR: no supervised cells. Record a neutral session (or a guided one) - speech "
@@ -229,7 +300,20 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\nModel: {model.adapter_type} ({models.parameter_count(model):,} parameters)")
 
     train_data = _Batch(train_sessions, train_labels, need_images)
-    train_loader = train_data.loader(args.batch_size, shuffle=True)
+
+    sample_weights = train_data.hard_negative_weights(
+        fp_dims or evaluate.WATCHED_DIMS, args.hard_negative_boost, args.hard_negative_threshold)
+    if args.hard_negative_boost > 0:
+        if sample_weights is None:
+            print("  hard-negative boost requested, but no frame qualifies "
+                  f"(no confidently-zero frame has stock > {args.hard_negative_threshold}); "
+                  "sampling normally")
+        else:
+            hard_count = int((sample_weights > 1.0).sum())
+            print(f"  hard-negative boost: {args.hard_negative_boost:g} on {hard_count} of "
+                  f"{len(train_data)} frames")
+
+    train_loader = train_data.loader(args.batch_size, shuffle=True, sample_weights=sample_weights)
 
     consistency = args.consistency if need_images else 0.0
     if need_images and consistency > 0:
@@ -241,7 +325,8 @@ def main(argv: list[str] | None = None) -> int:
     val_data = None
     val_loader = None
     if val_sessions:
-        val_labels = lbl.build_labels(val_sessions, use_speech_pseudo_labels=use_pseudo)
+        val_labels = lbl.build_labels(val_sessions, use_speech_pseudo_labels=use_pseudo,
+                                      dim_boost=dim_boost)
         val_data = _Batch(val_sessions, val_labels, need_images)
         val_loader = val_data.loader(args.batch_size, shuffle=False)
 
@@ -262,12 +347,14 @@ def main(argv: list[str] | None = None) -> int:
         train_stats = _run_epoch(
             model, train_data, train_loader, optimizer, args.shrinkage, train=True,
             consistency=consistency, temporal=args.temporal, generator=generator,
+            fp_penalty=args.fp_penalty, fp_dims=fp_dims,
         )
         scheduler.step()
 
         if val_loader is not None:
             val_stats = _run_epoch(
-                model, val_data, val_loader, optimizer, args.shrinkage, train=False)
+                model, val_data, val_loader, optimizer, args.shrinkage, train=False,
+                fp_penalty=args.fp_penalty, fp_dims=fp_dims)
             score = val_stats["fit"]
             line = (f"  epoch {epoch + 1:>3}  train {train_stats['loss']:.5f}"
                     f"  val_fit {val_stats['fit']:.5f}  shrink {train_stats['shrink']:.5f}")
@@ -318,7 +405,23 @@ def main(argv: list[str] | None = None) -> int:
         neutral_personal = _predict(model, neutral_images, torch.from_numpy(neutral_labels.stock))
         neutral = evaluate.neutral_report(neutral_labels.stock, neutral_personal)
 
-    report_text = evaluate.format_report(expression_reports, neutral)
+    # The expressions the user still complains about, examined in detail: how badly they misfire
+    # while the face is closed, how long each misfire lasts, and - the guardrail - whether the model
+    # bought that improvement by refusing to move at all.
+    dim_reports = evaluate.build_dim_reports(
+        report_sessions, report_labels, report_labels.stock, personal)
+
+    cued_rows, cued_dims = evaluate.collect_cued_dims(report_sessions)
+    cross_talk_stock = cross_talk_personal = None
+    if len(cued_rows):
+        cross_talk_stock = evaluate.cross_talk(report_labels.stock[cued_rows], cued_dims)
+        cross_talk_personal = evaluate.cross_talk(personal[cued_rows], cued_dims)
+
+    hard_example_block = _hard_example_block(report_sessions, report_labels, personal)
+
+    report_text = evaluate.format_report(
+        expression_reports, neutral, dim_reports=dim_reports,
+        cross_talk_stock=cross_talk_stock, cross_talk_personal=cross_talk_personal)
     print(report_text)
 
     (run_dir / "metrics.txt").write_text(report_text, encoding="utf-8")
@@ -341,6 +444,10 @@ def main(argv: list[str] | None = None) -> int:
         neutral=neutral,
         train_sessions=train_sessions,
         val_sessions=val_sessions,
+        dim_reports=dim_reports,
+        cross_talk_stock=cross_talk_stock,
+        cross_talk_personal=cross_talk_personal,
+        hard_examples=hard_example_block,
     )
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
@@ -348,6 +455,48 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Export with: python -m babble_personal.export --checkpoint \"{checkpoint_path}\"")
     _stage("done")
     return 0
+
+
+def _hard_example_block(report_sessions, report_labels, personal) -> dict | None:
+    """Scores on frames the user personally flagged as wrong, when any are held out.
+
+    These are the highest-value frames in the corpus: real failures of a real model, labelled by the
+    only authority on what the face was actually doing. A model that improves everywhere except here
+    has not fixed the thing that prompted the complaint.
+    """
+    corrections = [s for s in report_sessions if getattr(s, "is_correction", False)]
+    if not corrections:
+        return None
+
+    per_dim: dict[str, dict] = {}
+    total_frames = 0
+
+    for dim in evaluate.WATCHED_DIMS:
+        blocks = evaluate.collect_closed_blocks(
+            corrections, report_labels, report_labels.stock, personal, dim)
+        if not blocks:
+            continue
+
+        stock_values = np.concatenate([b[0] for b in blocks])
+        personal_values = np.concatenate([b[1] for b in blocks])
+        total_frames = max(total_frames, len(stock_values))
+
+        per_dim[schema.EXPRESSION_NAMES[dim]] = {
+            "frames": len(stock_values),
+            "stock_fp_rate": float((stock_values > evaluate.ACTIVATION_THRESHOLD).mean()),
+            "personal_fp_rate": float((personal_values > evaluate.ACTIVATION_THRESHOLD).mean()),
+            "stock_mean": float(stock_values.mean()),
+            "personal_mean": float(personal_values.mean()),
+        }
+
+    if not per_dim:
+        return None
+
+    return {
+        "sessions": [s.session_id for s in corrections],
+        "frames": total_frames,
+        "per_expression": per_dim,
+    }
 
 
 def _build_summary(
@@ -358,6 +507,10 @@ def _build_summary(
     neutral,
     train_sessions,
     val_sessions,
+    dim_reports=(),
+    cross_talk_stock=None,
+    cross_talk_personal=None,
+    hard_examples=None,
 ) -> dict:
     """Machine-readable outcome for the app's results screen.
 
@@ -373,7 +526,7 @@ def _build_summary(
     personal_mae = float(np.mean([r.personal_mae for r in scored])) if scored else None
 
     summary: dict = {
-        "summary_version": 1,
+        "summary_version": 2,
         "adapter_type": model.adapter_type,
         "parameters": models.parameter_count(model),
         "checkpoint": str(checkpoint_path),
@@ -406,6 +559,19 @@ def _build_summary(
             "stock_jitter": neutral.stock_jitter,
             "personal_jitter": neutral.personal_jitter,
         }
+
+    # Watched expressions get a top-level key each ("jaw_open", "tongue_out"), so the app can read
+    # the one it cares about without knowing the list.
+    for report in dim_reports:
+        key = "".join(f"_{c.lower()}" if c.isupper() else c for c in report.name).lstrip("_")
+        summary[key] = evaluate.dim_report_to_dict(report)
+
+    if cross_talk_stock is not None and cross_talk_personal is not None:
+        summary["cross_talk"] = {"stock": cross_talk_stock, "personal": cross_talk_personal}
+    else:
+        summary["cross_talk"] = None
+
+    summary["hard_examples"] = hard_examples
 
     summary["verdict"] = _verdict(summary)
     return summary

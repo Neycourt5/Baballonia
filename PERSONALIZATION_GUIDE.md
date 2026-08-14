@@ -136,17 +136,23 @@ You need **at least two of each type**. That is not arbitrary: testing holds bac
 session, so with only one of a type there is nothing left to check the model against, and the app
 will tell you the results cannot be trusted.
 
-Better, over several days:
+A good set, recorded across a few separate sittings:
 
 | Session | Why |
 |---|---|
-| Neutral, normal headset position | Baseline |
-| Neutral, headset slightly higher | Teaches tolerance for real placement drift |
-| Neutral, another day | Different lighting, different face |
+| Neutral ×2–3 | Your resting face, which is what fixes expressions firing at rest |
+| Neutral in different room lighting | Stops the model reading brightness as expression |
 | Speech ×2–3 | Natural expression combinations |
 
-Do not contort the camera into positions you would never actually use. The goal is the variation of
-normal daily wear, nothing more.
+**Wear the headset the way you normally do.** Do not deliberately reposition it, and do not try to
+reproduce an exact position either. You cannot put a headset on the same way twice to the precision
+the camera sees — a few millimetres of shift is a visible change in a 224×224 crop of your mouth —
+so recording across separate sittings covers that drift by itself. Deliberately odd camera angles
+are worse than useless: they spend model capacity on situations you will never actually be in.
+
+The one thing that genuinely breaks a model is changing the **crop** (the ROI settings on the Home
+page) after recording. That is a real change to what the model sees. If you adjust the crop, record
+fresh sessions and retrain.
 
 Roughly 23 MB per minute; a full set is a few hundred MB.
 

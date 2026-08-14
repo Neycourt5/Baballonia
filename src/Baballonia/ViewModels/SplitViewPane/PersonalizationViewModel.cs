@@ -420,6 +420,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
                       $"({(personalJitter <= stockJitter ? "steadier" : "shakier")}).");
         }
 
+        // The specific complaint this phase exists to fix, called out by name rather than left for
+        // the user to find in a 45-row table. Absent from older summaries, hence the null checks.
+        AppendWatchedExpression(lines, summary.JawOpen, "jaw-open");
+        AppendWatchedExpression(lines, summary.TongueOut, "tongue-out");
+
         lines.Add($"{summary.ExpressionsImproved} expressions improved, " +
                   $"{summary.ExpressionsRegressed} got worse" +
                   (summary.WorstRegressions.Count > 0
@@ -443,11 +448,49 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         }
         else if (summary.Verdict != "better")
         {
-            lines.Add("More recordings usually help, especially Neutral ones taken on different days.");
+            lines.Add("More recordings usually help, especially Neutral ones from separate sittings.");
         }
 
         lines.Add("Use Stock / Personal below to hear and see the difference for yourself.");
         ResultDetail = string.Join(Environment.NewLine + Environment.NewLine, lines);
+    }
+
+    /// <summary>
+    /// Reports one watched expression in plain language: how often it fired wrongly, how long the
+    /// worst episode lasted, and whether the fix cost real movement.
+    /// </summary>
+    /// <remarks>
+    /// Duration is reported alongside rate because they answer different questions. Twenty
+    /// single-frame flickers and one two-second hang produce the same rate; only the second is the
+    /// thing the user notices. The suppression warning is reported in the same breath so an
+    /// improvement that came from deadening the expression cannot read as a clean win.
+    /// </remarks>
+    private static void AppendWatchedExpression(
+        List<string> lines, WatchedExpressionSummary? watched, string label)
+    {
+        if (watched is null || watched.ClosedFrames == 0)
+            return;
+
+        if (watched.StockFalseActivation is not { } stock ||
+            watched.PersonalFalseActivation is not { } personal)
+            return;
+
+        var text = $"False {label} while your mouth was closed: {stock:P1} before, {personal:P1} after.";
+
+        if (watched.StockLongestFalseRunSeconds is { } stockRun &&
+            watched.PersonalLongestFalseRunSeconds is { } personalRun &&
+            (stockRun > 0 || personalRun > 0))
+        {
+            text += $" Longest single episode: {stockRun:F1}s before, {personalRun:F1}s after.";
+        }
+
+        if (watched.SuppressionWarning)
+        {
+            text += " Careful: it also moves noticeably less during speech, which can look flat - " +
+                    "check the Stock / Personal switch while talking.";
+        }
+
+        lines.Add(text);
     }
 
     // =============================================================================================

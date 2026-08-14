@@ -23,6 +23,8 @@ has nothing to overfit to.
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import torch
 import torch.nn as nn
 
@@ -159,6 +161,44 @@ def temporal_penalty(residual: torch.Tensor, previous_residual: torch.Tensor,
 
     delta = (residual - previous_residual).pow(2).mean(dim=1)
     return (delta * valid).sum() / valid.sum().clamp_min(1.0)
+
+
+def false_positive_penalty(
+    predicted: torch.Tensor,
+    targets: torch.Tensor,
+    weights: torch.Tensor,
+    dims: Sequence[int],
+) -> torch.Tensor:
+    """Extra cost for firing where a confident label says the expression should be at zero.
+
+    Asymmetric on purpose, and deliberately narrow. The user's complaint is one-directional - the
+    jaw hangs *open* when it should be closed, never the reverse - and the symmetric Huber fit treats
+    both directions as equally bad. Only overshoot above the target is charged here, so this term is
+    silent when the model under-reports and cannot teach it to close a mouth that is genuinely open.
+
+    Squared, so the visible glitches dominate the constant small ones. Restricted to ``dims``,
+    because applying it everywhere is just a blunt "output less" pressure across the whole face.
+
+    This is the term most capable of producing a dead-looking avatar if pushed hard, which is why
+    ``evaluate.DimReport`` computes range retention from the same run and the report prints them
+    next to each other.
+    """
+    if len(dims) == 0:
+        return predicted.new_zeros(())
+
+    index = torch.as_tensor(list(dims), dtype=torch.long, device=predicted.device)
+    picked_predicted = predicted.index_select(1, index)
+    picked_targets = targets.index_select(1, index)
+    picked_weights = weights.index_select(1, index)
+
+    # Only where we are confident the answer is zero. An unlabelled cell has no opinion, and
+    # punishing activity there would be inventing supervision.
+    mask = (picked_weights > 0) & (picked_targets <= 1e-6)
+    if not bool(mask.any()):
+        return predicted.new_zeros(())
+
+    overshoot = torch.relu(picked_predicted - picked_targets) * mask
+    return overshoot.pow(2).sum() / mask.sum().clamp_min(1)
 
 
 def masked_residual_loss(
