@@ -337,6 +337,94 @@ def parse_dim_boost(text: str | None) -> dict[int, float]:
     return boosts
 
 
+def cue_lag_report(sessions: Sequence[Session]) -> list[dict]:
+    """Per-cue check that the user actually followed the avatar.
+
+    This is the experiment the whole guided-capture design rests on, and it costs one recording to
+    run. If the stock model's reading of the cued expression does not track the commanded signal
+    after lag correction, then the commanded vector is not describing the user's face, and every
+    label built from it is fiction - a model trained on it would learn confidently wrong things and
+    every metric would look fine, because the metrics are built from the same bad labels.
+
+    Correlation around 0.6 or better means the labels are real. Much lower means either the cue was
+    not understood, the avatar was not rendering it, or the intensity was unreproducible - all of
+    which are fixable, but only if noticed.
+
+    Returns one entry per (session, cue id, repetition), each with the estimated lag and correlation.
+    """
+    reports: list[dict] = []
+
+    for session in sessions:
+        if not session.is_guided:
+            continue
+
+        # Group frames by cue repetition: lag is a property of one attempt, not of a whole session.
+        groups: dict[tuple[str, int], list] = {}
+        for frame in session.frames:
+            cue = frame.cue
+            if not cue:
+                continue
+            key = (str(cue.get("id", "")), int(cue.get("rep", 0) or 0))
+            groups.setdefault(key, []).append(frame)
+
+        for (cue_id, rep), frames in sorted(groups.items()):
+            if len(frames) < 8:
+                continue
+
+            dims = [int(d) for d in (frames[0].cue or {}).get("dims", [])]
+            if not dims:
+                continue
+
+            primary = dims[0]
+            commanded = np.asarray(
+                [float((f.cue or {}).get("target", [0.0] * schema.EXPRESSION_COUNT)[primary])
+                 for f in frames], dtype=np.float64)
+            observed = np.asarray([float(f.stock[primary]) for f in frames], dtype=np.float64)
+            timestamps = np.asarray([f.timestamp_ticks for f in frames], dtype=np.float64)
+
+            lag, correlation = estimate_cue_lag_seconds(observed, commanded, timestamps)
+
+            reports.append({
+                "session": session.session_id,
+                "cue": cue_id,
+                "rep": rep,
+                "dim": schema.EXPRESSION_NAMES[primary],
+                "frames": len(frames),
+                "lag_seconds": lag,
+                "correlation": correlation,
+            })
+
+    return reports
+
+
+def format_cue_lag_report(reports: Sequence[dict], *, threshold: float = 0.6) -> str:
+    """Human-readable lag table, flagging repetitions the user probably did not follow."""
+    if not reports:
+        return ""
+
+    lines = ["Cue tracking (did the face follow the avatar?)",
+             f"  {'cue':<18}{'rep':>5}{'frames':>8}{'lag s':>9}{'corr':>8}"]
+
+    weak = 0
+    for entry in reports:
+        flag = ""
+        if entry["correlation"] < threshold:
+            flag = "  <-- weak"
+            weak += 1
+        lines.append(f"  {entry['cue']:<18}{entry['rep']:>5}{entry['frames']:>8}"
+                     f"{entry['lag_seconds']:>9.2f}{entry['correlation']:>8.2f}{flag}")
+
+    mean = float(np.mean([e["correlation"] for e in reports]))
+    lines.append(f"  mean correlation {mean:.2f} over {len(reports)} repetitions")
+
+    if weak:
+        lines.append(f"  {weak} repetition(s) below {threshold}: the commanded value may not "
+                     "describe what the face was doing. Check the avatar renders the cue, and that "
+                     "the intensity is reproducible.")
+
+    return "\n".join(lines)
+
+
 def parse_dims(text: str | None) -> tuple[int, ...]:
     """Parse ``"JawOpen,TongueOut"`` into ``(4, 33)``."""
     if not text:

@@ -224,6 +224,65 @@ def test_parse_dims() -> None:
         raise AssertionError("expected ValueError for an unknown expression name")
 
 
+# ---------------------------------------------------------------------------
+# Cue-lag diagnostic - the experiment the guided design depends on
+# ---------------------------------------------------------------------------
+
+
+def _guided_session_with_response(delay_frames: int, *, follows: bool = True) -> Session:
+    """A guided hold where the stock model's reading trails the command by `delay_frames`."""
+    commanded = ([0.0] * (1 * FPS)) + ([1.0] * (2 * FPS)) + ([0.0] * (1 * FPS))
+    cues = []
+    for value in commanded:
+        phase = "hold" if value > 0 else "rest"
+        cues.append(_cue("JawOpen100", phase, value))
+
+    session = _session("Guided", cues)
+
+    # Shift the observed response later in time, and optionally decouple it entirely.
+    rng = np.random.default_rng(0)
+    for i, frame in enumerate(session.frames):
+        source = i - delay_frames
+        observed = commanded[source] if 0 <= source < len(commanded) else 0.0
+        if not follows:
+            observed = float(rng.random())
+        frame.stock[JAW] = observed + float(rng.normal(0, 0.01))
+
+    return session
+
+
+def test_cue_lag_is_recovered_when_the_user_follows() -> None:
+    session = _guided_session_with_response(delay_frames=6)  # 200 ms at 30 fps
+
+    reports = lbl.cue_lag_report([session])
+
+    assert reports, "a guided session should produce a lag report"
+    best = max(reports, key=lambda r: r["correlation"])
+    assert best["correlation"] > 0.6, f"correlation {best['correlation']:.2f} - labels look real"
+    assert 0.1 < best["lag_seconds"] < 0.35, f"recovered lag {best['lag_seconds']:.2f}s"
+
+
+def test_an_unfollowed_cue_is_flagged() -> None:
+    """The failure this exists to catch: labels that describe nothing the face did."""
+    session = _guided_session_with_response(delay_frames=0, follows=False)
+
+    reports = lbl.cue_lag_report([session])
+    text = lbl.format_cue_lag_report(reports)
+
+    assert reports
+    assert max(r["correlation"] for r in reports) < 0.5
+    assert "weak" in text
+
+
+def test_non_guided_sessions_produce_no_lag_report() -> None:
+    assert lbl.cue_lag_report([_session("Neutral", [None] * 60)]) == []
+    assert lbl.cue_lag_report([_session("Speech", [None] * 60)]) == []
+
+
+def test_lag_report_formats_empty_input_as_empty_text() -> None:
+    assert lbl.format_cue_lag_report([]) == ""
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0

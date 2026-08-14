@@ -307,6 +307,13 @@ def main(argv: list[str] | None = None) -> int:
                                     dim_boost=dim_boost)
     print(f"\nTraining labels:\n{train_labels.describe()}")
 
+    # Printed before training, because a weak correlation means the guided labels are fiction and
+    # nothing downstream would reveal it - the metrics are built from the same labels.
+    lag_reports = lbl.cue_lag_report(sessions)
+    if lag_reports:
+        print()
+        print(lbl.format_cue_lag_report(lag_reports))
+
     if dim_boost:
         described = ", ".join(f"{schema.EXPRESSION_NAMES[d]}x{w:g}" for d, w in dim_boost.items())
         print(f"  weight boost: {described}")

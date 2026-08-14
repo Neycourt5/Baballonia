@@ -116,6 +116,14 @@ public partial class App : Application
             // Personalization: inert unless a calibration session or personal model activates it.
             services.AddSingleton<ExpressionOverrideService>();
             services.AddSingleton<IExpressionOverrideSource>(sp => sp.GetRequiredService<ExpressionOverrideService>());
+
+            // Stamps the commanded target onto recorded frames during guided calibration. Registered
+            // as the recorder's cue source so what the avatar shows and what the trainer is told come
+            // from one snapshot rather than two code paths that have to agree.
+            services.AddSingleton<CueStateSource>();
+            services.AddSingleton<IReadOnlyCueStateSource>(sp => sp.GetRequiredService<CueStateSource>());
+            services.AddSingleton<GuidedCalibrationService>();
+
             services.AddSingleton<DatasetRecorderService>();
             services.AddSingleton<PersonalModelManager>();
             services.AddSingleton<PersonalizationEnvironment>();

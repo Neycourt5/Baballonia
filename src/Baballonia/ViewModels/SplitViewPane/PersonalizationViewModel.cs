@@ -39,6 +39,14 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
     /// <summary>Optional so the view model still constructs in tests that do not care about it.</summary>
     private readonly HardExampleService? _hardExamples;
+    private readonly GuidedCalibrationService? _guided;
+
+    /// <summary>
+    /// Ticks the cue engine while a guided session runs. Faster than the status timer because it
+    /// also drives the override's keep-alive, and because a 0.75 s transition commanded on a 250 ms
+    /// timer would land visibly late.
+    /// </summary>
+    private readonly DispatcherTimer _guidedTimer;
 
     private readonly Action<FacePipelineEvents.NewTransformedFrameEvent> _frameHandler;
     private readonly Action<FacePipelineEvents.NewRawExpressionsEvent> _rawHandler;
@@ -75,6 +83,14 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private bool _isRecording;
     [ObservableProperty] private string _recordingStatus = "";
     [ObservableProperty] private string _notes = "";
+
+    // ---- guided calibration -------------------------------------------------------------------
+
+    [ObservableProperty] private bool _isGuidedRunning;
+    [ObservableProperty] private string _guidedInstruction = "";
+    [ObservableProperty] private double _guidedProgress;
+    [ObservableProperty] private string _guidedStatus = "";
+    [ObservableProperty] private bool _canStartGuided;
 
     // ---- quick correction ---------------------------------------------------------------------
 
@@ -165,7 +181,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         ILocalSettingsService settings,
         IFacePipelineEventBus faceEventBus,
         ILogger<PersonalizationViewModel> logger,
-        HardExampleService? hardExamples = null)
+        HardExampleService? hardExamples = null,
+        GuidedCalibrationService? guided = null)
     {
         _recorder = recorder;
         _modelManager = modelManager;
@@ -175,6 +192,10 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         _faceEventBus = faceEventBus;
         _logger = logger;
         _hardExamples = hardExamples;
+        _guided = guided;
+
+        _guidedTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        _guidedTimer.Tick += (_, _) => OnGuidedTick();
 
         foreach (var (name, index) in PersonalizationSchema.ExpressionNames.Select((n, i) => (n, i)))
             Comparison.Add(new ExpressionComparisonRow(index, name));
@@ -237,6 +258,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         // Nothing to save unless frames are arriving, so the button says so rather than failing.
         CanFlagCorrection = _hardExamples != null && _cameraSeenRecently;
+
+        CanStartGuided = _guided != null && _cameraSeenRecently && !IsGuidedRunning && !IsRecording;
 
         CanTrain = setup.CanTrain && !IsBusy;
     }
@@ -322,6 +345,77 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         System.IO.Directory.CreateDirectory(PersonalizationPaths.DatasetRoot);
         Utils.OpenUrl(PersonalizationPaths.DatasetRoot);
+    }
+
+    // =============================================================================================
+    // Guided calibration
+    // =============================================================================================
+
+    /// <summary>
+    /// Runs the jaw routine: the avatar performs a known sequence, the user copies it, and the
+    /// commanded value becomes the label.
+    /// </summary>
+    /// <remarks>
+    /// This is the only source of non-zero supervision in the project. Neutral sessions teach the
+    /// model what a resting face is; nothing else teaches it what a correct *open* jaw is, which is
+    /// why "be quieter at rest" was previously the only thing it could learn.
+    /// </remarks>
+    [RelayCommand]
+    private void StartGuidedJawCalibration()
+    {
+        if (_guided is null)
+        {
+            GuidedStatus = "Guided calibration is unavailable in this build.";
+            return;
+        }
+
+        var routine = new GuidedCaptureRoutine(GuidedCaptureRoutine.BuildJawOpenRoutine());
+        var result = _guided.Start(routine, notes: "Guided JawOpen calibration");
+
+        GuidedStatus = result.Started
+            ? "Watch your avatar and copy what it does."
+            : result.Message;
+
+        if (!result.Started)
+            return;
+
+        IsGuidedRunning = true;
+        GuidedProgress = 0;
+        _guidedTimer.Start();
+    }
+
+    [RelayCommand]
+    private async Task StopGuidedCalibrationAsync()
+    {
+        _guidedTimer.Stop();
+        IsGuidedRunning = false;
+
+        if (_guided is null)
+            return;
+
+        var summary = await _guided.StopAsync();
+        GuidedStatus = summary is null
+            ? "Calibration stopped."
+            : $"Saved {summary.FrameCount} frames. Press Train My Face Model to use them.";
+
+        GuidedProgress = 0;
+        GuidedInstruction = "";
+        RefreshSetup();
+    }
+
+    private void OnGuidedTick()
+    {
+        if (_guided is null)
+            return;
+
+        var stillRunning = _guided.Tick();
+        var progress = _guided.Progress;
+
+        GuidedInstruction = progress.Instruction;
+        GuidedProgress = progress.Fraction * 100;
+
+        if (!stillRunning)
+            _ = StopGuidedCalibrationAsync();
     }
 
     // =============================================================================================
@@ -693,12 +787,17 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     public void Dispose()
     {
         _statusTimer.Stop();
+        _guidedTimer.Stop();
         _faceEventBus.Unsubscribe(_frameHandler);
         _faceEventBus.Unsubscribe(_rawHandler);
         _faceEventBus.Unsubscribe(_correctedHandler);
 
         _workCancellation?.Cancel();
         _workCancellation?.Dispose();
+
+        // Navigating away mid-calibration must hand the avatar back to live tracking rather than
+        // leaving it frozen in whatever expression was being commanded.
+        _guided?.Dispose();
 
         if (_recorder.IsRecording)
             _recorder.StopSessionAsync().GetAwaiter().GetResult();

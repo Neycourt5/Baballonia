@@ -130,6 +130,45 @@
         </StackPanel>
       </controls:ContentExample>
 
+      <!-- ====================== GUIDED CALIBRATION ===================== -->
+      <!--
+        The only place the dataset gets a correct *non-zero* label. Neutral recordings teach the
+        model what rest looks like; this teaches it what a genuine jaw opening looks like, which is
+        the other half of telling those two apart.
+      -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Guided calibration" />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="Your avatar opens its jaw by a set amount and you copy it. Because the app chose the amount, it knows what your face should have been doing - which is the one thing plain recordings cannot tell it. Put your headset on and watch your avatar in a mirror before starting." />
+
+          <StackPanel IsVisible="{Binding !IsGuidedRunning}" Orientation="Horizontal" Spacing="12">
+            <Button
+                Command="{Binding StartGuidedJawCalibrationCommand}"
+                Content="Start jaw calibration (~1 min)"
+                IsEnabled="{Binding CanStartGuided}" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsGuidedRunning}" Spacing="8">
+            <TextBlock
+                FontSize="20"
+                FontWeight="SemiBold"
+                Text="{Binding GuidedInstruction}"
+                TextWrapping="Wrap" />
+            <ProgressBar Maximum="100" Minimum="0" Value="{Binding GuidedProgress}" />
+            <Button Command="{Binding StopGuidedCalibrationCommand}" Content="Stop" />
+          </StackPanel>
+
+          <TextBlock
+              IsVisible="{Binding GuidedStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Text="{Binding GuidedStatus}"
+              TextWrapping="Wrap" />
+        </StackPanel>
+      </controls:ContentExample>
+
       <!-- ======================= QUICK CORRECTION ====================== -->
       <!--
         A primary control, not an Advanced one. This is the loop the user runs while actually
