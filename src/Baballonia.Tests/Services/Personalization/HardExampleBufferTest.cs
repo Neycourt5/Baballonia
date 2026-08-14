@@ -226,6 +226,26 @@ public class HardExampleBufferTest
     }
 
     [TestMethod]
+    public void DisablingReleasesMemoryAndEnablingStartsFresh()
+    {
+        Tick(10, 0.5f);
+        Assert.IsGreaterThan(0L, _buffer.AllocatedBytes);
+
+        _buffer.Enabled = false;
+
+        Assert.AreEqual(0, _buffer.Count);
+        Assert.AreEqual(0L, _buffer.AllocatedBytes,
+            "turning quick correction off must release its preallocated frame ring");
+
+        _buffer.Enabled = true;
+        WaitForNextFrameSlot();
+        Tick(20, 0.6f);
+
+        Assert.AreEqual(1, _buffer.Count);
+        Assert.IsGreaterThan(0L, _buffer.AllocatedBytes);
+    }
+
+    [TestMethod]
     public void ClearDropsEverythingHeld()
     {
         Tick(10, 0.5f);

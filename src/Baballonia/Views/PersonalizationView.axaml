@@ -234,10 +234,19 @@
         <StackPanel Spacing="10">
           <TextBlock FontSize="16" FontWeight="SemiBold" Text="Quick correction" />
 
+          <CheckBox
+              Content="Keep recent frames for quick correction"
+              IsChecked="{Binding QuickCorrectionEnabled}" />
+
           <TextBlock
               Opacity="0.7"
               TextWrapping="Wrap"
               Text="If your avatar's mouth hangs open while your real mouth is closed, press this straight afterwards. It saves the last few seconds as an example of what the tracker got wrong." />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="When on, this keeps up to 10 seconds in memory (about 15 MB) and copies at most 30 camera frames per second. Nothing is encoded or written to disk until you press the button. Turn it off to stop those copies and release the buffer." />
 
           <StackPanel Orientation="Horizontal" Spacing="12">
             <Button
@@ -245,6 +254,7 @@
                 Content="My mouth was closed"
                 IsEnabled="{Binding CanFlagCorrection}" />
             <ComboBox
+                IsEnabled="{Binding QuickCorrectionEnabled}"
                 ItemsSource="{Binding CorrectionWindows}"
                 SelectedIndex="{Binding SelectedCorrectionWindowIndex}"
                 VerticalAlignment="Center"
@@ -258,16 +268,41 @@
               TextWrapping="Wrap" />
 
           <TextBlock
-              IsVisible="{Binding CanFlagCorrection}"
               Opacity="0.7"
               TextWrapping="Wrap"
               Text="{Binding SavedCorrectionCount, StringFormat='Corrections saved so far: {0}. They are used the next time you train.'}" />
 
+          <Button
+              Command="{Binding RequestDeleteSavedCorrectionsCommand}"
+              Content="Delete saved corrections..."
+              HorizontalAlignment="Left"
+              IsEnabled="{Binding CanDeleteSavedCorrections}" />
+
+          <Border
+              Background="#18C84040"
+              CornerRadius="4"
+              IsVisible="{Binding ShowDeleteCorrectionsConfirmation}"
+              Padding="10">
+            <StackPanel Spacing="8">
+              <TextBlock
+                  Text="Delete every saved quick correction? Ordinary recordings and trained model files are kept. A model already trained from these examples will not change until you retrain it."
+                  TextWrapping="Wrap" />
+              <StackPanel Orientation="Horizontal" Spacing="10">
+                <Button
+                    Command="{Binding ConfirmDeleteSavedCorrectionsCommand}"
+                    Content="Yes, delete corrections" />
+                <Button
+                    Command="{Binding CancelDeleteSavedCorrectionsCommand}"
+                    Content="Cancel" />
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
           <TextBlock
-              IsVisible="{Binding !CanFlagCorrection}"
+              IsVisible="{Binding QuickCorrectionAvailability, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
               Opacity="0.7"
               TextWrapping="Wrap"
-              Text="Start the face camera on the Home page to use quick corrections." />
+              Text="{Binding QuickCorrectionAvailability}" />
         </StackPanel>
       </controls:ContentExample>
 
@@ -278,21 +313,40 @@
 
           <StackPanel IsVisible="{Binding !IsBusy}" Spacing="6">
             <StackPanel Orientation="Horizontal" Spacing="12">
-              <TextBlock VerticalAlignment="Center" Text="Model" Width="70" />
-              <ComboBox Width="300" SelectedIndex="{Binding SelectedModelIndex}">
-                <ComboBoxItem Content="A - expressions only (recommended)" />
-                <ComboBoxItem Content="B - expressions + camera image (experimental)" />
-              </ComboBox>
+              <TextBlock VerticalAlignment="Center" Text="Train next" Width="70" />
+              <ComboBox
+                  ItemsSource="{Binding TrainingModelLabels}"
+                  SelectedIndex="{Binding SelectedModelIndex}"
+                  Width="360" />
             </StackPanel>
             <TextBlock
                 Opacity="0.7"
                 Text="{Binding ModelChoiceDescription}"
                 TextWrapping="Wrap" />
+
+            <Border
+                Background="#18000000"
+                CornerRadius="4"
+                IsVisible="{Binding IsModelCSelected}"
+                Padding="10">
+              <StackPanel Spacing="8">
+                <TextBlock Text="{Binding ModelCStatus}" TextWrapping="Wrap" />
+                <Button
+                    Command="{Binding PrepareModelCCommand}"
+                    Content="Prepare Model C"
+                    IsEnabled="{Binding CanPrepareModelC}"
+                    HorizontalAlignment="Left" />
+                <TextBlock
+                    Opacity="0.7"
+                    Text="Preparation generates features for existing recordings once and enables the shared-feature runner. Training C remains disabled until both are verified."
+                    TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
           </StackPanel>
 
           <Button
               Command="{Binding TrainCommand}"
-              Content="Train My Face Model"
+              Content="{Binding TrainButtonText}"
               IsEnabled="{Binding CanTrain}"
               IsVisible="{Binding !IsBusy}" />
 
@@ -330,10 +384,10 @@
         </StackPanel>
       </controls:ContentExample>
 
-      <!-- ========================== COMPARISON ========================= -->
+      <!-- ======================== MODEL SELECTION ====================== -->
       <controls:ContentExample>
         <StackPanel Spacing="10">
-          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Compare" />
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Face model selection" />
 
           <TextBlock
               FontWeight="SemiBold"
@@ -341,21 +395,23 @@
               Text="{Binding ActiveModelName}"
               TextWrapping="Wrap" />
 
+          <TextBlock Opacity="0.7" Text="Model to use" />
+
           <StackPanel Orientation="Horizontal" Spacing="12">
-            <RadioButton
-                Content="Stock"
-                GroupName="ModelChoice"
-                IsChecked="{Binding !PersonalModelEnabled}" />
-            <RadioButton
-                Content="Personal"
-                GroupName="ModelChoice"
-                IsChecked="{Binding PersonalModelEnabled}" />
+            <ComboBox
+                ItemsSource="{Binding ComparisonModelLabels}"
+                SelectedIndex="{Binding SelectedComparisonModelIndex}"
+                Width="360" />
+            <Button
+                Command="{Binding UseSelectedModelCommand}"
+                Content="{Binding UseSelectedModelButtonText}"
+                IsEnabled="{Binding CanUseSelectedModel}" />
           </StackPanel>
 
           <TextBlock
               Opacity="0.7"
               TextWrapping="Wrap"
-              Text="Switch between the two while pulling faces, or while talking to someone in VRChat. Stock is always available - nothing you do here can break normal tracking." />
+              Text="Select Stock or any available trained A/B/C model, then press Use. The Running now line above always shows the active model. Stock is always available." />
 
           <CheckBox Content="Advanced" IsChecked="{Binding ShowAdvanced}" />
 
@@ -397,6 +453,7 @@
                 Text="{Binding EmbeddingRunnerStatus}"
                 TextWrapping="Wrap" />
 
+            <TextBlock FontWeight="SemiBold" Text="Live expression comparison" />
             <CheckBox Content="Sort by largest change" IsChecked="{Binding SortByDelta}" />
 
             <Grid ColumnDefinitions="180,70,70,70">

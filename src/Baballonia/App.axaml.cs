@@ -137,9 +137,13 @@ public partial class App : Application
 
             // Holds the last ten seconds of tracking in memory (~15 MB, fixed) so a mistake can be
             // saved after the user notices it. Nothing reaches disk until they press the button.
+            // Respect the persisted switch before subscribing work begins; off leaves no ring
+            // allocated and the event handlers return before checksums or frame copies.
             services.AddSingleton(sp => new HardExampleBuffer(
                 sp.GetRequiredService<ILogger<HardExampleBuffer>>(),
-                sp.GetRequiredService<IFacePipelineEventBus>()));
+                sp.GetRequiredService<IFacePipelineEventBus>(),
+                enabled: sp.GetRequiredService<ILocalSettingsService>().ReadSetting(
+                    HardExampleService.EnabledSetting, true)));
             services.AddSingleton<HardExampleService>();
 
             // Optional audio expression assist. The default source reports silence, which makes the

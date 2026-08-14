@@ -9,10 +9,10 @@ should be able to continue without any prior conversation.
 
 ```
 Current phase: PHASE 2 IMPLEMENTED (M1-M5, M7 complete and committed).
-               PHASE 3 P3-1 THROUGH P3-4 IMPLEMENTED. Eye V2-A is selectable,
-               separately calibrated, fail-safe, OSC/VRCFT-integrated, and built.
-               STOP at the P3-4 HOME-PC hardware/VRChat gate below. Do not begin
-               P3-5 geometry or a learned eye model before that verdict.
+               PHASE 3 P3-1 THROUGH P3-5 IMPLEMENTED. Eye V2-A remains the
+               unchanged selectable control; V2-B Geometry Hybrid is separate.
+               The user intentionally overrode the original P3-4 home validation
+               gate on 2026-08-14. Hardware/VRChat validation is still pending.
 Branch: main (29 commits ahead of upstream 84eca8c, not pushed)
 Build: OK (core, Desktop, tests).
 Suite: 258 passed / 9 failed / 2 skipped.  The 9 are the same pre-existing
@@ -1201,7 +1201,12 @@ without adopting its branch. Keep `main` as the base.
 
 ---
 
-## PHASE 3 PROGRESS — P3-1 THROUGH P3-4 COMPLETE (2026-08-14, work PC)
+## PHASE 3 PROGRESS — P3-1 THROUGH P3-5 COMPLETE (2026-08-14, work PC)
+
+> **Gate override recorded 2026-08-14:** the user explicitly authorized P3-5 before performing
+> the original P3-4 home-PC V2-A validation. This is an intentional override, not evidence that
+> V2-A passed its hardware gate. Preserve V2-A exactly as a selectable control. The first serious
+> home comparison must test **Default / V2-A / V2-B / Paper Tracker in the same sitting**.
 
 | Milestone | Commit | Result |
 |---|---|---|
@@ -1209,6 +1214,33 @@ without adopting its branch. Keep `main` as the base.
 | P3-2 eye research spike | `0b5ed4e` | findings above; expr-dev measured, capacity ladder benchmarked |
 | P3-3 eye observability | `969aa49` | raw eye event, per-tick leak fixes, temporal reset, swap hygiene |
 | P3-4 Eye V2-A | `ad0846d` | selectable personal affine mapping, ~43 s anchors, 2 s recenter/validity, Wide/Squint OSC + module fix |
+| P3-5 Eye V2-B | working tree | separate Geometry Hybrid mode; classic pupil/iris + lid/aperture extractor, replaceable extractor seam, annotated eye-crop debug view, exact V2-A fallback |
+
+### P3-5 implementation record (gate override build)
+
+- The Home selector now exposes three independent choices: **Default Baballonia**, **V2-A —
+  Personal mapping**, and **V2-B — Geometry Hybrid**. Existing persisted V2-A keeps enum value 1,
+  the same calibration file, and the unchanged `EyeV2Mapper`; it was not replaced or silently
+  upgraded.
+- V2-B wraps that exact V2-A mapper and adds `IEyeGeometryExtractor`, a replaceable seam whose
+  implementations can be classic CV or a learned IR landmark model. The first implementation fits
+  a dark pupil/iris ellipse, estimates upper/lower lid lines from image gradients, and reports
+  normalized pupil center/radius, lid aperture, pupil visibility/occlusion evidence, and per-eye
+  confidence.
+- Only confident aperture/visibility evidence augments Squint and Wide. Gaze remains V2-A's
+  calibrated output for this first hardware experiment. Missing, stale, low-confidence, or failed
+  extraction produces the exact V2-A output for that tick; V2-B initialization failure selects
+  V2-A, and invalid/missing calibration still selects Default.
+- Advanced Eye V2 debug shows the real left/right 128x128 crops side-by-side with pupil cross/circle
+  and upper/lower lid lines, plus normalized geometry and confidence. Debug images are capped at
+  10 Hz.
+- The large learned V2-L capacity ladder was not built. The extractor interface is the only shared
+  infrastructure added for a later learned implementation.
+- Focused Release tests: **65 passed / 0 failed / 0 skipped**, covering Eye V2/pipeline behavior,
+  geometry extraction and fallback, mode selection, A/B/C face labels and persistent slots, and the
+  Model C train guard. Desktop self-contained Release publish succeeded. Packaged as
+  `bin/Baballonia-v8` and `bin/Baballonia-v8.zip`. The companion VRCFT module also rebuilt with
+  0 errors at `src/VRCFaceTracking.Baballonia/bin/Release/net10.0/VRCFaceTracking.Baballonia.zip`.
 
 **Test totals after P3-4:** C# **258 passed / 9 failed / 2 skipped** — the 9 are the unchanged
 pre-existing hardware failures (8 ESP32 serial + `TrainerServiceTest` needing `BabbleTrainer.exe`).
@@ -1309,10 +1341,12 @@ Run the F0 checklist items 1–7 as written. Two additions from this session:
 9. **Re-run the eye capacity ladder on the 4090/7950X3D**, CPU and DirectML, to fix the absolute
    numbers (script: `scratchpad/eye_capacity_bench_ort.py`, or reconstruct from the P3-2 section).
 
-### P3-4 HOME-PC HARDWARE / VRCHAT GATE — STOP HERE
+### P3-4/P3-5 HOME-PC HARDWARE / VRCHAT VALIDATION — STILL REQUIRED
 
-Do not implement P3-5, V2-L, or another learned eye model yet. Run this on the real cameras and
-headset, using the Release Desktop build and the newly rebuilt/reinstalled VRCFT module zip:
+P3-5 was intentionally authorized before this validation. Do not interpret implementation as a
+hardware verdict, and do not begin the large learned V2-L capacity ladder yet. Run this on the real
+cameras and headset, using the Release Desktop build and the newly rebuilt/reinstalled VRCFT module
+zip:
 
 1. **Default safety A/B:** launch with Default selected; confirm tracking is unchanged. Switch
    Default → V2 → Default repeatedly and restart in each saved mode. Missing/invalid V2 calibration
@@ -1337,9 +1371,10 @@ headset, using the Release Desktop build and the newly rebuilt/reinstalled VRCFT
 7. **OSC/module:** verify `LeftEyeWiden`, `LeftEyeSquint`, `RightEyeWiden`, and `RightEyeSquint`
    independently in VRCFT/VRChat; make sure the updated module zip, rather than a cached older
    module, is installed.
-8. **Subjective mirror verdict:** finish with same-session ABAB in a VRChat mirror: Default,
-   Eye V2-A, Paper, Eye V2-A. Record which wins gaze precision/responsiveness, calibration effort,
-   blink stability, Squint, and Wide.
+8. **Subjective mirror verdict:** finish with a same-sitting comparison in a VRChat mirror:
+   **Default, Eye V2-A, Eye V2-B, Paper Tracker**, then repeat the most important transitions.
+   Record which wins gaze precision/responsiveness, calibration effort, blink stability, Squint,
+   and Wide. Use V2-A as the unchanged control for isolating V2-B's geometry contribution.
 
 **Precommitted gate:** if V2-A is clearly better than current Baballonia on gaze and calibration UX
 and is within sight of Paper, preserve it and authorize P3-5; Squint is expected to be its principal
@@ -1348,8 +1383,10 @@ keep Paper Tracker. Record the measurements and verdict in this file before any 
 
 ### For the next agent session
 
-There is no authorized agent-safe Eye V2 implementation task until the HOME-PC P3-4 verdict is
-recorded. Do not infer permission for P3-5 from the fact that its design already exists.
+P3-5 is authorized and implemented in the working tree under the explicit override above. The next
+required work is the same-sitting Default / V2-A / V2-B / Paper hardware benchmark. The large
+learned V2-L capacity ladder remains unauthorized unless infrastructure genuinely shared with
+P3-5 requires it.
 
 ---
 
@@ -1913,10 +1950,17 @@ Every build goes to a **new** versioned folder under the repo's gitignored `bin/
 `bin\Baballonia-v2`, `bin\Baballonia-v3`, ... Never overwrite a previous build — the last known-good
 one must stay available to fall back to.
 
-Current: **`bin\Baballonia-v5\Baballonia.Desktop.exe`** — all of phase 2 (M1-M5, M7). Built on the
-work PC 2026-08-14, Release/win-x64/self-contained, 433 MB. Verified: 4 capture DLLs in `Modules\`,
-`training\babble_personal\` present including the new `derive_embedding`, `compute_embeddings` and
-`experiment` modules, `NAudio.dll` present, `faceModel.onnx` present.
+Current: **`bin\Baballonia-v10\Baballonia.Desktop.exe`** — v9 with the former face-model
+"Compare" section renamed and clarified as **Face model selection**. The current `Running now`
+status is prominent, the dropdown is labelled `Model to use`, and comparison terminology is
+reserved for the Advanced live expression table. Built on the work PC 2026-08-14,
+Release/win-x64/self-contained, 453,108,091 bytes across 395 files. Verified: executable,
+`faceModel.onnx`, training scripts, and all 4 capture DLLs present. The last focused suite remains
+**83 passed / 0 failed / 0 skipped**; the v10 XAML Release publish succeeded. Zip SHA-256:
+`F0CCA2A31F8494CCA1AD2DBE4E01C83F001DA92871F20FC41880EA2F168CD69E`.
+Previous: `bin\Baballonia-v9` (guarded deletion of saved quick corrections).
+Previous: `bin\Baballonia-v8` (quick-correction toggle, A/B/C selection, and P3-5 V2-B Geometry Hybrid).
+Previous: `bin\Baballonia-v7` (quick-correction and early Model C UI work before P3-5).
 Previous: `bin\Baballonia-v4` (model B regularizers + resting-jitter reporting).
 Previous: `bin\Baballonia-v3` (BOM fix, model A/B selector, active-model display, test no longer deletes the installed model).
 Previous: `bin\Baballonia-v2` (BOM fix + selector).

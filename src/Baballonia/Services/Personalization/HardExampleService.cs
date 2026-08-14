@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
+using Baballonia.Contracts;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 
@@ -47,6 +49,8 @@ public sealed record CorrectionKind(string Id, string Label, IReadOnlyList<int> 
 /// </summary>
 public sealed class HardExampleService
 {
+    public const string EnabledSetting = "Personalization_QuickCorrectionEnabled";
+
     /// <summary>How far back to save when the user does not choose. Long enough to cover noticing.</summary>
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromSeconds(5);
 
@@ -66,15 +70,32 @@ public sealed class HardExampleService
     private readonly HardExampleBuffer _buffer;
     private readonly PersonalModelManager _modelManager;
     private readonly ILogger<HardExampleService> _logger;
+    private readonly ILocalSettingsService? _settings;
+    private readonly CorrectionSessionStore _correctionStore;
+    private readonly SemaphoreSlim _sessionMutation = new(1, 1);
 
     private DateTime _lastFlagUtc = DateTime.MinValue;
 
     public HardExampleService(HardExampleBuffer buffer, PersonalModelManager modelManager,
-                              ILogger<HardExampleService> logger)
+                              ILogger<HardExampleService> logger,
+                              ILocalSettingsService? settings = null,
+                              CorrectionSessionStore? correctionStore = null)
     {
         _buffer = buffer;
         _modelManager = modelManager;
         _logger = logger;
+        _settings = settings;
+        _correctionStore = correctionStore ?? new CorrectionSessionStore(PersonalizationPaths.DatasetRoot);
+    }
+
+    public bool Enabled => _buffer.Enabled;
+
+    /// <summary>Persists capture state and immediately starts or releases the in-memory ring.</summary>
+    public void SetEnabled(bool enabled)
+    {
+        _buffer.Enabled = enabled;
+        _settings?.SaveSetting(EnabledSetting, enabled);
+        _logger.LogInformation("Quick correction rolling capture {State}", enabled ? "enabled" : "disabled");
     }
 
     /// <summary>Outcome of a flag, phrased so the caller can show it directly.</summary>
@@ -92,7 +113,7 @@ public sealed class HardExampleService
             return new FlagResult(false, "Just saved one - give it a few seconds.");
 
         if (!_buffer.Enabled)
-            return new FlagResult(false, "Quick correction is turned off in Advanced.");
+            return new FlagResult(false, "Quick correction is turned off.");
 
         var snapshot = _buffer.Take(effectiveWindow);
         if (snapshot.Frames.Count == 0)
@@ -105,7 +126,16 @@ public sealed class HardExampleService
 
         try
         {
-            var result = await Task.Run(() => Write(kind, effectiveWindow, snapshot, now));
+            await _sessionMutation.WaitAsync();
+            FlagResult result;
+            try
+            {
+                result = await Task.Run(() => Write(kind, effectiveWindow, snapshot, now));
+            }
+            finally
+            {
+                _sessionMutation.Release();
+            }
             _logger.LogInformation("Hard example saved: {Session} ({Frames} frames, {Kind})",
                 result.SessionId, result.Frames, kind.Id);
             return result;
@@ -114,6 +144,27 @@ public sealed class HardExampleService
         {
             _logger.LogError(ex, "Could not save hard example");
             return new FlagResult(false, "Could not save that correction. See the log for details.");
+        }
+    }
+
+    /// <summary>
+    /// Removes only saved quick-correction sessions. Ordinary Neutral/Speech/Guided recordings and
+    /// the currently installed model are untouched; the user must retrain for removal to affect a
+    /// model that already learned from these examples.
+    /// </summary>
+    public async Task<CorrectionSessionStore.DeleteResult> DeleteSavedCorrectionsAsync()
+    {
+        await _sessionMutation.WaitAsync();
+        try
+        {
+            var result = await Task.Run(_correctionStore.DeleteAll);
+            _logger.LogInformation("Deleted {Deleted} quick-correction sessions; {Failed} failed",
+                result.Deleted, result.Failed);
+            return result;
+        }
+        finally
+        {
+            _sessionMutation.Release();
         }
     }
 
@@ -207,18 +258,5 @@ public sealed class HardExampleService
 
     /// <summary>How many corrections are already on disk, for the UI's "you have N saved" line.</summary>
     public static int CountSaved()
-    {
-        var root = PersonalizationPaths.DatasetRoot;
-        if (!Directory.Exists(root))
-            return 0;
-
-        var count = 0;
-        foreach (var directory in Directory.EnumerateDirectories(root))
-        {
-            if (File.Exists(Path.Combine(directory, "correction.json")))
-                count++;
-        }
-
-        return count;
-    }
+        => new CorrectionSessionStore(PersonalizationPaths.DatasetRoot).Count();
 }

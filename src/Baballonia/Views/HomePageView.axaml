@@ -144,8 +144,12 @@
 
           <Expander Header="Advanced Eye V2 debug" IsVisible="{Binding EyeV2AdvancedVisible}">
             <StackPanel Margin="0,8,0,0" Spacing="5">
-              <TextBlock Text="V2-A derives Squint from one lid scalar plus time, so a tensed squint and a half blink can remain ambiguous."
+              <TextBlock Text="V2-A remains the calibrated mapping baseline. V2-B adds direct pupil and eyelid geometry; low-confidence geometry falls back to V2-A automatically."
                          TextWrapping="Wrap" />
+              <Border Background="#FF101010" CornerRadius="4" Padding="4">
+                <Image Source="{Binding EyeGeometryDebugBitmap}" Height="192" Stretch="Uniform" />
+              </Border>
+              <TextBlock FontFamily="Consolas" Text="{Binding EyeGeometryDebug}" TextWrapping="Wrap" />
               <TextBlock FontFamily="Consolas" Text="{Binding EyeV2LeftDebug}" TextWrapping="Wrap" />
               <TextBlock FontFamily="Consolas" Text="{Binding EyeV2RightDebug}" TextWrapping="Wrap" />
               <TextBlock FontFamily="Consolas" Text="{Binding EyeV2AnchorDebug}" TextWrapping="Wrap" />

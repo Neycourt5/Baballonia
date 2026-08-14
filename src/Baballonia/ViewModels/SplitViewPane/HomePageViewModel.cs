@@ -21,6 +21,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Buffer = System.Buffer;
@@ -389,7 +390,7 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     public TextBlock SelectedCalibrationTextBlock;
 
     public ObservableCollection<string> EyeTrackingModes { get; } =
-        ["Default Baballonia", "Experimental / Eye V2"];
+        ["Default Baballonia", "V2-A — Personal mapping", "V2-B — Geometry Hybrid"];
 
     [ObservableProperty] private int _selectedEyeTrackingModeIndex;
     [ObservableProperty] private string _eyeV2Status = "Default Baballonia eye tracking is active.";
@@ -403,6 +404,8 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private string _eyeV2LeftDebug = "No V2 data yet.";
     [ObservableProperty] private string _eyeV2RightDebug = "No V2 data yet.";
     [ObservableProperty] private string _eyeV2AnchorDebug = "Calibrate Eye V2 to populate personal anchors.";
+    [ObservableProperty] private WriteableBitmap? _eyeGeometryDebugBitmap;
+    [ObservableProperty] private string _eyeGeometryDebug = "V2-B geometry has not produced a confident frame yet.";
 
     public bool IsRunningAsAdmin => Utils.HasAdmin;
 
@@ -463,22 +466,26 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         EyeV2AdvancedVisible = _localSettings.ReadSetting("AppSettings_AdvancedOptions", false);
         _eyeV2Manager.StateChanged += EyeV2StateChanged;
         _eyeV2Manager.DiagnosticsChanged += EyeV2DiagnosticsChanged;
+        _eyeV2Manager.GeometryChanged += EyeGeometryChanged;
 
         MessagesInPerSecCount = "0";
         MessagesOutPerSecCount = "0";
 
         Initialize();
 
-        if (_eyeV2Manager.Mode == EyeTrackingMode.ExperimentalV2)
+        if (_eyeV2Manager.Mode != EyeTrackingMode.DefaultBaballonia)
             _ = RunEyeValidityAsync(silent: true);
     }
 
     partial void OnSelectedEyeTrackingModeIndexChanged(int value)
     {
         if (_changingEyeMode) return;
-        var requested = value == (int)EyeTrackingMode.ExperimentalV2
-            ? EyeTrackingMode.ExperimentalV2
-            : EyeTrackingMode.DefaultBaballonia;
+        var requested = value switch
+        {
+            (int)EyeTrackingMode.ExperimentalV2 => EyeTrackingMode.ExperimentalV2,
+            (int)EyeTrackingMode.GeometryHybridV2B => EyeTrackingMode.GeometryHybridV2B,
+            _ => EyeTrackingMode.DefaultBaballonia
+        };
         if (_eyeV2Manager.TrySetMode(requested)) return;
 
         _changingEyeMode = true;
@@ -556,7 +563,7 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
 
     private async Task RunEyeValidityAsync(bool silent)
     {
-        if (EyeV2Busy || _eyeV2Manager.Mode != EyeTrackingMode.ExperimentalV2) return;
+        if (EyeV2Busy || _eyeV2Manager.Mode == EyeTrackingMode.DefaultBaballonia) return;
         if (!silent)
         {
             await RunEyeOperationAsync(async (progress, token) =>
@@ -603,6 +610,36 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         $"raw lid {eye.RawOpenness:F3}, open {eye.NormalizedOpenness:F3}, " +
         $"Squint {eye.Squint:F3}, Wide {eye.Wide:F3}, blink {(eye.Blink ? "yes" : "no")}, " +
         $"fixation jitter {eye.FixationJitter:F4}";
+
+    private void EyeGeometryChanged(EyeGeometryFrame frame)
+    {
+        if (frame.DebugImage == null) return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_disposed) return;
+            var image = frame.DebugImage;
+            if (EyeGeometryDebugBitmap == null ||
+                EyeGeometryDebugBitmap.PixelSize.Width != image.Width ||
+                EyeGeometryDebugBitmap.PixelSize.Height != image.Height)
+            {
+                EyeGeometryDebugBitmap = new WriteableBitmap(
+                    new PixelSize(image.Width, image.Height), new Vector(96, 96),
+                    PixelFormats.Bgr24, AlphaFormat.Opaque);
+            }
+
+            using (var buffer = EyeGeometryDebugBitmap.Lock())
+                Marshal.Copy(image.BgrPixels, 0, buffer.Address, image.BgrPixels.Length);
+
+            var bitmap = EyeGeometryDebugBitmap;
+            EyeGeometryDebugBitmap = null;
+            EyeGeometryDebugBitmap = bitmap;
+            EyeGeometryDebug =
+                $"Left: pupil ({frame.Left.PupilX:F2}, {frame.Left.PupilY:F2}), aperture {frame.Left.NormalizedAperture:F3}, " +
+                $"visibility {frame.Left.PupilVisibility:P0}, confidence {frame.Left.Confidence:P0}\n" +
+                $"Right: pupil ({frame.Right.PupilX:F2}, {frame.Right.PupilY:F2}), aperture {frame.Right.NormalizedAperture:F3}, " +
+                $"visibility {frame.Right.PupilVisibility:P0}, confidence {frame.Right.Confidence:P0}";
+        });
+    }
 
     private void Initialize()
     {
@@ -927,6 +964,7 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         _eyeV2Cancellation?.Cancel();
         _eyeV2Manager.StateChanged -= EyeV2StateChanged;
         _eyeV2Manager.DiagnosticsChanged -= EyeV2DiagnosticsChanged;
+        _eyeV2Manager.GeometryChanged -= EyeGeometryChanged;
         FaceCamera.CamViewMode = CamViewMode.Tracking;
         LeftCamera.CamViewMode = CamViewMode.Tracking;
         RightCamera.CamViewMode = CamViewMode.Tracking;

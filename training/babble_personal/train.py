@@ -26,7 +26,10 @@ from . import evaluate, labels as lbl, models, schema
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a personal face-expression adapter.")
     parser.add_argument("--data", type=Path, required=True, help="Dataset root containing session folders")
-    parser.add_argument("--model", default="a", help="'a' = output-only baseline, 'b' = image-conditioned")
+    parser.add_argument(
+        "--model", default="a",
+        help=("'a' = output-only reference, 'b' = camera-image proven baseline, "
+              "'c' = experimental shared visual features"))
     parser.add_argument("--out", type=Path, default=Path("runs"), help="Output directory for checkpoints")
     parser.add_argument("--val-sessions", nargs="*", default=None, help="Session ids to hold out")
     parser.add_argument("--epochs", type=int, default=30)

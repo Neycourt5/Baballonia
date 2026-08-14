@@ -194,6 +194,17 @@ public static class PersonalizationPaths
 
     public static string DefaultPersonalModelPath => Path.Combine(ModelsRoot, "personalFaceModel.onnx");
 
+    /// <summary>Dedicated slots keep training one architecture from destroying another.</summary>
+    public static string PersonalModelPath(string modelKind) => Path.Combine(
+        ModelsRoot,
+        modelKind.ToLowerInvariant() switch
+        {
+            "a" => "personalFaceModel-a.onnx",
+            "b" => "personalFaceModel-b.onnx",
+            "c" => "personalFaceModel-c.onnx",
+            _ => throw new ArgumentOutOfRangeException(nameof(modelKind), "Expected model A, B, or C.")
+        });
+
     public static string SessionDirectory(string sessionId) => Path.Combine(DatasetRoot, sessionId);
     public static string FramesDirectory(string sessionId) => Path.Combine(SessionDirectory(sessionId), "frames");
     public static string SessionMetadataPath(string sessionId) => Path.Combine(SessionDirectory(sessionId), "session.json");

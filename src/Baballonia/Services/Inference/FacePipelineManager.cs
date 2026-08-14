@@ -63,8 +63,7 @@ public class FacePipelineManager
     /// adapter that needs features from a runner that is not producing them would run as a slow
     /// passthrough while appearing to work, so it is refused at load instead.
     /// </remarks>
-    public bool EmbeddingAvailable =>
-        (_pipeline.InferenceService as IEmbeddingSource)?.GetEmbedding() != null;
+    public bool EmbeddingAvailable => _pipeline.InferenceService is IEmbeddingSource;
 
     public DefaultInferenceRunner CreateInference()
     {

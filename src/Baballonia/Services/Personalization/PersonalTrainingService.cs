@@ -84,6 +84,17 @@ public sealed record TrainingResult(
     TrainingSummary? Summary = null,
     string? Remedy = null);
 
+/// <summary>Everything model C needs beyond the ordinary A/B training prerequisites.</summary>
+public sealed record ModelCReadiness(
+    bool DerivedModelReady,
+    bool RunnerEnabled,
+    bool RunnerAvailable,
+    EmbeddingDatasetStatus Dataset,
+    string Message)
+{
+    public bool Ready => DerivedModelReady && RunnerEnabled && RunnerAvailable && Dataset.Ready;
+}
+
 /// <summary>
 /// Drives the existing Python tooling end to end so the user does not have to.
 ///
@@ -122,6 +133,161 @@ public sealed class PersonalTrainingService(
             // Keep memory bounded on a long pip install; the tail is what matters when diagnosing.
             if (_detailLog.Count > 4000)
                 _detailLog.RemoveRange(0, 1000);
+        }
+    }
+
+    /// <summary>Checks C without launching Python or changing any settings.</summary>
+    public ModelCReadiness InspectModelCReadiness()
+    {
+        var stockModel = Path.Combine(AppContext.BaseDirectory, "faceModel.onnx");
+        var derived = EmbeddingModelStore.TryGetValid(stockModel);
+        string? derivedMd5 = null;
+
+        if (derived is { Valid: true, Path: not null })
+        {
+            try { derivedMd5 = EmbeddingModelStore.ComputeMd5(derived.Path); }
+            catch (Exception ex)
+            {
+                derived = new EmbeddingModelStore.ValidationResult(
+                    false, $"Could not verify the shared visual-feature runner: {ex.Message}");
+            }
+        }
+
+        var dataset = PersonalizationEnvironment.InspectEmbeddingDataset(
+            expectedModelMd5: derivedMd5);
+        var enabled = modelManager.EmbeddingRunnerEnabled;
+        var available = modelManager.EmbeddingRunnerAvailable;
+
+        var message = !derived.Valid
+            ? $"Model C is not prepared: {derived.Message}"
+            : !dataset.Ready
+                ? dataset.Summary
+                : !enabled
+                    ? "Visual features are generated, but the embedding runner is turned off."
+                    : !available
+                        ? "The embedding runner is enabled but did not load. Use Prepare Model C to retry."
+                        : "Model C is ready: its runner is active and every recording has visual features.";
+
+        return new ModelCReadiness(derived.Valid, enabled, available, dataset, message);
+    }
+
+    /// <summary>
+    /// One explicit, potentially time-consuming preparation step for model C: build the stock
+    /// feature runner, regenerate every recording's features, enable the runner, and verify it.
+    /// Nothing runs continuously in the background.
+    /// </summary>
+    public async Task<TrainingResult> PrepareModelCAsync(
+        IProgress<TrainingProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.CompareExchange(ref _running, 1, 0) != 0)
+            return new TrainingResult(false, "Something is already running. Wait for it to finish.");
+
+        try
+        {
+            ClearLog();
+
+            var trainingRoot = PersonalizationEnvironment.FindTrainingRoot();
+            if (trainingRoot == null)
+                return new TrainingResult(false, "The training scripts could not be found.");
+
+            var venv = PersonalizationEnvironment.DefaultVenvDirectory;
+            if (!PersonalizationEnvironment.IsTrainingEnvironmentReady(venv))
+            {
+                return new TrainingResult(false,
+                    "The Python training environment is missing or incomplete.",
+                    Remedy: "Set Up Training Tools");
+            }
+
+            var dataset = PersonalizationEnvironment.InspectDataset();
+            if (!dataset.CanTrain)
+            {
+                return new TrainingResult(false,
+                    "Record at least one Neutral session and one more session before preparing Model C.",
+                    Remedy: "Record");
+            }
+
+            var stockModel = Path.Combine(AppContext.BaseDirectory, "faceModel.onnx");
+            if (!File.Exists(stockModel))
+                return new TrainingResult(false, "The stock face model could not be found.");
+
+            var python = PersonalizationEnvironment.VenvPython(venv);
+            Directory.CreateDirectory(PersonalizationPaths.ModelsRoot);
+
+            var derived = EmbeddingModelStore.TryGetValid(stockModel);
+            if (!derived.Valid)
+            {
+                progress?.Report(new TrainingProgress(TrainingStage.PreparingData,
+                    "Building the shared visual-feature runner..."));
+
+                var build = await RunAsync(python,
+                [
+                    "-m", "babble_personal.derive_embedding",
+                    "--stock", stockModel,
+                    "--out", EmbeddingModelStore.ModelPath
+                ], trainingRoot, cancellationToken);
+
+                if (!build.Success)
+                {
+                    return new TrainingResult(false,
+                        "Could not build Model C's visual-feature runner. See details.",
+                        Remedy: "Show Details");
+                }
+            }
+
+            var derivedMd5 = EmbeddingModelStore.ComputeMd5(EmbeddingModelStore.ModelPath);
+            var coverage = PersonalizationEnvironment.InspectEmbeddingDataset(
+                expectedModelMd5: derivedMd5);
+
+            if (!coverage.Ready)
+            {
+                progress?.Report(new TrainingProgress(TrainingStage.PreparingData,
+                    "Generating visual features for your recordings..."));
+
+                // Force also replaces valid-looking feature files made by an older derived graph,
+                // so C can never train across two incompatible feature spaces.
+                var embeddings = await RunAsync(python,
+                [
+                    "-m", "babble_personal.compute_embeddings",
+                    "--data", PersonalizationPaths.DatasetRoot,
+                    "--model", EmbeddingModelStore.ModelPath,
+                    "--force"
+                ], trainingRoot, cancellationToken);
+
+                if (!embeddings.Success)
+                {
+                    return new TrainingResult(false,
+                        "Could not generate Model C's visual features. See details.",
+                        Remedy: "Show Details");
+                }
+            }
+
+            progress?.Report(new TrainingProgress(TrainingStage.Installing,
+                "Enabling the shared visual-feature runner..."));
+
+            await modelManager.SetEmbeddingRunnerEnabledAsync(true);
+            var readiness = InspectModelCReadiness();
+            if (!readiness.Ready)
+                return new TrainingResult(false, readiness.Message, Remedy: "Show Details");
+
+            progress?.Report(new TrainingProgress(TrainingStage.Done, "Model C is ready to train."));
+            return new TrainingResult(true,
+                "Model C is ready. Visual features were generated once; training can now start.");
+        }
+        catch (OperationCanceledException)
+        {
+            return new TrainingResult(false, "Model C preparation was cancelled.");
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Personalization: model C preparation failed");
+            AppendLog(ex.ToString());
+            return new TrainingResult(false, $"Model C preparation failed: {ex.Message}",
+                Remedy: "Show Details");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _running, 0);
         }
     }
 
@@ -306,6 +472,11 @@ public sealed class PersonalTrainingService(
         {
             ClearLog();
 
+            var modelNameError = TrainingModelChoice.TrainingUnavailableReason(
+                modelKind, ordinaryPrerequisitesReady: true, modelCReady: true);
+            if (modelNameError != null)
+                return new TrainingResult(false, modelNameError);
+
             var trainingRoot = PersonalizationEnvironment.FindTrainingRoot();
             if (trainingRoot == null)
             {
@@ -329,6 +500,15 @@ public sealed class PersonalTrainingService(
                     "There are not enough recordings yet. Record at least one Neutral session and " +
                     "one more session of any type.",
                     Remedy: "Record");
+            }
+
+            if (TrainingModelChoice.RequiresEmbedding(modelKind))
+            {
+                var readiness = InspectModelCReadiness();
+                var unavailable = TrainingModelChoice.TrainingUnavailableReason(
+                    modelKind, ordinaryPrerequisitesReady: true, modelCReady: readiness.Ready);
+                if (unavailable != null)
+                    return new TrainingResult(false, $"{unavailable} {readiness.Message}");
             }
 
             var python = PersonalizationEnvironment.VenvPython(venv);
@@ -398,7 +578,7 @@ public sealed class PersonalTrainingService(
             progress?.Report(new TrainingProgress(TrainingStage.Installing, "Installing the model..."));
 
             var summary = ReadSummary(runDirectory);
-            var installed = InstallModel(exported);
+            var installed = InstallModel(exported, modelKind);
             if (installed != null)
                 return new TrainingResult(false, installed, summary, Remedy: "Show Details");
 
@@ -437,11 +617,18 @@ public sealed class PersonalTrainingService(
     /// The live model must be unloaded first: an active InferenceSession holds the file open on
     /// Windows, so overwriting it would fail with a sharing violation.
     /// </summary>
-    private string? InstallModel(string exportedPath)
+    private string? InstallModel(string exportedPath, string modelKind)
+    {
+        var destination = PersonalizationPaths.PersonalModelPath(modelKind);
+        var error = InstallModelToPath(exportedPath, destination);
+        if (error == null) modelManager.SetModelPath(destination);
+        return error;
+    }
+
+    private string? InstallModelToPath(string exportedPath, string destination)
     {
         try
         {
-            var destination = PersonalizationPaths.DefaultPersonalModelPath;
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
 
             modelManager.Uninstall();

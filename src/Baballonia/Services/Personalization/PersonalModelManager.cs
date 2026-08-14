@@ -58,6 +58,12 @@ public sealed record PersonalModelLoadResult(bool Success, string Message)
     public static PersonalModelLoadResult Fail(string message) => new(false, message);
 }
 
+public sealed record AvailablePersonalModel(
+    string Kind,
+    string Label,
+    string Path,
+    PersonalModelMetadata Metadata);
+
 /// <summary>
 /// Owns the lifecycle of the personal model: settings, loading, validation, hot reload.
 ///
@@ -97,6 +103,8 @@ public sealed class PersonalModelManager : IDisposable
     private readonly SemaphoreSlim _reloadLock = new(1, 1);
 
     private IPersonalCorrector? _corrector;
+    private string? _modelCatalogFingerprint;
+    private IReadOnlyList<AvailablePersonalModel> _modelCatalog = [];
 
     public PersonalModelManager(
         FacePipelineManager facePipelineManager,
@@ -128,11 +136,94 @@ public sealed class PersonalModelManager : IDisposable
 
     public bool Enabled => _settings.ReadSetting<bool>(EnabledSetting);
 
+    public bool EmbeddingRunnerEnabled => _settings.ReadSetting<bool>(EmbeddingRunnerSetting);
+
+    /// <summary>True when the currently loaded stock face runner exposes model C's features.</summary>
+    public bool EmbeddingRunnerAvailable => _facePipelineManager.EmbeddingAvailable;
+
     /// <summary>
     /// Persists the on/off state. Does not load or unload by itself - call
     /// <see cref="ReloadAsync"/> afterwards to act on the change.
     /// </summary>
     public void SetEnabled(bool enabled) => _settings.SaveSetting(EnabledSetting, enabled);
+
+    public void SetModelPath(string path) => _settings.SaveSetting(PathSetting, path);
+
+    /// <summary>
+    /// Finds independently installed A/B/C slots plus the pre-slot legacy file. Invalid or unknown
+    /// adapters are omitted; actual runtime validation still happens when the user presses Use.
+    /// </summary>
+    public IReadOnlyList<AvailablePersonalModel> DiscoverAvailableModels()
+    {
+        var primaryCandidates = TrainingModelChoice.Options
+            .Select(option => PersonalizationPaths.PersonalModelPath(option.Kind))
+            .Append(PersonalizationPaths.DefaultPersonalModelPath)
+            .Append(ModelPath)
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        var candidates = primaryCandidates
+            // Earlier builds kept the outgoing trained adapter as .previous.onnx. Treat it as an
+            // available model too so an existing A/B pair immediately appears in the new selector.
+            .SelectMany(path => new[] { path, PreviousModelPath(path) })
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var fingerprint = string.Join("|", candidates.Select(path =>
+        {
+            var file = new FileInfo(path);
+            return file.Exists ? $"{path}:{file.Length}:{file.LastWriteTimeUtc.Ticks}" : $"{path}:missing";
+        }));
+
+        // Reading ONNX metadata creates an inference session. Cache the catalog until one of the
+        // candidate files changes so merely opening or refreshing the page cannot burn CPU.
+        if (string.Equals(fingerprint, _modelCatalogFingerprint, StringComparison.Ordinal))
+            return _modelCatalog;
+
+        var byKind = new Dictionary<string, AvailablePersonalModel>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var path in candidates.Where(File.Exists))
+        {
+            try
+            {
+                using var session = new InferenceSession(path);
+                var metadata = PersonalModelMetadata.FromSession(session);
+                var option = TrainingModelChoice.ForAdapterType(metadata.AdapterType);
+                if (option == null || byKind.ContainsKey(option.Kind))
+                    continue;
+
+                byKind[option.Kind] = new AvailablePersonalModel(
+                    option.Kind, option.Label, path, metadata);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Ignoring unreadable personal-model candidate {Path}", path);
+            }
+        }
+
+        _modelCatalog = TrainingModelChoice.Options
+            .Where(option => byKind.ContainsKey(option.Kind))
+            .Select(option => byKind[option.Kind])
+            .ToArray();
+        _modelCatalogFingerprint = fingerprint;
+        return _modelCatalog;
+    }
+
+    public async Task<PersonalModelLoadResult> SelectModelAsync(string path)
+    {
+        SetModelPath(path);
+        SetEnabled(true);
+        return await ReloadAsync();
+    }
+
+    /// <summary>
+    /// Switches the stock face runner as well as persisting the setting, then reloads the personal
+    /// adapter against that runner. This keeps the checkbox from claiming C is enabled while the
+    /// old inference session is still live.
+    /// </summary>
+    public async Task<PersonalModelLoadResult> SetEmbeddingRunnerEnabledAsync(bool enabled)
+    {
+        _settings.SaveSetting(EmbeddingRunnerSetting, enabled);
+        await _facePipelineManager.LoadInferenceAsync();
+        return await ReloadAsync();
+    }
 
     public float Blend
     {

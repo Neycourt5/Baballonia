@@ -143,10 +143,14 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     /// </summary>
     public IReadOnlyList<string> CorrectionWindows { get; } = ["Last 2 seconds", "Last 5 seconds", "Last 10 seconds"];
 
+    [ObservableProperty] private bool _quickCorrectionEnabled = true;
+    [ObservableProperty] private string _quickCorrectionAvailability = "";
     [ObservableProperty] private int _selectedCorrectionWindowIndex = 1;
     [ObservableProperty] private string _correctionStatus = "";
     [ObservableProperty] private int _savedCorrectionCount;
     [ObservableProperty] private bool _canFlagCorrection;
+    [ObservableProperty] private bool _canDeleteSavedCorrections;
+    [ObservableProperty] private bool _showDeleteCorrectionsConfirmation;
 
     private TimeSpan SelectedCorrectionWindow =>
         HardExampleService.WindowChoices[
@@ -155,34 +159,26 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     // ---- training -----------------------------------------------------------------------------
 
     /// <summary>
-    /// Which adapter to train. 0 = model A (output-only), 1 = model B (image-conditioned).
-    ///
-    /// A is the default because it is the honest baseline: it sees only the stock 45 values, so it
-    /// can fix systematic bias and cross-talk but nothing that needs to look at the face. B also
-    /// sees the frame, which is the only way to fix errors where the stock outputs are ambiguous -
-    /// at the cost of a slower, more memory-hungry training run and more capacity to overfit. Train
-    /// both and keep whichever wins on your own held-out recordings.
+    /// Which adapter to train next. This is intentionally separate from the model currently in use.
+    /// A is the simple reference, B is the proven real-world baseline, and C is the shared-feature
+    /// experiment that must be explicitly prepared before it can train.
     /// </summary>
     [ObservableProperty] private int _selectedModelIndex;
 
-    [ObservableProperty] private string _modelChoiceDescription = OutputOnlyDescription;
+    public IReadOnlyList<string> TrainingModelLabels { get; } =
+        TrainingModelChoice.Options.Select(option => option.Label).ToArray();
 
-    private const string OutputOnlyDescription =
-        "Learns from the 45 expression values only. Fast to train, small, and hard to overfit - " +
-        "it is very good at removing a constant bias, but it never sees your face.";
-
-    private const string ImageConditionedDescription =
-        "Also looks at the camera frame, so it can correct errors the 45 values alone cannot " +
-        "explain. Training takes longer and needs a few GB of RAM. Experimental: check the result " +
-        "against model A before trusting it.";
+    [ObservableProperty] private string _modelChoiceDescription =
+        TrainingModelChoice.Options[TrainingModelChoice.OutputOnlyIndex].Description;
+    [ObservableProperty] private bool _isModelCSelected;
+    [ObservableProperty] private string _modelCStatus = "";
+    [ObservableProperty] private bool _canPrepareModelC;
+    [ObservableProperty] private string _trainButtonText = "Train Model A";
 
     /// <summary>The trainer's --model flag for the current selection.</summary>
     private string SelectedModelKind => TrainingModelChoice.KindForIndex(SelectedModelIndex);
 
-    partial void OnSelectedModelIndexChanged(int value) =>
-        ModelChoiceDescription = value == TrainingModelChoice.ImageConditionedIndex
-            ? ImageConditionedDescription
-            : OutputOnlyDescription;
+    partial void OnSelectedModelIndexChanged(int value) => RefreshSetup();
 
     [ObservableProperty] private bool _isBusy;
     [ObservableProperty] private string _busyMessage = "";
@@ -204,6 +200,13 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private string _activeModelName = "";
 
     [ObservableProperty] private bool _personalModelEnabled;
+    [ObservableProperty] private bool _canUseStock;
+    [ObservableProperty] private bool _canUsePersonal;
+    public ObservableCollection<string> ComparisonModelLabels { get; } = [];
+    private IReadOnlyList<AvailablePersonalModel> _comparisonModels = [];
+    [ObservableProperty] private int _selectedComparisonModelIndex;
+    [ObservableProperty] private string _useSelectedModelButtonText = "Use Selected Model";
+    [ObservableProperty] private bool _canUseSelectedModel;
     [ObservableProperty] private double _personalStrength = 100;
     [ObservableProperty] private bool _showAdvanced;
     [ObservableProperty] private bool _sortByDelta = true;
@@ -220,6 +223,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private bool _useEmbeddingRunner;
 
     [ObservableProperty] private string _embeddingRunnerStatus = "";
+
+    partial void OnSelectedComparisonModelIndexChanged(int value) => UpdateComparisonSelection();
 
     public ObservableCollection<ExpressionComparisonRow> Comparison { get; } = [];
 
@@ -251,6 +256,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         _hardExamples = hardExamples;
         _guided = guided;
         _audio = audio;
+
+        _quickCorrectionEnabled = hardExamples?.Enabled ?? false;
 
         if (audio != null)
         {
@@ -308,9 +315,12 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         ModelReady = setup.Model.Ready;
 
         var loaded = _modelManager.LoadedMetadata;
-        ActiveModelName = loaded == null
-            ? ""
-            : $"Currently loaded: {loaded.DisplayName}";
+        ActiveModelName = _modelManager.IsActive && loaded != null
+            ? $"Running now: Personal — {loaded.DisplayName}"
+            : "Running now: Stock Baballonia face model";
+        CanUseStock = _modelManager.Enabled || _modelManager.IsActive;
+        CanUsePersonal = !_modelManager.IsActive && System.IO.File.Exists(_modelManager.ModelPath);
+        RefreshComparisonModels();
 
         // Offer setup only when it can actually succeed: scripts located and Python available.
         CanSetUpTools = !setup.TrainingTools.Ready
@@ -323,13 +333,43 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
                           ?? "You have enough recordings to train a good model.";
 
         SavedCorrectionCount = HardExampleService.CountSaved();
+        CanDeleteSavedCorrections = _hardExamples != null && SavedCorrectionCount > 0;
+        if (SavedCorrectionCount == 0) ShowDeleteCorrectionsConfirmation = false;
 
-        // Nothing to save unless frames are arriving, so the button says so rather than failing.
-        CanFlagCorrection = _hardExamples != null && _cameraSeenRecently;
+        // Nothing to save unless capture is enabled and frames are arriving, so the button and
+        // status say which prerequisite is missing rather than failing after the press.
+        CanFlagCorrection = _hardExamples != null && QuickCorrectionEnabled && _cameraSeenRecently;
+        QuickCorrectionAvailability = _hardExamples == null
+            ? "Quick correction is unavailable in this build."
+            : !QuickCorrectionEnabled
+                ? "Quick correction is off. No rolling frames are being copied or retained."
+                : !_cameraSeenRecently
+                    ? "Start the face camera on the Home page to use quick corrections."
+                    : "";
 
         CanStartGuided = _guided != null && _cameraSeenRecently && !IsGuidedRunning && !IsRecording;
 
-        CanTrain = setup.CanTrain && !IsBusy;
+        var choice = TrainingModelChoice.ForIndex(SelectedModelIndex);
+        ModelChoiceDescription = choice.Description;
+        TrainButtonText = $"Train Model {choice.Kind.ToUpperInvariant()}";
+        IsModelCSelected = choice.RequiresEmbedding;
+
+        var modelCReady = true;
+        if (choice.RequiresEmbedding)
+        {
+            var readiness = _trainingService.InspectModelCReadiness();
+            modelCReady = readiness.Ready;
+            ModelCStatus = readiness.Message;
+            CanPrepareModelC = setup.CanTrain && !IsBusy && !readiness.Ready;
+        }
+        else
+        {
+            ModelCStatus = "";
+            CanPrepareModelC = false;
+        }
+
+        CanTrain = !IsBusy && TrainingModelChoice.TrainingUnavailableReason(
+            choice.Kind, setup.CanTrain, modelCReady) == null;
     }
 
     [RelayCommand]
@@ -421,7 +461,6 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     /// </summary>
     partial void OnUseEmbeddingRunnerChanged(bool value)
     {
-        _settings.SaveSetting(PersonalModelManager.EmbeddingRunnerSetting, value);
         _ = ApplyEmbeddingRunnerAsync(value);
     }
 
@@ -429,8 +468,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         if (!enabled)
         {
-            EmbeddingRunnerStatus = "";
-            await _modelManager.ReloadAsync();
+            await _modelManager.SetEmbeddingRunnerEnabledAsync(false);
+            EmbeddingRunnerStatus = "Shared visual-feature runner is off.";
             RefreshSetup();
             return;
         }
@@ -445,13 +484,16 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             if (!built.Success)
             {
                 EmbeddingRunnerStatus = built.Message;
-                // Leave the setting on: the pipeline falls back to stock on its own, and flipping
-                // the toggle back here would fight the user rather than explain the problem.
+                _useEmbeddingRunner = false;
+                OnPropertyChanged(nameof(UseEmbeddingRunner));
                 return;
             }
         }
 
-        EmbeddingRunnerStatus = "Embedding model active.";
+        var load = await _modelManager.SetEmbeddingRunnerEnabledAsync(true);
+        EmbeddingRunnerStatus = _modelManager.EmbeddingRunnerAvailable
+            ? "Shared visual-feature runner is active."
+            : $"The shared visual-feature runner could not be enabled: {load.Message}";
         RefreshSetup();
     }
 
@@ -546,7 +588,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         var summary = await _guided.StopAsync();
         GuidedStatus = summary is null
             ? "Calibration stopped."
-            : $"Saved {summary.FrameCount} frames. Press Train My Face Model to use them.";
+            : $"Saved {summary.FrameCount} frames. Choose a model below, then press its Train button.";
 
         GuidedProgress = 0;
         GuidedInstruction = "";
@@ -571,6 +613,21 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     // =============================================================================================
     // Quick correction
     // =============================================================================================
+
+    partial void OnQuickCorrectionEnabledChanged(bool value)
+    {
+        if (_hardExamples is null)
+        {
+            CorrectionStatus = "Quick correction is unavailable in this build.";
+            return;
+        }
+
+        _hardExamples.SetEnabled(value);
+        CorrectionStatus = value
+            ? "Quick correction is on and collecting a short in-memory history."
+            : "Quick correction is off; its rolling history has been released.";
+        RefreshSetup();
+    }
 
     /// <summary>
     /// Saves the last few seconds as evidence that the jaw was wrong.
@@ -599,9 +656,51 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         }
     }
 
+    [RelayCommand]
+    private void RequestDeleteSavedCorrections()
+    {
+        if (CanDeleteSavedCorrections)
+            ShowDeleteCorrectionsConfirmation = true;
+    }
+
+    [RelayCommand]
+    private void CancelDeleteSavedCorrections() => ShowDeleteCorrectionsConfirmation = false;
+
+    [RelayCommand]
+    private async Task ConfirmDeleteSavedCorrectionsAsync()
+    {
+        ShowDeleteCorrectionsConfirmation = false;
+        if (_hardExamples is null) return;
+
+        CanDeleteSavedCorrections = false;
+        var result = await _hardExamples.DeleteSavedCorrectionsAsync();
+        SavedCorrectionCount = HardExampleService.CountSaved();
+        CorrectionStatus = result.Failed == 0
+            ? result.Deleted == 0
+                ? "There were no saved quick corrections to delete."
+                : $"Deleted {result.Deleted} saved quick correction{(result.Deleted == 1 ? "" : "s")}. " +
+                  "Your installed model is unchanged; retrain it without those examples if needed."
+            : $"Deleted {result.Deleted} corrections, but {result.Failed} could not be removed. " +
+              "Your installed model is unchanged.";
+        RefreshSetup();
+    }
+
     // =============================================================================================
     // Training
     // =============================================================================================
+
+    [RelayCommand]
+    private async Task PrepareModelCAsync()
+    {
+        await RunWorkAsync(
+            "Preparing Model C...",
+            (progress, token) => _trainingService.PrepareModelCAsync(progress, token));
+
+        // Preparation enables the runner through the manager. Synchronize the advanced checkbox
+        // without invoking its change handler and doing the expensive reload a second time.
+        _useEmbeddingRunner = _modelManager.EmbeddingRunnerEnabled;
+        OnPropertyChanged(nameof(UseEmbeddingRunner));
+    }
 
     [RelayCommand]
     private async Task TrainAsync()
@@ -612,7 +711,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             "Starting...",
             (progress, token) => _trainingService.TrainAsync(kind, progress, token));
 
-        PersonalModelEnabled = _modelManager.Enabled;
+        _personalModelEnabled = _modelManager.Enabled;
+        OnPropertyChanged(nameof(PersonalModelEnabled));
     }
 
     [RelayCommand]
@@ -753,7 +853,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             lines.Add("More recordings usually help, especially Neutral ones from separate sittings.");
         }
 
-        lines.Add("Use Stock / Personal below to hear and see the difference for yourself.");
+        lines.Add("Use the Face model selection below to try Stock or any trained model.");
         ResultDetail = string.Join(Environment.NewLine + Environment.NewLine, lines);
     }
 
@@ -799,18 +899,96 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     // Comparison
     // =============================================================================================
 
+    private void RefreshComparisonModels()
+    {
+        _comparisonModels = _modelManager.DiscoverAvailableModels();
+        var labels = new[] { "Default Baballonia (Stock)" }
+            .Concat(_comparisonModels.Select(model => model.Label))
+            .ToArray();
+
+        if (!ComparisonModelLabels.SequenceEqual(labels))
+        {
+            ComparisonModelLabels.Clear();
+            foreach (var label in labels) ComparisonModelLabels.Add(label);
+        }
+
+        var activeKind = _modelManager.IsActive
+            ? TrainingModelChoice.ForAdapterType(_modelManager.LoadedMetadata?.AdapterType)?.Kind
+            : null;
+        _selectedComparisonModelIndex = activeKind == null
+            ? 0
+            : Math.Max(0, _comparisonModels.ToList().FindIndex(model => model.Kind == activeKind) + 1);
+        OnPropertyChanged(nameof(SelectedComparisonModelIndex));
+        UpdateComparisonSelection();
+    }
+
+    private void UpdateComparisonSelection()
+    {
+        var index = Math.Clamp(SelectedComparisonModelIndex, 0, _comparisonModels.Count);
+        if (index == 0)
+        {
+            UseSelectedModelButtonText = "Use Stock";
+            CanUseSelectedModel = _modelManager.IsActive || _modelManager.Enabled;
+            return;
+        }
+
+        var model = _comparisonModels[index - 1];
+        UseSelectedModelButtonText = $"Use Model {model.Kind.ToUpperInvariant()}";
+        CanUseSelectedModel = !_modelManager.IsActive ||
+            !string.Equals(_modelManager.ModelPath, model.Path, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [RelayCommand]
+    private async Task UseSelectedModelAsync()
+    {
+        var index = Math.Clamp(SelectedComparisonModelIndex, 0, _comparisonModels.Count);
+        if (index == 0)
+        {
+            await UseStockAsync();
+            return;
+        }
+
+        var model = _comparisonModels[index - 1];
+        if (model.Kind == "c" && !_modelManager.EmbeddingRunnerAvailable)
+        {
+            var stock = System.IO.Path.Combine(AppContext.BaseDirectory, "faceModel.onnx");
+            var derived = EmbeddingModelStore.TryGetValid(stock);
+            if (!derived.Valid)
+            {
+                ActiveModelName = "Model C is trained, but its shared-feature runner is not ready. " +
+                                  "Select C under Train and use Prepare Model C first.";
+                return;
+            }
+
+            await _modelManager.SetEmbeddingRunnerEnabledAsync(true);
+        }
+
+        var result = await _modelManager.SelectModelAsync(model.Path);
+        if (!result.Success)
+            ActiveModelName = $"Could not use Model {model.Kind.ToUpperInvariant()}: {result.Message}";
+        _personalModelEnabled = _modelManager.Enabled;
+        OnPropertyChanged(nameof(PersonalModelEnabled));
+        RefreshSetup();
+    }
+
     [RelayCommand]
     private async Task UseStockAsync()
     {
-        PersonalModelEnabled = false;
-        await Task.CompletedTask;
+        _modelManager.SetEnabled(false);
+        await _modelManager.ReloadAsync();
+        _personalModelEnabled = false;
+        OnPropertyChanged(nameof(PersonalModelEnabled));
+        RefreshSetup();
     }
 
     [RelayCommand]
     private async Task UsePersonalAsync()
     {
-        PersonalModelEnabled = true;
-        await Task.CompletedTask;
+        _modelManager.SetEnabled(true);
+        await _modelManager.ReloadAsync();
+        _personalModelEnabled = true;
+        OnPropertyChanged(nameof(PersonalModelEnabled));
+        RefreshSetup();
     }
 
     [RelayCommand]

@@ -13,6 +13,7 @@ public sealed class EyeV2Manager
     private readonly EyeV2CalibrationStore _store;
     private readonly ILogger<EyeV2Manager> _logger;
     private readonly Action<IEyeStateMapper?> _setMapper;
+    private readonly Func<IEyeGeometryExtractor> _geometryFactory;
 
     public EyeTrackingMode Mode { get; private set; } = EyeTrackingMode.DefaultBaballonia;
     public EyeV2Calibration? Calibration { get; private set; }
@@ -21,22 +22,25 @@ public sealed class EyeV2Manager
 
     public event Action? StateChanged;
     public event Action<EyeV2Diagnostics>? DiagnosticsChanged;
+    public event Action<EyeGeometryFrame>? GeometryChanged;
 
     public EyeV2Manager(
         EyePipelineManager pipelineManager,
         ILocalSettingsService settings,
         EyeV2CalibrationStore store,
         ILogger<EyeV2Manager> logger,
-        Action<IEyeStateMapper?>? mapperSetter = null)
+        Action<IEyeStateMapper?>? mapperSetter = null,
+        Func<IEyeGeometryExtractor>? geometryFactory = null)
     {
         _settings = settings;
         _store = store;
         _logger = logger;
         _setMapper = mapperSetter ?? pipelineManager.SetMapper;
+        _geometryFactory = geometryFactory ?? (() => new ClassicEyeGeometryExtractor());
 
         var requested = settings.ReadSetting(ModeSetting, EyeTrackingMode.DefaultBaballonia);
-        if (requested == EyeTrackingMode.ExperimentalV2)
-            TrySetMode(EyeTrackingMode.ExperimentalV2);
+        if (requested is EyeTrackingMode.ExperimentalV2 or EyeTrackingMode.GeometryHybridV2B)
+            TrySetMode(requested);
         else
             ApplyDefault(save: false);
     }
@@ -56,11 +60,34 @@ public sealed class EyeV2Manager
             return false;
         }
 
-        Activate(calibration, saveMode: true);
-        return true;
+        try
+        {
+            ActivateMode(calibration, mode, saveMode: true);
+            return true;
+        }
+        catch when (mode == EyeTrackingMode.GeometryHybridV2B)
+        {
+            // A geometry implementation/load failure has a better fallback than Default: the
+            // already-validated V2-A mapper using the same personal calibration.
+            ActivateMode(calibration, EyeTrackingMode.ExperimentalV2, saveMode: true,
+                status: "V2-B geometry was unavailable; V2-A is active instead.");
+            return false;
+        }
     }
 
     public void Activate(EyeV2Calibration calibration, bool saveMode = true)
+    {
+        var requested = Mode == EyeTrackingMode.GeometryHybridV2B
+            ? EyeTrackingMode.GeometryHybridV2B
+            : EyeTrackingMode.ExperimentalV2;
+        ActivateMode(calibration, requested, saveMode);
+    }
+
+    private void ActivateMode(
+        EyeV2Calibration calibration,
+        EyeTrackingMode mode,
+        bool saveMode,
+        string? status = null)
     {
         if (!calibration.IsValid())
         {
@@ -70,11 +97,16 @@ public sealed class EyeV2Manager
 
         try
         {
-            var mapper = new EyeV2Mapper(calibration, UpdateDiagnostics);
+            IEyeStateMapper mapper = mode == EyeTrackingMode.GeometryHybridV2B
+                ? new EyeV2GeometryMapper(
+                    calibration, _geometryFactory(), UpdateDiagnostics, UpdateGeometry)
+                : new EyeV2Mapper(calibration, UpdateDiagnostics);
             _setMapper(mapper);
             Calibration = calibration;
-            Mode = EyeTrackingMode.ExperimentalV2;
-            Status = "Experimental Eye V2 is active.";
+            Mode = mode;
+            Status = status ?? (mode == EyeTrackingMode.GeometryHybridV2B
+                ? "Eye V2-B Geometry Hybrid is active; low-confidence frames fall back to V2-A."
+                : "Eye V2-A personal mapping is active.");
             if (saveMode) _settings.SaveSetting(ModeSetting, Mode);
             StateChanged?.Invoke();
         }
@@ -108,4 +140,6 @@ public sealed class EyeV2Manager
         Diagnostics = diagnostics;
         DiagnosticsChanged?.Invoke(diagnostics);
     }
+
+    private void UpdateGeometry(EyeGeometryFrame geometry) => GeometryChanged?.Invoke(geometry);
 }

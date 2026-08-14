@@ -1,37 +1,105 @@
+using System.Collections.Generic;
+using System.Linq;
+
 namespace Baballonia.Services.Personalization;
 
 /// <summary>
-/// The single mapping between the Train page's model dropdown, the trainer's <c>--model</c> flag,
-/// and the <c>adapter_type</c> the exported ONNX carries.
-///
-/// It lives in one place because the three names for the same thing are easy to drift apart, and a
-/// drift is invisible: picking "B" and silently training A produces a perfectly plausible-looking
-/// result. The round trip (dropdown index -> flag -> adapter type -> label) is covered by tests.
+/// The single mapping between the Train page, the trainer's <c>--model</c> flag, and the adapter
+/// metadata written into the exported ONNX. Keeping the three names together prevents a dropdown
+/// choice from silently training a different architecture.
 /// </summary>
 public static class TrainingModelChoice
 {
-    /// <summary>Dropdown index of the output-only adapter. This is the default.</summary>
     public const int OutputOnlyIndex = 0;
-
-    /// <summary>Dropdown index of the image-conditioned adapter.</summary>
     public const int ImageConditionedIndex = 1;
+    public const int SharedFeaturesIndex = 2;
 
     public const string OutputOnlyAdapterType = "output_mlp_v1";
     public const string ImageConditionedAdapterType = "image_residual_v1";
+    public const string SharedFeaturesAdapterType = "embedding_head_v1";
 
-    /// <summary>The trainer's <c>--model</c> value for a dropdown index.</summary>
-    public static string KindForIndex(int index) =>
-        index == ImageConditionedIndex ? "b" : "a";
+    public sealed record Option(
+        int Index,
+        string Kind,
+        string AdapterType,
+        string Label,
+        string DisplayName,
+        string Description,
+        bool RequiresEmbedding);
 
-    /// <summary>The <c>adapter_type</c> a given dropdown index is expected to produce.</summary>
-    public static string AdapterTypeForIndex(int index) =>
-        index == ImageConditionedIndex ? ImageConditionedAdapterType : OutputOnlyAdapterType;
+    public static IReadOnlyList<Option> Options { get; } =
+    [
+        new(
+            OutputOnlyIndex,
+            "a",
+            OutputOnlyAdapterType,
+            "A — Expressions only (simple)",
+            "Model A (expressions only)",
+            "Learns from the 45 expression values only. It is fast and small, but never sees " +
+            "your face. This is the simple reference model, not the recommended winner.",
+            false),
+        new(
+            ImageConditionedIndex,
+            "b",
+            ImageConditionedAdapterType,
+            "B — Expressions + camera image (current best)",
+            "Model B (camera image)",
+            "Learns its own small camera-image network alongside the 45 expression values. It " +
+            "takes longer to train, but it is the proven real-world baseline for the B-vs-C test.",
+            false),
+        new(
+            SharedFeaturesIndex,
+            "c",
+            SharedFeaturesAdapterType,
+            "C — Shared visual features (experimental)",
+            "Model C (shared visual features)",
+            "Reuses visual features already computed inside the stock face model instead of " +
+            "running a second camera CNN. Experimental until it beats Model B in the home test.",
+            true)
+    ];
 
-    /// <summary>Human-readable name for an <c>adapter_type</c> read back from a trained model.</summary>
+    public static Option ForIndex(int index) =>
+        index >= 0 && index < Options.Count ? Options[index] : Options[OutputOnlyIndex];
+
+    public static string KindForIndex(int index) => ForIndex(index).Kind;
+
+    public static string AdapterTypeForIndex(int index) => ForIndex(index).AdapterType;
+
+    public static Option? ForAdapterType(string? adapterType) =>
+        Options.FirstOrDefault(option => option.AdapterType == adapterType);
+
+    public static bool RequiresEmbedding(string? kind) =>
+        string.Equals(kind, Options[SharedFeaturesIndex].Kind, System.StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Guard shared by the GUI state and the train command. A/B keep their existing requirements;
+    /// C cannot start until both its runtime and recorded feature sidecars are ready.
+    /// </summary>
+    public static string? TrainingUnavailableReason(
+        string? kind,
+        bool ordinaryPrerequisitesReady,
+        bool modelCReady)
+    {
+        if (kind is not ("a" or "A" or "b" or "B" or "c" or "C"))
+            return $"Unknown training model '{kind}'. Choose A, B, or C.";
+
+        if (!ordinaryPrerequisitesReady)
+            return "The normal recording and training-tool requirements are not ready.";
+
+        if (RequiresEmbedding(kind) && !modelCReady)
+        {
+            return "Model C needs the stock face model's visual features. Choose Prepare Model C " +
+                   "to enable its embedding runner and generate features for every recording.";
+        }
+
+        return null;
+    }
+
     public static string DisplayName(string? adapterType) => adapterType switch
     {
-        OutputOnlyAdapterType => "Model A (expressions only)",
-        ImageConditionedAdapterType => "Model B (expressions + camera image)",
+        OutputOnlyAdapterType => Options[OutputOnlyIndex].DisplayName,
+        ImageConditionedAdapterType => Options[ImageConditionedIndex].DisplayName,
+        SharedFeaturesAdapterType => Options[SharedFeaturesIndex].DisplayName,
         null or "" or "unknown" => "unknown model",
         _ => adapterType
     };

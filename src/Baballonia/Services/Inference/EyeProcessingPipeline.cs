@@ -51,6 +51,21 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
 
             eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
 
+            var timestampTicks = DateTime.UtcNow.Ticks;
+            var frameMapper = Mapper;
+            if (frameMapper is IEyeFrameAwareMapper frameAware)
+            {
+                try
+                {
+                    frameAware.ObserveFrame(transformed, timestampTicks);
+                }
+                catch
+                {
+                    // An experimental frame consumer may never take down stock eye tracking.
+                    Mapper = null;
+                }
+            }
+
             collected = _imageCollector.Apply(transformed);
             if (collected == null)
                 return null;   // still filling the temporal queue
@@ -69,7 +84,7 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
             // the two eyes' vertical gaze into one value and lets a closed eye borrow the other's
             // yaw - and none of that can be undone from the outside.
             eyePipelineEventBus.Publish(new EyePipelineEvents.NewRawExpressionsEvent(
-                transformed, inferenceResult, DateTime.UtcNow.Ticks));
+                transformed, inferenceResult, timestampTicks));
 
             if (Filter != null)
             {
@@ -87,7 +102,7 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
                     // The stage is after stock postprocessing exactly as designed. It also receives
                     // the same tick's filtered raw values because per-eye Y/lid information has
                     // already been fused by ProcessExpressions and cannot be reconstructed later.
-                    inferenceResult = mapper.Map(inferenceResult, filteredRawForMapper, DateTime.UtcNow.Ticks);
+                    inferenceResult = mapper.Map(inferenceResult, filteredRawForMapper, timestampTicks);
                 }
                 catch
                 {

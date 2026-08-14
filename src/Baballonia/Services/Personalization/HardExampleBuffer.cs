@@ -52,6 +52,7 @@ public sealed class HardExampleBuffer : IDisposable
     private int _count;
     private long _lastAcceptedTimestamp;
     private ulong _lastChecksum;
+    private volatile bool _enabled;
 
     /// <summary>
     /// Whether the raw frame published this tick was kept. The corrected event fires immediately
@@ -62,11 +63,12 @@ public sealed class HardExampleBuffer : IDisposable
     private bool _lastOfferAccepted;
 
     public HardExampleBuffer(ILogger logger, IFacePipelineEventBus? eventBus = null,
-                             int capacityFrames = DefaultCapacityFrames)
+                             int capacityFrames = DefaultCapacityFrames, bool enabled = true)
     {
         _logger = logger;
         _capacity = Math.Max(1, capacityFrames);
         _eventBus = eventBus;
+        _enabled = enabled;
 
         _rawHandler = OnRawExpressions;
         _correctedHandler = OnCorrectedExpressions;
@@ -91,8 +93,23 @@ public sealed class HardExampleBuffer : IDisposable
         }
     }
 
-    /// <summary>Turns capture on or off. Off means the handlers return immediately and nothing is held.</summary>
-    public bool Enabled { get; set; } = true;
+    /// <summary>
+    /// Turns capture on or off. Off makes the event handlers return before checksums or copies and
+    /// releases the preallocated ring. Enabling again starts with an empty ring on the next frame.
+    /// </summary>
+    public bool Enabled
+    {
+        get => _enabled;
+        set
+        {
+            if (value == _enabled)
+                return;
+
+            _enabled = value;
+            if (!value)
+                Reset(releaseMemory: true);
+        }
+    }
 
     /// <summary>One captured moment, detached from the ring so persistence can run without the lock.</summary>
     public sealed record Snapshot(
@@ -138,6 +155,11 @@ public sealed class HardExampleBuffer : IDisposable
 
             lock (_gate)
             {
+                // The UI can disable capture after the inexpensive early check but before this
+                // lock. Rechecking here prevents one final frame from repopulating a cleared ring.
+                if (!Enabled)
+                    return;
+
                 if (!EnsureCapacity(frame))
                     return;
 
@@ -156,11 +178,11 @@ public sealed class HardExampleBuffer : IDisposable
                 _next = (_next + 1) % _entries.Length;
                 if (_count < _entries.Length)
                     _count++;
-            }
 
-            _lastChecksum = checksum;
-            _lastAcceptedTimestamp = now;
-            _lastOfferAccepted = true;
+                _lastChecksum = checksum;
+                _lastAcceptedTimestamp = now;
+                _lastOfferAccepted = true;
+            }
         }
         catch (Exception ex)
         {
@@ -285,15 +307,27 @@ public sealed class HardExampleBuffer : IDisposable
     /// <summary>Drops everything held. Used when personalization is reconfigured under the buffer.</summary>
     public void Clear()
     {
+        Reset(releaseMemory: false);
+    }
+
+    private void Reset(bool releaseMemory)
+    {
         lock (_gate)
         {
+            if (releaseMemory)
+            {
+                _entries = null;
+                _pixelCount = 0;
+                _width = 0;
+                _height = 0;
+            }
+
             _next = 0;
             _count = 0;
+            _lastChecksum = 0;
+            _lastAcceptedTimestamp = 0;
+            _lastOfferAccepted = false;
         }
-
-        _lastChecksum = 0;
-        _lastAcceptedTimestamp = 0;
-        _lastOfferAccepted = false;
     }
 
     public void Dispose()

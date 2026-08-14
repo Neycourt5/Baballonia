@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Text.Json;
 using Baballonia.Services.Personalization;
 using JetBrains.Annotations;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -193,5 +194,37 @@ public class PersonalizationEnvironmentTest
         StringAssert.Contains(PersonalizationEnvironment.TrainingRunsDirectory, "ProjectBabble");
         Assert.IsFalse(PersonalizationEnvironment.DefaultVenvDirectory.StartsWith(repo, StringComparison.OrdinalIgnoreCase),
             "The venv must not live inside the repo, which is OneDrive-synced here.");
+    }
+
+    [TestMethod]
+    public void ModelCEmbeddingCoverage_RequiresEveryFrameAndTheCurrentRunnerHash()
+    {
+        var first = CreateSession("20260813_100000_neutral", frames: 2);
+        var second = CreateSession("20260813_110000_speech", frames: 3);
+
+        WriteEmbeddingSidecar(first, frames: 2, modelMd5: "current");
+        var partial = PersonalizationEnvironment.InspectEmbeddingDataset(_root, "current");
+        Assert.AreEqual(2, partial.Sessions);
+        Assert.AreEqual(1, partial.ReadySessions);
+        Assert.IsFalse(partial.Ready, "C must stay disabled while even one recording lacks features.");
+
+        WriteEmbeddingSidecar(second, frames: 3, modelMd5: "old");
+        Assert.IsFalse(PersonalizationEnvironment.InspectEmbeddingDataset(_root, "current").Ready,
+            "Features from a different derived face model must not be mixed into C training.");
+
+        WriteEmbeddingSidecar(second, frames: 3, modelMd5: "current");
+        Assert.IsTrue(PersonalizationEnvironment.InspectEmbeddingDataset(_root, "current").Ready);
+    }
+
+    private static void WriteEmbeddingSidecar(string session, int frames, string modelMd5)
+    {
+        File.WriteAllBytes(Path.Combine(session, "embeddings.bin"), new byte[frames * 1280 * 2]);
+        File.WriteAllText(Path.Combine(session, "embeddings.json"), JsonSerializer.Serialize(new
+        {
+            dim = 1280,
+            dtype = "float16",
+            count = frames,
+            model_md5 = modelMd5
+        }));
     }
 }

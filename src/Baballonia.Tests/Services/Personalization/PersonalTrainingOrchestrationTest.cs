@@ -41,6 +41,8 @@ public class PersonalTrainingOrchestrationTest
     private string? _modelBackup;
     private string? _previousBackup;
     private HashSet<string> _runsBefore = [];
+    private readonly Dictionary<string, string?> _slotBackups = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string?> _slotPreviousBackups = new(StringComparer.OrdinalIgnoreCase);
 
     [TestInitialize]
     public void Initialize()
@@ -73,6 +75,31 @@ public class PersonalTrainingOrchestrationTest
             _previousBackup = Path.Combine(Path.GetTempPath(),
                 $"babble-personal-previous-backup-{Guid.NewGuid():N}.onnx");
             File.Copy(previousRollback, _previousBackup, overwrite: true);
+        }
+
+        _slotBackups.Clear();
+        _slotPreviousBackups.Clear();
+        foreach (var kind in new[] { "a", "b", "c" })
+        {
+            var slot = PersonalizationPaths.PersonalModelPath(kind);
+            string? backup = null;
+            if (File.Exists(slot))
+            {
+                backup = Path.Combine(Path.GetTempPath(),
+                    $"babble-personal-{kind}-backup-{Guid.NewGuid():N}.onnx");
+                File.Copy(slot, backup, overwrite: true);
+            }
+            _slotBackups[slot] = backup;
+
+            var previous = Path.ChangeExtension(slot, ".previous.onnx");
+            string? previousBackup = null;
+            if (File.Exists(previous))
+            {
+                previousBackup = Path.Combine(Path.GetTempPath(),
+                    $"babble-personal-{kind}-previous-backup-{Guid.NewGuid():N}.onnx");
+                File.Copy(previous, previousBackup, overwrite: true);
+            }
+            _slotPreviousBackups[slot] = previousBackup;
         }
     }
 
@@ -115,6 +142,34 @@ public class PersonalTrainingOrchestrationTest
             }
         }
         catch { /* best effort */ }
+
+        foreach (var (slot, backup) in _slotBackups)
+        {
+            try
+            {
+                if (backup != null)
+                {
+                    File.Copy(backup, slot, overwrite: true);
+                    File.Delete(backup);
+                }
+                else if (File.Exists(slot))
+                {
+                    File.Delete(slot);
+                }
+                var previous = Path.ChangeExtension(slot, ".previous.onnx");
+                var previousBackup = _slotPreviousBackups.GetValueOrDefault(slot);
+                if (previousBackup != null)
+                {
+                    File.Copy(previousBackup, previous, overwrite: true);
+                    File.Delete(previousBackup);
+                }
+                else if (File.Exists(previous))
+                {
+                    File.Delete(previous);
+                }
+            }
+            catch { /* best effort */ }
+        }
 
         try
         {
@@ -317,7 +372,8 @@ public class PersonalTrainingOrchestrationTest
             Assert.IsTrue(result.Success,
                 $"Pipeline failed: {result.Message}\n--- details ---\n{service.DetailLog}");
 
-            Assert.IsTrue(File.Exists(modelPath), "The trained model should have been installed.");
+            Assert.AreEqual(PersonalizationPaths.PersonalModelPath("a"), manager.ModelPath);
+            Assert.IsTrue(File.Exists(manager.ModelPath), "The trained model should have been installed in A's slot.");
             Assert.IsNotNull(pipeline.Corrector, "The installed model should be live on the pipeline.");
             Assert.IsTrue(manager.IsActive);
 
@@ -365,9 +421,9 @@ public class PersonalTrainingOrchestrationTest
 
             var service = new PersonalTrainingService(manager, NullLogger<PersonalTrainingService>.Instance);
             var install = typeof(PersonalTrainingService)
-                .GetMethod("InstallModel", BindingFlags.NonPublic | BindingFlags.Instance)!;
+                .GetMethod("InstallModelToPath", BindingFlags.NonPublic | BindingFlags.Instance)!;
 
-            var error = install.Invoke(service, [source]) as string;
+            var error = install.Invoke(service, [source, modelPath]) as string;
 
             Assert.IsNull(error, $"Overwriting a loaded model should succeed, got: {error}");
             Assert.IsTrue(File.Exists(Path.ChangeExtension(modelPath, ".previous.onnx")),

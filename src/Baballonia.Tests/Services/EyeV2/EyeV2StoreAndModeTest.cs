@@ -4,6 +4,7 @@ using Baballonia.Services.EyeV2;
 using Microsoft.Extensions.Logging;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
+using OpenCvSharp;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -121,9 +122,53 @@ public class EyeV2StoreAndModeTest
         _settings.Verify(x => x.SaveSetting("CalibrationParams", It.IsAny<object>(), It.IsAny<bool>()), Times.Never);
     }
 
+    [TestMethod]
+    public async Task GeometryHybrid_IsSeparatelySelectableAndKeepsV2AAvailable()
+    {
+        var store = Store();
+        await store.SaveAsync(EyeV2CalibrationAndMapperTest.IdentityCalibration());
+        IEyeStateMapper? installed = null;
+        var manager = new EyeV2Manager(null!, _settings.Object, store,
+            Mock.Of<ILogger<EyeV2Manager>>(), mapper => installed = mapper,
+            () => new StubGeometryExtractor());
+
+        Assert.IsTrue(manager.TrySetMode(EyeTrackingMode.GeometryHybridV2B));
+        Assert.IsInstanceOfType<EyeV2GeometryMapper>(installed);
+        Assert.AreEqual(EyeTrackingMode.GeometryHybridV2B, manager.Mode);
+
+        Assert.IsTrue(manager.TrySetMode(EyeTrackingMode.ExperimentalV2));
+        Assert.IsInstanceOfType<EyeV2Mapper>(installed,
+            "V2-A must remain its own selectable, behaviorally unchanged mapper.");
+    }
+
+    [TestMethod]
+    public async Task GeometryInitializationFailure_FallsBackToV2A()
+    {
+        var store = Store();
+        await store.SaveAsync(EyeV2CalibrationAndMapperTest.IdentityCalibration());
+        IEyeStateMapper? installed = null;
+        var manager = new EyeV2Manager(null!, _settings.Object, store,
+            Mock.Of<ILogger<EyeV2Manager>>(), mapper => installed = mapper,
+            () => throw new InvalidOperationException("no geometry runtime"));
+
+        Assert.IsFalse(manager.TrySetMode(EyeTrackingMode.GeometryHybridV2B));
+        Assert.AreEqual(EyeTrackingMode.ExperimentalV2, manager.Mode);
+        Assert.IsInstanceOfType<EyeV2Mapper>(installed);
+        StringAssert.Contains(manager.Status, "V2-A");
+    }
+
     private EyeV2CalibrationStore Store() => new(
         Mock.Of<ILogger<EyeV2CalibrationStore>>(), _path);
 
     private EyeV2Manager Manager(EyeV2CalibrationStore store, Action<IEyeStateMapper?> setter) =>
         new(null!, _settings.Object, store, Mock.Of<ILogger<EyeV2Manager>>(), setter);
+
+    private sealed class StubGeometryExtractor : IEyeGeometryExtractor
+    {
+        public string Name => "stub";
+        public EyeGeometryFrame Extract(Mat transformedEyeFrame, long timestampTicks) =>
+            new(timestampTicks, EyeGeometry.Missing, EyeGeometry.Missing);
+        public void Reset() { }
+        public void Dispose() { }
+    }
 }

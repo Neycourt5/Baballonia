@@ -8,6 +8,7 @@ public enum EyeTrackingMode
 {
     DefaultBaballonia = 0,
     ExperimentalV2 = 1,
+    GeometryHybridV2B = 2,
 }
 
 public enum EyeSide

@@ -37,6 +37,7 @@ public class HardExampleServiceTest
     private FacePipelineEventBus _bus = null!;
     private HardExampleBuffer _buffer = null!;
     private HardExampleService _service = null!;
+    private Mock<ILocalSettingsService> _settings = null!;
     private readonly List<string> _createdSessions = [];
 
     [TestInitialize]
@@ -44,8 +45,9 @@ public class HardExampleServiceTest
     {
         _bus = new FacePipelineEventBus();
         _buffer = new HardExampleBuffer(NullLogger.Instance, _bus);
+        _settings = new Mock<ILocalSettingsService>();
         _service = new HardExampleService(_buffer, BuildModelManager(),
-            NullLogger<HardExampleService>.Instance);
+            NullLogger<HardExampleService>.Instance, _settings.Object);
     }
 
     [TestCleanup]
@@ -110,6 +112,22 @@ public class HardExampleServiceTest
         if (result.SessionId is { } id)
             _createdSessions.Add(id);
         return result;
+    }
+
+    [TestMethod]
+    public void ToggleAppliesImmediatelyAndPersists()
+    {
+        _service.SetEnabled(false);
+
+        Assert.IsFalse(_service.Enabled);
+        _settings.Verify(x => x.SaveSetting(
+            HardExampleService.EnabledSetting, false, It.IsAny<bool>()), Times.Once);
+
+        _service.SetEnabled(true);
+
+        Assert.IsTrue(_service.Enabled);
+        _settings.Verify(x => x.SaveSetting(
+            HardExampleService.EnabledSetting, true, It.IsAny<bool>()), Times.Once);
     }
 
     private static JsonDocument ReadJson(string path) =>

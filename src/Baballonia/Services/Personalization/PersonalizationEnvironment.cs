@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 
 namespace Baballonia.Services.Personalization;
 
@@ -60,6 +61,13 @@ public sealed record DatasetStatus(
             return null;
         }
     }
+}
+
+/// <summary>Coverage of model C's visual-feature sidecars across recorded sessions.</summary>
+public sealed record EmbeddingDatasetStatus(int Sessions, int ReadySessions, string Summary)
+{
+    public bool Ready => Sessions > 0 && ReadySessions == Sessions;
+    public int MissingSessions => Math.Max(0, Sessions - ReadySessions);
 }
 
 /// <summary>Everything the Personalization page needs to describe the current state.</summary>
@@ -151,6 +159,81 @@ public sealed class PersonalizationEnvironment
         }
 
         return new DatasetStatus(neutral, speech, guided, frames, correction);
+    }
+
+    /// <summary>
+    /// Verifies that every non-empty recording has the complete visual-feature sidecar consumed by
+    /// model C. The optional hash also prevents features from an older derived face graph being
+    /// accepted after the stock model changes.
+    /// </summary>
+    public static EmbeddingDatasetStatus InspectEmbeddingDataset(
+        string? datasetRoot = null,
+        string? expectedModelMd5 = null)
+    {
+        var root = datasetRoot ?? PersonalizationPaths.DatasetRoot;
+        if (!Directory.Exists(root))
+            return new EmbeddingDatasetStatus(0, 0, "No recordings are available to prepare.");
+
+        var sessions = 0;
+        var ready = 0;
+
+        foreach (var directory in Directory.EnumerateDirectories(root))
+        {
+            if (!File.Exists(Path.Combine(directory, "session.json")))
+                continue;
+
+            var framesDirectory = Path.Combine(directory, "frames");
+            var frameCount = Directory.Exists(framesDirectory)
+                ? Directory.EnumerateFiles(framesDirectory, "*.jpg").Count()
+                : 0;
+            if (frameCount == 0)
+                continue;
+
+            sessions++;
+            if (EmbeddingSidecarIsComplete(directory, frameCount, expectedModelMd5))
+                ready++;
+        }
+
+        var summary = sessions == 0
+            ? "No recordings are available to prepare."
+            : ready == sessions
+                ? $"Visual features are ready for all {sessions} recording{(sessions == 1 ? "" : "s")}."
+                : $"Generate visual features for {sessions - ready} of {sessions} recordings before training C.";
+
+        return new EmbeddingDatasetStatus(sessions, ready, summary);
+    }
+
+    private static bool EmbeddingSidecarIsComplete(
+        string sessionDirectory,
+        int frameCount,
+        string? expectedModelMd5)
+    {
+        var binary = Path.Combine(sessionDirectory, "embeddings.bin");
+        var metadata = Path.Combine(sessionDirectory, "embeddings.json");
+        if (!File.Exists(binary) || !File.Exists(metadata))
+            return false;
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(metadata));
+            var root = document.RootElement;
+
+            if (!root.TryGetProperty("dim", out var dim) || dim.GetInt32() != 1280 ||
+                !root.TryGetProperty("count", out var count) || count.GetInt32() != frameCount ||
+                !root.TryGetProperty("dtype", out var dtype) || dtype.GetString() != "float16")
+                return false;
+
+            if (!string.IsNullOrEmpty(expectedModelMd5) &&
+                (!root.TryGetProperty("model_md5", out var modelMd5) ||
+                 !string.Equals(modelMd5.GetString(), expectedModelMd5, StringComparison.OrdinalIgnoreCase)))
+                return false;
+
+            return new FileInfo(binary).Length == (long)frameCount * 1280 * sizeof(ushort);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 
     /// <summary>True when the venv exists and has the packages training needs.</summary>
