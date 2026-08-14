@@ -1049,6 +1049,161 @@ Advanced: model choice, strength, metrics,    Advanced: eye debug panel (pupil/a
                                                 anchors, thresholds, per-eye confidence)
 ```
 
+## P3-2 — EYE RESEARCH SPIKE: FINDINGS (2026-08-14, work PC)
+
+Research/reporting milestone, no production code. Everything below is measured on this machine or
+read out of the actual artifacts; inferences are labelled.
+
+### 1. The shipped eye model, exactly
+
+`eyeModel.onnx`: 956,474 params, input `[b,8,128,128]`, output `[b,6]`. Two independent per-eye
+towers of six `Conv3x3 → ReLU → MaxPool` stages then `Flatten → Gemm → Sigmoid`, channel ladder
+**28, 42, 63, 94, 141, 212**, 3 outputs per eye.
+
+**It is exactly two copies of `baseline_L/R.pth`** — the per-eye trainer checkpoints in the repo
+measure **478,237 params each** with precisely that ladder (`conv1..conv6` + `fc(212→3)`), and
+2 × 478,237 = 956,474. So the shipped model *is* the baseline architecture, and the calibration
+trainer fine-tunes those two checkpoints per user.
+
+### 2. expr-dev's actual architecture (measured from its checkpoints)
+
+| checkpoint | contents | params | notes |
+|---|---|---|---|
+| `gaze_model_best.pt` | `arch: "microchad"`, `step 12000`, `val_gaze_mse 0.0679` | **119,628** | conv ladder **14,21,32,47,70,106** — literally half-width baseline; 4ch in, `fc_gaze → 2` |
+| `model_best.pt` | `backbone: "mobilenetv4_conv_small_050.e3000_r224_in1k"`, `val_mse 0.0783`, keys `student`/`teacher` | **977,266** (each) | `conv_stem (32,4,3,3)` → 4 temporal channels, **one eye**; `classifier (4,1280)` → 4 outputs |
+
+Three conclusions that matter more than the numbers:
+
+1. **expr-dev splits gaze from expression into separate specialised networks**, and made gaze
+   *four times smaller* (119k vs 478k) while making expression *twice as large* (977k) and
+   ImageNet-pretrained. Their authors concluded, independently, that **gaze needs far less capacity
+   than expression discrimination**. That is the single most useful architectural finding here.
+2. **The expression net is ImageNet-pretrained** (`e3000_r224_in1k`) — the alpha did not train eye
+   expressions from scratch either.
+3. `student`/`teacher` + the 60 MB `footage_unlabeled.npz` means **mean-teacher semi-supervised
+   training**: labelled calibration frames plus a large pool of unlabelled footage. That is how
+   they got expression quality out of a small labelled set.
+
+The 4 expression outputs are **lid, widen, squint, brow** per eye — matching the four new OSC
+addresses the branch's rewritten module handles, and the five label fields its capture steps stamp
+(`lid, browRaise, browAngry, widen, squint`). Runtime total would be gaze(2) + expression(4) = **6
+values per eye, 12 total**, versus main's 3 per eye / 6 total.
+
+### 3. The finding that changes the plan: expr-dev ships main's eye model
+
+`git rev-parse origin/expr-dev:src/Baballonia/eyeModel.onnx main:src/Baballonia/eyeModel.onnx`
+returns the **same blob hash** (`0d1c998d…`). The alpha branch ships the *identical* 956k eye ONNX.
+Its entire improvement is produced by an external trainer binary ("qpro trainer") that exists in
+neither branch, from checkpoints that are only *starting weights*.
+
+**Therefore merging expr-dev would deliver none of its eye improvements.** What it delivers is a
+blueprint: architecture, output schema, training regime, and usable pretrained starting weights —
+all of which we now have measured. Reimplementing the trainer is tractable; adopting the branch is
+not a shortcut.
+
+### 4. Capacity, measured (ONNX Runtime, CPU EP, app session options, 128×128, both eyes)
+
+Reconstructing the shipped architecture and re-measuring it validates the method: the rebuild
+(956,474 params) lands at **3.34 ms** against the real artifact's **3.44 ms**.
+
+| dense tower (shipped family) | params | p50 ms | | separable (MobileNet-style) | params | p50 ms |
+|---|---|---|---|---|---|---|
+| shipped | 956,474 | **3.44** | | w0.5 | 332,012 | 3.19 |
+| ×1.5 | 2,151,018 | 5.84 | | w0.75 | 723,524 | 3.82 |
+| ×2 | 3,816,982 | 7.49 | | w1.0 | 1,273,012 | 4.16 |
+| ×3 | 8,581,530 | 17.65 | | w1.5 | 2,824,828 | 5.98 |
+| ×4 | 15,250,118 | 22.16 | | w2.0 | 4,999,004 | 7.05 |
+| | | | | w3.0 | 11,177,988 | **10.32** |
+
+At matched latency the separable family buys **~1.3× the parameters at ~6 ms and ~2.5× at ~10 ms**,
+and the gap widens with size — the dense tower's cost grows with the square of width. It is also
+deeper (8 blocks vs 6 convs) with residuals and squeeze-excite, so its *usable* capacity advantage
+is larger than the parameter ratio suggests. expr-dev reached the same conclusion by choosing
+MobileNetV4.
+
+### 5. The budget denominator — read these as a *ladder*, not as absolute limits
+
+Measured on the **work PC** (a modest laptop-class CPU), one tick's inference:
+
+```
+face only    p50 14.95 ms      eye only  p50 3.37 ms
+face + eye   p50 17.26 ms      eye is 20% of the pair; the face model dominates
+```
+
+**Do not read these as the home budget.** The home machine is a **Ryzen 9 7950X3D** — 16 fast
+cores with a large V-cache, and ORT's intra-op parallelism is left at default (only
+`InterOpNumThreads` is pinned to 1), so it parallelises across cores. Realistically that is several
+times faster than the numbers above, before DirectML is even considered. The work PC simply cannot
+hold 100 Hz on CPU; the home PC very likely can, and runs with `AppSettings_UseGPU` true anyway.
+
+What transfers is the **shape of the curve**, not the milliseconds: relative cost between
+architectures and capacity tiers, measured under identical conditions. Three consequences:
+
+- **Capacity is not the binding constraint at home.** On a 7950X3D plus DirectML, a 1–5 M-param
+  separable eye model is comfortably real-time. The plan should be limited by *training data and
+  overfitting*, not by inference cost. **HOME-PC VALIDATION REQUIRED: re-run this ladder there,
+  CPU and DirectML, to fix the absolute numbers.**
+- The eye stage is only ~20 % of the pair even today, so **growing it is cheap in relative terms** —
+  doubling the eye model costs far less than the face model already does.
+- There is a real **face↔eye interaction**: if Model E ever replaces the 5.9 M face model with a
+  ~1 M net, it frees the majority of the tick and directly funds a larger eye model. The two tracks
+  are not independent.
+
+### 6. Paper Tracker / ETVR (verified vs inferred)
+
+VERIFIED: Paper's PC eye software is **EyeTrackVR v2.0 BETA 14**; its public `EyeTrackApp` contains
+`AHSF.py`, `haar_surround_feature.py`, `ransac.py`, `leap.py`, `blink.py`,
+`intensity_based_openness.py`, `osc_calibrate_filter.py` — a hybrid of classic pupil localisation
+and a small learned eyelid/pupil model, with **mapping-only calibration** ("look to all extremes →
+look straight → Recenter", tens of seconds, optional 9-point overlay). No per-user retraining.
+INFERRED: the polygon+pupil debug overlay corresponds to LEAP landmarks.
+LICENSING: post-v2.0-beta ETVR is restrictively licensed — reimplement the published algorithms
+(Haar-surround and RANSAC ellipse are academic), copy no code without a version-specific review.
+
+### 7. Answer: is the planned Eye V2 too conservative on capacity?
+
+**Yes on architecture family and output schema; no on the staging order.**
+
+- The plan's V2-C wording ("lightweight personalised eye model") anchors on the wrong axis.
+  Evidence says the axis that matters is **architecture efficiency and task separation**, not
+  parameter minimisation. A separable/inverted-residual trunk at **1–5 M params** costs 4–7 ms on
+  the *work* CPU — and the home machine is a 7950X3D with DirectML available, so this range is not
+  close to the limit there. Inference cost should not be what caps the eye model; **training data
+  and overfitting should be**.
+- **Split gaze from expression.** Both this measurement and expr-dev's independent choice support
+  a small gaze head (~120–500 k) and a larger expression trunk (~1–5 M). Squint/wide/blink
+  discrimination is the hard visual problem; gaze is a smooth 2-DOF regression.
+- **Expect pretraining to matter.** expr-dev did not train expressions from scratch, and neither
+  should we by default — though a from-scratch arm is worth keeping for the same reason
+  E-strict is: it answers the question cheaply.
+- Unchanged: **V2-A (fast mapping calibration) still goes first.** It is days not weeks, it
+  delivers the calibration UX that is half the user's complaint, and it builds the measurement rig
+  every later comparison needs. Nothing here argues for skipping it — only for not stopping there.
+
+**Revised recommended ladder** (built once the V2-A rig exists, compared on identical
+sitting-level splits):
+
+| tier | trunk | params | why |
+|---|---|---|---|
+| gaze head | half-width dense tower (microchad-class) | ~0.12–0.5 M | proven sufficient for 2-DOF by expr-dev |
+| V2-L Balanced | separable w0.75–1.0 | ~0.7–1.3 M | ≈ shipped latency, far more capable |
+| V2-L High Accuracy | separable w1.5–2.0 | ~2.8–5.0 M | 6–7 ms on the work CPU; a non-issue on a 7950X3D / DirectML |
+| V2-L Research | separable w3.0+ | ~11 M+ | worth trying — the constraint here is data, not latency |
+
+Keep the tiers as **distinct, selectable, separately-versioned models** (own architecture id,
+metadata, provenance, benchmark row) rather than overwriting one file — the point of a ladder is
+comparing rungs.
+
+### 8. Recommendation
+
+Build **V2-A first** (mapping calibration over the existing model), because it is cheap, it fixes
+the calibration complaint, and it creates the benchmark rig. Then **V2-B/L as one learned track**
+with the split-head design above and a real capacity ladder, reusing expr-dev's *findings* (task
+split, pretraining, mean-teacher semi-supervision, its pretrained checkpoints as starting weights)
+without adopting its branch. Keep `main` as the base.
+
+---
+
 ## PHASE 3 — NEXT EXACT TASK (Opus 5 Medium, first implementation session)
 
 **User-confirmed order: P3-1 + P3-2 together first** (P3-3 if capacity remains). Both are
