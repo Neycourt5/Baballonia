@@ -181,6 +181,34 @@ public class EyeProcessingPipelineTickTest
     }
 
     [TestMethod]
+    public void ExtendedNamedModel_IsProjectedBeforeTheSixValueFilter()
+    {
+        var extended = new float[]
+        {
+            0.10f, 0.20f, 0.30f, 0.31f, 0.32f, 0.33f,
+            0.40f, 0.50f, 0.60f, 0.61f, 0.62f, 0.63f,
+        };
+        var names = new[]
+        {
+            "rightEyeY", "rightEyeX", "rightEyeLid", "rightEyeWiden", "rightEyeSquint", "rightEyeBrow",
+            "leftEyeY", "leftEyeX", "leftEyeLid", "leftEyeWiden", "leftEyeSquint", "leftEyeBrow",
+        };
+        _pipeline.InferenceService = new NamedFakeRunner(extended, names);
+        _pipeline.Filter = new OneEuroFilter(new float[Utils.EyeRawExpressions]);
+
+        float[]? raw = null;
+        _bus.Subscribe<EyePipelineEvents.NewRawExpressionsEvent>(e => raw = (float[])e.rawResult.Clone());
+
+        var result = RunUntilInference();
+
+        Assert.IsNotNull(result);
+        Assert.AreEqual(Utils.EyeRawExpressions, result.Length);
+        CollectionAssert.AreEqual(
+            new[] { 0.10f, 0.20f, 0.30f, 0.40f, 0.50f, 0.60f }, raw,
+            "the extra per-eye expression slots must not be mistaken for the left eye");
+    }
+
+    [TestMethod]
     public void NullMapper_PreservesTheLegacySixValuePath()
     {
         _pipeline.Mapper = null;
@@ -371,6 +399,16 @@ public class EyeProcessingPipelineTickTest
         private readonly DenseTensor<float> _input = new([1, 8, Size, Size]);
 
         public float[]? Run() => (float[])Output.Clone();
+        public DenseTensor<float> GetInputTensor() => _input;
+    }
+
+    private sealed class NamedFakeRunner(float[] output, string[] names) :
+        IInferenceRunner, INamedInferenceOutput
+    {
+        private readonly DenseTensor<float> _input = new([1, 8, Size, Size]);
+
+        public IReadOnlyList<string>? OutputNames => names;
+        public float[]? Run() => (float[])output.Clone();
         public DenseTensor<float> GetInputTensor() => _input;
     }
 

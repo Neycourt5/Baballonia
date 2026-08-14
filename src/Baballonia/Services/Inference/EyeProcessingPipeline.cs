@@ -1,8 +1,10 @@
-﻿using Baballonia.Services.events;
+﻿using Baballonia.Contracts;
+using Baballonia.Services.events;
 using Baballonia.Services.Inference.Enums;
 using Baballonia.Services.EyeV2;
 using OpenCvSharp;
 using System;
+using System.Collections.Generic;
 
 namespace Baballonia.Services.Inference;
 
@@ -75,14 +77,21 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
 
             ImageConverter?.Convert(collected, InferenceService.GetInputTensor());
 
-            var inferenceResult = InferenceService.Run();
-            if (inferenceResult == null)
+            var modelResult = InferenceService.Run();
+            if (modelResult == null)
                 return null;
 
-            // Published before the filter and before ProcessExpressions, so subscribers see what
-            // the model actually said. The post-processing below is deliberately lossy - it fuses
-            // the two eyes' vertical gaze into one value and lets a closed eye borrow the other's
-            // yaw - and none of that can be undone from the outside.
+            // Newer trained eye models may expose expression values in addition to gaze/lid. Their
+            // metadata describes a 12-value right-eye-first layout, while the rest of Baballonia
+            // intentionally retains the six-value legacy contract. Project by name before the
+            // six-slot OneEuro filter and stock post-processing; simply truncating would mistake
+            // right-eye widen/squint/brow for the left eye and used to crash when filtering was on.
+            var inferenceResult = ProjectLegacyEyeOutput(modelResult, InferenceService);
+
+            // Published before the filter and before ProcessExpressions, so subscribers see the
+            // model's raw gaze/lid values in the stable legacy order. The processing below is
+            // deliberately lossy - it fuses the two eyes' vertical gaze into one value and lets a
+            // closed eye borrow the other's yaw, none of which can be undone from the outside.
             eyePipelineEventBus.Publish(new EyePipelineEvents.NewRawExpressionsEvent(
                 transformed, inferenceResult, timestampTicks));
 
@@ -132,6 +141,49 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
     /// ones, so the model is handed four "consecutive" frames spanning a camera switch.
     /// </remarks>
     public void ResetTemporalState() => _imageCollector.Reset();
+
+    private static float[] ProjectLegacyEyeOutput(float[] modelResult, IInferenceRunner runner)
+    {
+        if (modelResult.Length == Utils.EyeRawExpressions)
+            return modelResult;
+
+        if (runner is not INamedInferenceOutput { OutputNames: { } outputNames } ||
+            outputNames.Count != modelResult.Length)
+        {
+            throw new InvalidOperationException(
+                $"Eye model emits {modelResult.Length} values, but has no matching named output layout.");
+        }
+
+        var indices = new[]
+        {
+            FindOutput(outputNames, "rightEyeY", "rightEyePitch"),
+            FindOutput(outputNames, "rightEyeX", "rightEyeYaw"),
+            FindOutput(outputNames, "rightEyeLid"),
+            FindOutput(outputNames, "leftEyeY", "leftEyePitch"),
+            FindOutput(outputNames, "leftEyeX", "leftEyeYaw"),
+            FindOutput(outputNames, "leftEyeLid"),
+        };
+
+        var projected = new float[Utils.EyeRawExpressions];
+        for (var i = 0; i < projected.Length; i++)
+            projected[i] = modelResult[indices[i]];
+
+        return projected;
+    }
+
+    private static int FindOutput(IReadOnlyList<string> outputNames, params string[] candidates)
+    {
+        for (var i = 0; i < outputNames.Count; i++)
+        {
+            var actual = outputNames[i].TrimStart('/');
+            foreach (var candidate in candidates)
+                if (string.Equals(actual, candidate, StringComparison.OrdinalIgnoreCase))
+                    return i;
+        }
+
+        throw new InvalidOperationException(
+            $"Eye model output metadata is missing '{string.Join("' or '", candidates)}'.");
+    }
 
     private bool ProcessExpressions(ref float[] arKitExpressions)
     {

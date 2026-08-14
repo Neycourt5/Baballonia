@@ -12,7 +12,8 @@ using System.Linq;
 
 namespace Baballonia.Services;
 
-public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRunner, IEmbeddingSource
+public class DefaultInferenceRunner(ILoggerFactory loggerFactory) :
+    IInferenceRunner, INamedInferenceOutput, IEmbeddingSource
 {
     public Size InputSize { get; private set; }
     public int OutputSize { get; private set; }
@@ -22,6 +23,12 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRu
     private InferenceSession _session;
     private string[] _outputExpressionNames;
     private bool _isOldEyeModel;
+
+    /// <summary>
+    /// Names supplied by the model for each primary-output element, when available.
+    /// Eye models use these to project extended layouts onto the legacy gaze/lid contract.
+    /// </summary>
+    public IReadOnlyList<string>? OutputNames => _outputExpressionNames;
 
     /// <summary>
     /// Name of a second graph output to capture alongside the primary one, or null for the usual

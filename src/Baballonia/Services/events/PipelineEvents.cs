@@ -39,8 +39,9 @@ public class EyePipelineEvents
     public record NewTransformedFrameEvent(Mat image);
 
     /// <summary>
-    /// Raw eye model output, published immediately after inference and before the filter and
-    /// <c>ProcessExpressions</c>.
+    /// Raw legacy eye output, published immediately after inference and before the filter and
+    /// <c>ProcessExpressions</c>. Extended named model layouts are first projected onto the six
+    /// gaze/lid values consumed by the runtime.
     /// </summary>
     /// <remarks>
     /// <para>The eye counterpart of <see cref="FacePipelineEvents.NewRawExpressionsEvent"/>, and the
@@ -49,7 +50,7 @@ public class EyePipelineEvents
     /// gaze across both eyes, lets a closed eye borrow the open eye's yaw, and clamps convergence.
     /// Those are reasonable output behaviours and terrible calibration inputs.</para>
     ///
-    /// <para>Layout of <paramref name="rawResult"/> is the model's own, which is right-eye-first:
+    /// <para>Layout of <paramref name="rawResult"/> is right-eye-first:
     /// <c>[rightY, rightX, rightLid, leftY, leftX, leftLid]</c>, each a sigmoid in [0,1]. That is
     /// the order the shipped graph emits; the pipeline's local variable names disagree, but two
     /// sign errors cancel downstream. Consumers of this event should use the layout, not the
