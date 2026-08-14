@@ -8,9 +8,13 @@ should be able to continue without any prior conversation.
 ## Current Status
 
 ```
-Current phase: PHASE 2 IMPLEMENTED (M1-M5, M7 all complete and committed).
-               Everything that can be built and verified without the home PC is done.
-               The project is now blocked on real-data validation, not on code.
+Current phase: PHASE 2 IMPLEMENTED (M1-M5, M7 complete and committed).
+               PHASE 3 PLANNED (2026-08-14): face models A-E re-ranked with Model E
+               analyzed, Eye Tracking V2 designed against the Paper Tracker benchmark.
+               See "PHASE 3 PLAN" below. The home-PC checklist is still the
+               immediate queue; the first Phase 3 implementation milestones
+               (P3-1 guided expansion + P3-2 eye spike) are agent-safe and do
+               not block on it.
 Branch: main (19 commits ahead of upstream 84eca8c, not pushed)
 Build: OK (core, Desktop, tests).
 Suite: 205 passed / 9 failed / 2 skipped.  The 9 are the same pre-existing
@@ -82,7 +86,7 @@ into a trained ONNX adapter, and a C# runtime that loads, validates, blends and 
 
 ---
 
-# PHASE 2 PLAN — approved 2026-08-14 (ACTIVE HANDOFF for Opus 5 Medium)
+# PHASE 2 PLAN — approved 2026-08-14 (IMPLEMENTED; see Implementation Record below)
 
 This section is the implementation handoff. It was produced after a full repo audit at HEAD
 `84d71c8` plus a verified in-memory ONNX experiment. Everything below the "Approved milestone
@@ -711,15 +715,366 @@ was.
   loses, since growing B's scratch CNN competes with a pretrained embedding that is free.
 * **Audio phoneme/viseme assist.** Interfaces are shaped for a second feature source, but it stays a
   later experiment until prosody is validated in real use.
-* **Model D.** Unchanged: optional endgame research, not scheduled.
+* **Model D.** Reassessed in the Phase 3 plan below: it joins a unified experiment with Model E
+  rather than remaining standalone endgame research.
+
+---
+
+# PHASE 3 PLAN — approved 2026-08-14 (next implementation handoff for Opus 5 Medium)
+
+Planned on the work PC after a full eye-subsystem audit, direct ONNX graph inspection, and
+external research. The home-PC checklist above remains the immediate queue; the first Phase 3
+milestones are agent-safe and independent of it. Two subjects: **(I)** the face-model program
+after the B-vs-C gate, including the new Model E; **(II)** Eye Tracking V2 against the Paper
+Tracker benchmark.
+
+## Session-verified facts (2026-08-14)
+
+**Eye model, graph parsed directly.** `src/Baballonia/eyeModel.onnx`: 3.8 MB, 956,474 params.
+Input `[b,8,128,128]` = 4 temporal frames × 2 eyes, stacked in C# by `ImageCollector`
+(`src/Baballonia/Services/Inference/ImageCollector.cs`, queue depth 5, channels swapped L/R at
+line 20). Two Gather ops split the 8 channels into two fully independent per-eye conv towers
+(`left.*`, `right.*`), each 6×(Conv+ReLU+MaxPool) → Gemm → Sigmoid → 3 values; Concat → `[b,6]`.
+**The model outputs exactly X, Y, Lid per eye. Widen/squint/brow do not exist in the model, the
+OSC sends, or the module path on `main`** — all commented scaffolding
+(`ParameterSenderService.cs:47-55`, `BabbleVRC.cs:80-104`, `ICalibrationRoutine.cs:357-409`,
+dead `OutputIndexMap` in `DefaultInferenceRunner.cs:298-310`). Raw output layout is
+right-eye-first (`/rightEyeY,-X,-Lid,/leftEyeY,-X,-Lid`, per `expr-dev`'s named map); `main`'s
+local variable names are mislabeled but two errors cancel and the wiring is correct.
+
+**Eye pipeline audit (key points, file:line).**
+- `EyeProcessingPipeline.RunUpdate()` (`src/Baballonia/Services/Inference/EyeProcessingPipeline.cs:14-58`)
+  mirrors the face pipeline *minus* every personalization hook: no corrector/enhancer stage, no
+  raw-output event (the tap the face recorder uses), One Euro applied to the **raw** 6-vector
+  *before* post-processing (line 45) — opposite of the face order.
+- Post-processing (`ProcessExpressions`, lines 60-105): [0,1]→[−1,1] remap; lid inversion; **both
+  eyes share one Y** (lid-weighted average); closed-eye yaw borrowing; convergence clamp under
+  `AppSettings_StabilizeEyes` (default true).
+- `ParameterSenderService` sends exactly 6 eye addresses; eye values are `Remap`ped but **never
+  clamped** (line 177), unlike face values.
+- Model hot-swap already exists (`EyeHome_EyeModel` setting + `EyePipelineManager.LoadInferenceAsync`,
+  lines 55-74) — but the swap write is non-volatile and the old runner is not disposed.
+- Mat leaks on every eye tick: the 8-channel `collected` Mat and `ImageCollector`'s `Split()`
+  arrays are never disposed; `transformed` is disposed twice (lines 32, 55).
+- `MatToFloatTensorConverter` pins the eye input to 8×128×128 — any different model shape needs a
+  new converter/collector. `ProcessExpressions` truncates any longer output to 6 (lines 93-102).
+- Face + eye share the same 10 ms UI-thread `DispatcherTimer` (`ProcessingLoopService.cs:23-79`).
+
+**Eye calibration today.** Godot overlay (TCP JSON via OverlaySDK, port 2425) + step framework
+(`src/Baballonia.Desktop/Calibration/ICalibrationRoutine.cs`); Basic routine ≈ 30 s tutorial +
+**120 s gaze reticle** + 30 s blink → CaptureBin (100-byte header already has
+Widen/Squint/Brow/Dilate fields `main` never populates) → spawns **BabbleTrainer.exe** (closed
+binary; fine-tunes the in-repo per-eye checkpoints `baseline_L/R.pth`, ~480k params each) →
+installs `tuned_temporal_eye_tracking_<ts>.onnx` → hot reload. **Both Overlay and Trainer
+binaries are absent from this tree** (fetched by `download_dependencies.ps1`) — calibration
+cannot currently run here. `GazeOnly`/`BlinkOnly` share a stale-bin merge bug
+(`ICalibrationRoutine.cs:426,448`). `AppSettings_ShareEyeData` upload exists, default off — keep
+off.
+
+**`origin/expr-dev` IS the "Expressions Alpha"** (13 commits, head `4a69127`, in this fork's
+remotes): `OrderedFloatMap` named outputs end-to-end; widen/squint/brow calibration passes live
+(20 s each); new `GazeExpressionCaptureStep` (gaze truth *while* holding an expression — fixes
+"eye looks up while squinting"); VRCFT module rewritten to a flat address switch handling
+Squint/Widen/Brow; trainer assets swapped to a two-headed `model_best.pt` (8.0 MB) +
+`gaze_model_best.pt` (0.5 MB) + 60 MB unlabeled footage. Its trainer binary ("qpro trainer") is
+external and unverified-obtainable. `origin/expr-dev-dbg` (commit `554f3e2`) adds a per-stage
+profiler/debug panel worth porting regardless.
+
+**Paper Tracker benchmark (verified vs inferred).** VERIFIED: Paper's PC eye software is
+**EyeTrackVR v2.0 BETA 14** (hands-on review; kit auto-installs VRCFT + ETVR module), so the
+benchmark's methods are inspectable: ETVR's `EyeTrackApp` publicly contains `AHSF.py`,
+`haar_surround_feature.py`, `ransac.py`, `leap.py`, `blink.py`, `intensity_based_openness.py`,
+`osc_calibrate_filter.py` — a **hybrid** of classic pupil localization and a small learned
+eyelid+pupil landmark model (LEAP), with **mapping** calibration ("look to all extremes → look
+straight → Recenter", tens of seconds, optional 9-point overlay; no retraining). INFERRED ONLY:
+the polygon+pupil debug view ≈ LEAP landmarks — the P3-2 spike verifies by reading `leap.py`.
+LICENSING: newer ETVR is restrictively licensed; reimplement published ideas (Haar-surround,
+RANSAC ellipse are academic), copy no code without a version-specific license review.
+
+## PART I — Face architectures A–E
+
+### The decomposition that answers the Model E hypothesis
+
+| Burden on the universal model | Removed by personalization? |
+|---|---|
+| Population facial diversity | **Yes** — one face |
+| Camera / lens / mount diversity | **Yes** — one geometry |
+| Lighting diversity | Mostly — one room, few conditions |
+| Label noise at scale | **Yes** — replaced by better-than-corpus guided/hard/neutral labels |
+| **Expression coverage** | **No** — a personal model must still *see* every expression it will ever emit; it has no prior to fall back on |
+| Behavioral/multi-day diversity | Partially |
+
+**E's binding constraint is coverage, not capacity.** B/C inherit stock behavior on every dim the
+personal data never covers (residual default = "leave stock alone"). A from-scratch E has no
+prior anywhere: an unlabeled dim is not "stock quality", it is *undefined*. Twelve tongue dims,
+asymmetries and NoseSneer are barely cueable — so E-strict's whole-face ceiling sits **below**
+B/C regardless of network size.
+
+### The unification: E-strict / E-distilled / D are one experiment
+
+```
+              init           architecture     prior on uncovered dims
+E-strict      random         free (small)     none            <- the strict scientific claim
+E-distilled   random         free (small)     stock-as-teacher (training-time only; runtime independent)
+D             stock weights  stock B0         the weights + self-distillation (anti-forgetting)
+```
+
+One harness (`--model e-s|e-m|d1 --teacher stock|none --init random|stock`), identical data,
+identical **day-level** splits, identical eval — three tracks for the price of one, fair by
+construction.
+
+**D prerequisite [AGENT-SAFE spike]:** ONNX→PyTorch weight transplant (EfficientNet-B0-class,
+`in_chans=1`, 45 out; initializer names map back — the ONNX was exported from PyTorch). **Assert
+torch-vs-ONNX forward parity ≤1e-5 before anything trains; failure ⇒ D gated off, reported.**
+D ladder: D1 = last stage + head (~1.3M trainable) + self-distillation on natural footage;
+D2 = two stages only if D1 beats best-of(B,C) on the JawOpen block with no range-retention loss
+on day-holdout; D3 (full) likely never reached at realistic data volume.
+
+### Data math and capacity ladders
+
+A realistic 2–4-week corpus (~10 min/day): guided holds ≈ 25–50k raw frames but only **~2–5k
+effective independent samples** (a 3 s hold ≈ 90 correlated frames); ~15k neutral; 10–20 min
+speech; dozens of corrections. Sensible capacity: **hundreds of k params; low millions only with
+heavy augmentation** — matching the in-repo precedent (the per-user fine-tuned eye model is 956k
+and works).
+
+E ladder (grayscale, in-graph AvgPool→112 so C# feeds its existing tensor):
+**E-S ~0.3M** (B's trunk widened 16→32→64→128, hidden 256 — feasibility probe);
+**E-M ~1.2M** (hand-written MobileNetV3-small-style inverted residuals + SE — main candidate);
+**E-L ~3M** only if E-M improves monotonically on day-holdout.
+Runtime: an adopted E **replaces** the ~9 ms stock CPU forward with ~60–120 MFLOPs → likely 3–6×
+tick speedup — the only architecture that makes tracking cheaper. Staged rollout: phase 1 = E as
+a corrector that ignores its inputs (zero new runtime surface, safe A/B); phase 2 (post-adoption
+only) = model swap via the pattern the eye side already has.
+
+### Supervision deltas for E/D
+
+- **Geometric augmentation unlocks (E/D only; B/C cannot warp** — it breaks pairing with the
+  recorded stock vector). Pose-level labels are invariant under small affine (±4 % translate,
+  ±5° rotate, ±5 % scale) — exactly what a reseat does. Highest-value robustness lever. For
+  teacher-supervised speech frames, re-run the teacher on the warped image.
+- **Ordinal loss defaults ON for guided data** (`--ordinal` exists): intensity *ordering* is
+  trustworthy even when magnitudes aren't; E has no shrinkage prior keeping it calibrated.
+- **Day-level holdout is the headline metric** — a guided-pose memorizer aces same-day
+  session-holdout.
+- **Speech labeling:** E-strict none; E-distilled/D teacher-at-low-weight with personal labels
+  overriding (stock is deliberately the *floor*).
+- **New metrics:** per-dim coverage-vs-quality table; **uncovered-dim drift** (output vs stock on
+  label-free dims — the dead/erratic-dim detector).
+
+### Comparison table
+
+| | A | B | C | D1 | E-strict | E-distilled |
+|---|---|---|---|---|---|---|
+| Architecture | 45→MLP→Δ | img+45→CNN→Δ | emb1280+45→MLP→Δ | stock B0, last stage tuned | small CNN→45 | small CNN→45 + teacher |
+| New runtime params | 28k | 44k | 375k (embed free) | 5.9M (replaces stock) | 0.3–1.2M (replaces) | 0.3–1.2M (replaces) |
+| Inference | +0.03 ms | +0.21 ms | +~0.3 ms | ≈ stock | **2–6× faster than stock** | same |
+| Prior inherited | stock out | stock out | stock features | full weights | **none** | teacher floor |
+| Data / supervision need | tiny/low | small/med | small/med | large/high | **largest/highest** | large/high |
+| Ceiling (this user) | low | med | med-high | **highest** | med (coverage-capped) | **highest** |
+| Realistic near-term | proven | **proven best** | ≥B pending gate | data-limited | below B whole-face | at/below B initially |
+| Overfit risk | low | managed | med | high | **very high** | high |
+| Signature failure | can't see | illum. leak (fixed) | stale derived model | forgets uncovered dims | dead/erratic uncovered dims | inherits teacher errors |
+| Rebase risk | none | none | low | high (24 MB divergent) | low | low |
+| Needs guided/hard labels | little | some | some | heavily | **cannot exist without** | heavily |
+
+### Three rankings (re-derived; the old informal D>C>E>B>A does not survive)
+
+- **Ceiling:** `D ≈ E-distilled > C ≥ B > E-strict > A` — E splits in two; E-strict drops below
+  B/C *even at its ceiling* (coverage caps it).
+- **Realistic near-term:** `best-of(B,C) > A > D1 ≈ E-distilled > E-strict`.
+- **Per engineering effort:** `B (done) > C (validation only) > E-distilled/D1 (one shared
+  harness) > E-strict (cheap add-on) > D2+`.
+- They disagree because ceiling rewards capacity+prior, realism discounts by the slow-growing
+  corpus, and effort discounts by code+risk surface. The disagreement dictates the ordering:
+  validate the proven cheap things, grow the corpus (helps every row), let E/D wait for the data
+  that is their actual bottleneck.
+
+### E/D experiment (concrete, kill-cheap)
+
+- **Gate E0 [HOME-PC prerequisite for the real run]:** ≥8 guided expressions × ≥2 levels across
+  ≥3 days (≥2 reseats); ≥10 neutral sessions across ≥3 lighting conditions; ≥15 min speech; ≥20
+  corrections.
+- **Harness [AGENT-SAFE, synthetic-tested]:** `models.py` + `StandaloneFace` (E-S/E-M) +
+  transplanted `StockBackbone`; `train.py` + `--teacher/--distill`, `--geo-aug`, `--val-days`;
+  `export.py` adapter **v3** (input `image` → `personal`); coverage + drift metrics;
+  `experiment.py` rows.
+- **Runs:** B, C(if adopted), E-S-strict, E-M-strict, E-M-distilled, D1 — pinned day-splits,
+  seeds {0,1,2}.
+- **Precommitted gates:** *Kill E-strict* if E-M-strict loses to B on overall MAE **and** the
+  JawOpen block on day-holdout (record the result either way — the science is the point).
+  *Continue E-distilled* only if within ~10 % of best-of(B,C) overall *and* better on JawOpen,
+  else park until the corpus doubles. *Adopt* only on beating best-of(B,C) (JawOpen block + MAE,
+  no suppression warnings) + in-VR A/B win. *D ladder* gates as above; transplant parity failure
+  ⇒ D off.
+
+## PART II — Eye Tracking V2
+
+### Design conclusion
+
+The benchmark wins on calibration because it calibrates a **mapping**, not a **model**: rich
+per-frame eye state + a per-user anchor/range fit in tens of seconds. This fork calibrates by
+*retraining a CNN* (minutes; currently impossible in this tree — binaries absent). Eye V2 applies
+the face-personalization philosophy to eyes: keep a fixed extractor, add a tiny personal layer,
+calibrate the layer. **User decision (recorded):** `origin/expr-dev` is one candidate/reference,
+**never the presumed basis**; `main` stays the stable base unless evidence strongly justifies
+otherwise; Eye V2 is designed for the best achievable gaze/squint/wide/blink + fast calibration,
+not merely an improved alpha.
+
+### Tiers
+
+**V2-A — personal mapping calibration over the existing model [build first].** New
+`IEyeStateMapper` stage (face-`Corrector` pattern: volatile field in `EyeProcessingPipeline`
+after `ProcessExpressions`, `SetMapper` on the manager, null = exact current behavior) + a
+~35–45 s anchor calibration producing per-eye: gaze map (offset+gain or 2nd-order poly), lid
+anchors (closed / relaxed-neutral / squint / wide), and derived outputs: calibrated gaze,
+openness, **Wide** (aperture above the personal neutral envelope), **Squint** (sustained partial
+closure — temporal discrimination from blinks, which are <~300 ms transients). Extend
+`_eyeExpressionMap` to send Widen/Squint (addresses exist commented) and fix the module-side
+Squint mapping in our fork. Honest ceiling: squint from one lid scalar + time is partial; V2-A
+buys calibration UX, personal ranges, wide-eye, recenter and measurably better gaze mapping —
+not benchmark-grade squint.
+
+**V2-B — pupil/aperture geometry features [likely second].** Per-eye 128×128 crops (tap:
+`NewTransformedFrameEvent`) → classic pupil center + aperture extraction (reimplemented
+Haar-surround + ellipse/RANSAC — academic, license-safe) → features feed the same mapper: gaze
+from pupil position (the responsive path ETVR proves), squint from aperture + pupil-visibility,
+debug overlay (pupil point + lid line — the Paper-like view). LEAP-style learned landmarks are
+the fallback if classic CV fights this IR imagery.
+
+**V2-C — personal eye model training [conditional].** Extend `babble_personal` to eyes:
+fine-tune from `baseline_L/R.pth` or `expr-dev`'s two-headed checkpoints; dot-target gaze labels +
+anchor prompts; replaces the closed BabbleTrainer with our own. Only if A+B measurably can't
+reach Paper on gaze/squint.
+
+### Safety architecture (hard requirement)
+
+Selectable **Eye Tracking Mode: Default / Experimental (V2)**. V2 state in separate `EyeV2_*`
+settings keys and files; Default's calibration/model never written by V2; mapper=null restores
+Default instantly; any V2 init/calibration failure logs and falls back; A/B is a radio toggle.
+Additive files in a new `Services/EyeV2/` + one volatile stage + one manager hook.
+
+### V2-A calibration protocol (first experiment, exact)
+
+~35–45 s guided flow (UI page; no Godot dependency for the anchor part):
+1. **Relax** 5 s → per-eye neutral lid distribution (median+spread ⇒ personal neutral envelope).
+2. **Slow blinks ×3** ~8 s → closed anchor + blink transient duration stats.
+3. **Squint hold** 5 s → squint aperture band (overlap with blink band accepted; discrimination
+   is temporal + band).
+4. **Wide hold** 5 s → wide anchor.
+5. **Gaze:** center dot 2 s → recenter offset; then 5-dot (center/L/R/U/D, 2 s each) ⇒ per-eye
+   offset+gain (+cross-term if needed). 9-point deferred unless corner error demands it. An
+   ETVR-style free "look to extremes" sweep is the recorded alternative.
+6. Persist per-eye anchors + map + capture metadata (`EyeV2_Calibration.json`).
+**Recenter** = center-dot step alone (~2 s), anytime. **Reseat validity:** at V2 start compare
+2 s of relaxed stats vs stored anchors; drift ⇒ prompt one-press Recenter; full recal only if lid
+anchors also drifted. Continuous micro-adaptation deferred; log the drift signal now.
+
+### Benchmark protocol vs Paper Tracker [HOME-PC]
+
+Same-session ABAB; record each system's OSC stream + screen-record debug views.
+**Calibration:** wall-clock, #actions, repeat-twice anchor consistency, post-reseat recovery
+time. **Gaze:** fixation jitter (std over 5 s × 5 known points), A→B step response
+(latency/overshoot from OSC log), corner error, 15-min drift. **Blink:** 20 natural + 10
+deliberate vs annotated video (missed/false/latency). **Squint:** 5×5 s holds — detection,
+hold stability, half-blink false positives during conversation. **Wide:** 5 deliberate — 
+detection above personal neutral, false-Wide count during normal gaze shifts. Subjective VRChat
+mirror A/B last, as arbiter.
+
+### Debug tooling
+
+Port the `expr-dev-dbg` profiler/debug panel idea; eye V2 panel: per-eye crop with pupil/aperture
+overlay (V2-B), raw vs calibrated gaze dots, lid/openness/squint/wide bars, per-eye confidence,
+blink flag, anchor values, live fixation-jitter + step-latency meters. Purpose: "is calibration
+wrong, or did the tracker misread the image?" at a glance. Requires the missing eye raw-output
+event (P3-3).
+
+## Ordered Phase 3 milestones (decision gates; tags explicit)
+
+- **F0 [HOME-PC VALIDATION REQUIRED]** — the checklist above (items 1–7), unchanged. Gates the
+  face experiment decisions; does not block the agent-safe items below.
+- **P3-1 Guided routine expansion [AGENT-SAFE]** — routines for Smile L/R, Frown, Pucker, Funnel,
+  MouthLeft/Right, TongueOut(binary) + 3 combos (smile+jaw, frown+jaw, pucker+jaw); per-dim
+  coverage table in evaluate. Highest-leverage face work: feeds B/C/E/D and Gate E0.
+- **P3-2 Eye comparative spike [AGENT-SAFE, RESEARCH SPIKE]** — inspect `expr-dev` end-to-end
+  (code, checkpoints via torch, trainer obtainability) + ETVR sources (method + license). Compare
+  three candidate designs on equal footing: (a) expr-dev's approach, (b) hybrid
+  geometry/personal-mapping (V2-A→B), (c) new lightweight learned (V2-C family) — scored on
+  achievable quality, calibration speed, risk, maintenance. Reuse expr-dev pieces only where
+  genuinely best. Written comparison + recommendation appended here; no production code.
+- **P3-3 Eye observability [AGENT-SAFE]** — `NewRawEyeExpressionsEvent(Mat, float[6], ticks)`;
+  debug panel v1 (raw/calibrated, jitter + step-latency meters); fix the eye-tick Mat leaks (each
+  pinned by a test — justified now that we build on this path); volatile+dispose hygiene on
+  runner swap. Measurement before change.
+- **P3-4 Eye V2-A [AGENT-SAFE code + HOME-PC VALIDATION]** — mapper stage + manager hook +
+  `EyeV2_*` settings; calibration flow + Recenter + validity check; Widen/Squint sends + module
+  fix; Mode selector. **Gate:** clearly better than current Baballonia and within sight of Paper
+  on gaze ⇒ P3-5; can't beat current Baballonia ⇒ stop eye work, keep Paper.
+- **P3-5 Eye V2-B geometry [CONDITIONAL on P3-4 gate]** — pupil/aperture extraction, overlay,
+  features into mapper; re-benchmark. Gate decides if V2-C is ever needed.
+- **P3-6 E/D harness [AGENT-SAFE]** — harness + transplant spike (parity gate) + export v3 +
+  coverage/drift metrics; synthetic-tested; waits for Gate E0.
+- **P3-7 E/D experiment [HOME-PC + CONDITIONAL on Gate E0 and F0's B-vs-C outcome]** — run it,
+  apply the precommitted gates, record verdicts here.
+- **P3-8 [CONDITIONAL]** — Eye V2-C / D2+ / E adoption runtime, each only via its gate.
+- Audio phoneme/viseme assist stays below all of the above.
+
+## Phase 3 risks and rollback
+
+| Risk | Containment / rollback |
+|---|---|
+| E/D overfit guided poses | day-holdout headline; capacity ladder; kill gates |
+| E uncovered dims dead/erratic | drift metric; teacher floor (E-distilled); adoption gate blocks suppression |
+| D transplant imparity | parity ≤1e-5 asserted first; failure ⇒ D off entirely |
+| D forgetting / divergent model | self-distillation; artifacts outside repo; stock file never modified |
+| Eye V2 breaks eyes | parallel selectable path; Default untouched; failure ⇒ auto-fallback; mapper=null = current behavior |
+| V2 calibration corrupts Default's | separate `EyeV2_*` keys/files; Default state never written |
+| Stale V2 calibration after reseat | startup validity check; one-press Recenter; full recal only on anchor drift |
+| Classic pupil CV fails on this IR imagery | V2-B gate; LEAP-style learned fallback; V2-A value already shipped |
+| expr-dev trainer unobtainable / ETVR license | P3-2 establishes before any dependence; no ETVR code copied without version license review |
+| DirectML surprises | CPU-first for all personal/eye-V2 models; DML validation stays a home-PC item with auto-fallback |
+| Upstream updates | additive-files discipline; derived/personal models regenerate; schema drift tests |
+
+## Phase 3 GUI plan
+
+```
+FACE                                          EYES
+  Tracker: Stock / Personal                     Eye Tracking Mode: Default / Experimental (V2)
+  [ Improve My Model ]                          [ Calibrate Eyes ]  (~40 s guided)
+  Quick correction: [ My mouth was closed ]     [ Recenter ]        (2 s, anytime)
+  Guided calibration: Jaw / Smile / Frown / …   Eyebrows: Off (default; not a priority)
+  Audio: [ ] Enhance while speaking
+Advanced: model choice, strength, metrics,    Advanced: eye debug panel (pupil/aperture overlay,
+  embedding runner, training log                raw vs calibrated, jitter/latency meters,
+                                                anchors, thresholds, per-eye confidence)
+```
+
+## PHASE 3 — NEXT EXACT TASK (Opus 5 Medium, first implementation session)
+
+**User-confirmed order: P3-1 + P3-2 together first** (P3-3 if capacity remains). Both are
+rational regardless of the home-PC checklist's outcome.
+
+1. **P3-1** — extend `GuidedCaptureRoutine` (`src/Baballonia/Services/Personalization/GuidedCaptureRoutine.cs`)
+   with routine tables for Smile L/R, Frown, Pucker, Funnel, MouthLeft/Right, TongueOut(binary,
+   tongue weight already 0.4 in labels) + 3 combination cues; reuse `CO_ACTIVATION_EXCLUSIONS`;
+   routine picker in `PersonalizationViewModel/View`; per-dim coverage table in
+   `training/babble_personal/evaluate.py`. Tests: `GuidedCaptureRoutineTest` extensions
+   (per-routine: both open+closed states commanded, distinct ids per level, only cued dims move)
+   + a labels-side coverage test. One commit, suite green (9 known failures only), Python
+   runners green.
+2. **P3-2** — the comparative eye spike (read-only + torch checkpoint inspection): report
+   appended to this file with the three-design comparison and recommendation. No production code.
+3. Update this file per commit (files-changed, decisions, next task); the F0 checklist stays at
+   the top of the queue for home sessions.
 
 ---
 
 Learn a **user-specific correction model** for the face pipeline: it sees the camera image plus the
 stock model's 45 raw outputs and emits corrected outputs. Trained locally (PyTorch → ONNX), loaded
 by Baballonia via ONNX Runtime, with instant fallback to stock when disabled/missing/invalid.
-Eye tracking is out of scope (Paper Tracker handles it). Slider calibration is explicitly *not* the
-solution.
+Eye tracking was out of scope for Phases 0–2 (Paper Tracker handles it) — **superseded by the
+Phase 3 Eye V2 plan above**, which adds eyes as a separate, selectable, fail-safe subsystem while
+the default eye path stays untouched. Slider calibration is explicitly *not* the solution.
 
 **Avatar-guided calibration** (plan §14): during guided capture the app drives the user's own VRChat
 avatar to independently generated target expressions, the user imitates the avatar, and the
