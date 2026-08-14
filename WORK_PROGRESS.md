@@ -1204,23 +1204,70 @@ without adopting its branch. Keep `main` as the base.
 
 ---
 
-## PHASE 3 — NEXT EXACT TASK (Opus 5 Medium, first implementation session)
+## PHASE 3 PROGRESS — P3-1, P3-2, P3-3 COMPLETE (2026-08-14, work PC)
 
-**User-confirmed order: P3-1 + P3-2 together first** (P3-3 if capacity remains). Both are
-rational regardless of the home-PC checklist's outcome.
+| Milestone | Commit | Result |
+|---|---|---|
+| P3-1 guided expansion | `e0e1b66` | 13 cues (8 core + 2 asymmetric + 3 combos), routine picker, coverage census, extended exclusions |
+| P3-2 eye research spike | `0b5ed4e` | findings above; expr-dev measured, capacity ladder benchmarked |
+| P3-3 eye observability | `969aa49` | raw eye event, per-tick leak fixes, temporal reset, swap hygiene |
 
-1. **P3-1** — extend `GuidedCaptureRoutine` (`src/Baballonia/Services/Personalization/GuidedCaptureRoutine.cs`)
-   with routine tables for Smile L/R, Frown, Pucker, Funnel, MouthLeft/Right, TongueOut(binary,
-   tongue weight already 0.4 in labels) + 3 combination cues; reuse `CO_ACTIVATION_EXCLUSIONS`;
-   routine picker in `PersonalizationViewModel/View`; per-dim coverage table in
-   `training/babble_personal/evaluate.py`. Tests: `GuidedCaptureRoutineTest` extensions
-   (per-routine: both open+closed states commanded, distinct ids per level, only cued dims move)
-   + a labels-side coverage test. One commit, suite green (9 known failures only), Python
-   runners green.
-2. **P3-2** — the comparative eye spike (read-only + torch checkpoint inspection): report
-   appended to this file with the three-design comparison and recommendation. No production code.
-3. Update this file per commit (files-changed, decisions, next task); the F0 checklist stays at
-   the top of the queue for home sessions.
+**Test totals after P3-3:** C# **235 passed / 9 failed / 2 skipped** — the 9 are the unchanged
+pre-existing hardware failures (8 ESP32 serial + `TrainerServiceTest` needing `BabbleTrainer.exe`).
+Python **102 checks** across 8 suites, all passing (`test_coverage.py` is new: 11).
+
+**Home-PC hardware, recorded for future capacity decisions:** **RTX 4090 + Ryzen 9 7950X3D.** This
+settles the eye-capacity question from the inference side — a 1–11 M-param eye model is nowhere
+near the limit on that machine, with or without DirectML. Every capacity decision from here should
+be bounded by **training data and overfitting**, not latency. The work-PC timings in the P3-2
+findings are a *relative ladder only*.
+
+**New defects found and fixed in passing** (none shipped in behaviour):
+- `BuildRoutine` iterated the raw nullable `Levels` instead of `EffectiveLevels` → every cue on the
+  default ladder null-referenced (P3-1, caught by new tests).
+- Eye tick leaked the 8-channel temporal stack and `ImageCollector`'s `Split()` Mats every tick;
+  transformed frame disposed twice; six early-return paths released nothing (P3-3).
+- Eye model hot-swap did not dispose the outgoing session (file lock on Windows) and did not clear
+  the temporal queue (frames spliced across a camera/model change).
+
+---
+
+## PHASE 3 — NEXT EXACT TASK
+
+### For the HOME PC (unchanged priority — the F0 checklist above still comes first)
+
+Run the F0 checklist items 1–7 as written. Two additions from this session:
+
+8. **Run a full guided pass** with the new routine picker ("Full pass", ~4 min), then train and
+   read (a) the **cue-tracking correlation table** printed before training — the new cues are only
+   as good as your ability to imitate them, and ≳0.6 mean correlation is the gate — and (b) the
+   **coverage census**, which should jump from 1/45 to roughly 12–14/45 taught. Record both here.
+9. **Re-run the eye capacity ladder on the 4090/7950X3D**, CPU and DirectML, to fix the absolute
+   numbers (script: `scratchpad/eye_capacity_bench_ort.py`, or reconstruct from the P3-2 section).
+
+### For the next agent session (agent-safe)
+
+**P3-4 — Eye V2-A: personal mapping calibration.** Now unblocked: the raw event exists, the
+lifetimes are correct, and P3-2 established the design. Build in this order:
+
+1. `Services/EyeV2/` — `IEyeStateMapper` + a volatile `Mapper` stage on `EyeProcessingPipeline`
+   (after `ProcessExpressions`), `SetMapper` on `EyePipelineManager`, `EyeV2_*` settings.
+   Null mapper ⇒ byte-identical current behaviour, asserted.
+2. Anchor calibration per the plan's §13 protocol (relax / slow blinks / squint hold / wide hold /
+   5-dot gaze), persisted separately from the default calibration; **Recenter**; startup validity
+   check against stored anchors.
+3. Derived outputs: calibrated per-eye gaze, openness, **Wide** (above personal neutral envelope),
+   **Squint** (sustained partial closure — temporal discrimination from blinks). Extend
+   `_eyeExpressionMap` with the already-commented Widen/Squint addresses and fix the module-side
+   Squint mapping in our fork.
+4. Eye Tracking Mode selector (Default / Experimental V2) + debug panel showing raw vs calibrated,
+   per-eye values, anchors, and live fixation-jitter / step-latency meters.
+
+Honest ceiling to state in the UI: squint from a single lid scalar plus time is *partial*. V2-A
+buys calibration UX, personal ranges, wide-eye and better gaze mapping. Benchmark-grade squint
+needs V2-B's geometry features or the V2-L learned track.
+
+**Then P3-6** (E/D harness) once P3-1's data starts arriving, and **P3-5/V2-L** per their gates.
 
 ---
 
