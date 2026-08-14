@@ -265,6 +265,46 @@ def load_images(sessions: Sequence[Session]) -> np.ndarray:
     return np.stack(images).astype(np.float32)
 
 
+def load_embeddings(sessions: Sequence[Session]) -> np.ndarray:
+    """All frames' stock visual embeddings as float32 ``[N, 1280]``, in the same order as the frames.
+
+    Raises if any session is missing them, naming the command that fixes it - training model C
+    against a partially-embedded corpus would silently drop whole sessions from supervision.
+    """
+    from .compute_embeddings import load_embeddings as load_one
+
+    blocks: list[np.ndarray] = []
+    for session in sessions:
+        if not session.frames:
+            continue
+
+        values = load_one(session.path, expected_frames=len(session.frames))
+        if values is None:
+            raise FileNotFoundError(
+                f"{session.session_id} has no usable embeddings.\n"
+                "Compute them first:\n"
+                "  python -m babble_personal.derive_embedding --stock <faceModel.onnx>\n"
+                "  python -m babble_personal.compute_embeddings --data <root> "
+                "--model <faceModelWithEmbedding.onnx>"
+            )
+        blocks.append(values)
+
+    if not blocks:
+        return np.zeros((0, 1280), dtype=np.float32)
+
+    return np.concatenate(blocks).astype(np.float32)
+
+
+def has_embeddings(sessions: Sequence[Session]) -> bool:
+    """Whether every session could supply embeddings, without loading them."""
+    from .compute_embeddings import load_embeddings as load_one
+
+    return all(
+        not session.frames or load_one(session.path, expected_frames=len(session.frames)) is not None
+        for session in sessions
+    )
+
+
 def describe(sessions: Sequence[Session]) -> str:
     """One-line-per-session summary, printed by train/evaluate so runs are self-documenting."""
     lines = []

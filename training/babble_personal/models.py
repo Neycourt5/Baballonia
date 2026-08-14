@@ -42,6 +42,7 @@ class OutputMlpAdapter(nn.Module):
 
     adapter_type = "output_mlp_v1"
     uses_image = False
+    uses_embedding = False
 
     def __init__(self, hidden: int = 128):
         super().__init__()
@@ -59,7 +60,8 @@ class OutputMlpAdapter(nn.Module):
         # Permanently zero, and never trained. See residual() for why it exists.
         self.register_buffer("image_gate", torch.zeros(1))
 
-    def residual(self, image: torch.Tensor, stock: torch.Tensor) -> torch.Tensor:
+    def residual(self, image: torch.Tensor, stock: torch.Tensor,
+                 embedding: torch.Tensor | None = None) -> torch.Tensor:
         # This model ignores the image, but the exported graph must still declare an `image` input:
         # torch.onnx.export prunes inputs nothing consumes, which would give baseline A a different
         # signature from the image-conditioned model and force the C# runtime to branch per model
@@ -82,6 +84,7 @@ class ImageResidualAdapter(nn.Module):
 
     adapter_type = "image_residual_v1"
     uses_image = True
+    uses_embedding = False
 
     def __init__(self, hidden: int = 128, embed: int = 64):
         super().__init__()
@@ -110,12 +113,71 @@ class ImageResidualAdapter(nn.Module):
         nn.init.zeros_(self.head[-1].weight)
         nn.init.zeros_(self.head[-1].bias)
 
-    def residual(self, image: torch.Tensor, stock: torch.Tensor) -> torch.Tensor:
+    def residual(self, image: torch.Tensor, stock: torch.Tensor,
+                 embedding: torch.Tensor | None = None) -> torch.Tensor:
         features = self.trunk(self.downsample(image))
         return self.head(torch.cat([features, stock], dim=1))
 
     def forward(self, image: torch.Tensor, stock: torch.Tensor) -> torch.Tensor:
         return torch.clamp(stock + self.residual(image, stock), 0.0, 1.0)
+
+
+class EmbeddingHeadAdapter(nn.Module):
+    """Model C: (embedding[1280], stock[45]) -> residual[45].
+
+    Where model B learns visual features from scratch on a few thousand personal frames, this reuses
+    the ones the stock network already computed - a 1280-d description of the face learned from a
+    corpus orders of magnitude larger. Only the interpretation is personal: "given these features,
+    what does this particular face's jaw actually look like?"
+
+    The features cost nothing at runtime. They are the flatten immediately before the stock model's
+    final matrix multiply, so exposing them adds no computation at all (verified: the stock 45 values
+    come out bit-identical from the derived graph). That is the real argument for this model - not
+    that the features are better in principle, but that they are already paid for.
+
+    LayerNorm first because the embedding's scale is uncontrolled and nothing downstream would fix
+    it. Dropout because 1280 inputs against a small personal corpus is the one place in this project
+    where overfitting is a genuine risk rather than a theoretical one.
+    """
+
+    adapter_type = "embedding_head_v1"
+    uses_image = False
+    uses_embedding = True
+
+    def __init__(self, width: int = 256, hidden: int = 128, dropout: float = 0.1,
+                 embedding_dim: int = 1280):
+        super().__init__()
+        self.embedding_dim = embedding_dim
+
+        self.project = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, width),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+        )
+        self.head = nn.Sequential(
+            nn.Linear(width + N, hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, N),
+        )
+        # Same identity-at-init invariant as A and B: an untrained adapter is a no-op.
+        nn.init.zeros_(self.head[-1].weight)
+        nn.init.zeros_(self.head[-1].bias)
+
+    def residual(self, image: torch.Tensor, stock: torch.Tensor,
+                 embedding: torch.Tensor | None = None) -> torch.Tensor:
+        if embedding is None:
+            # No embedding means no opinion. Returning zeros makes the model a passthrough rather
+            # than letting it emit something computed from an input it never received.
+            return torch.zeros_like(stock)
+
+        features = self.project(embedding)
+        return self.head(torch.cat([features, stock], dim=1))
+
+    def forward(self, stock: torch.Tensor, embedding: torch.Tensor) -> torch.Tensor:
+        # Signature order matches the exported graph's inputs (stock, embedding) - this model has no
+        # image input at all, unlike A and B.
+        return torch.clamp(stock + self.residual(None, stock, embedding), 0.0, 1.0)
 
 
 def build_model(kind: str) -> nn.Module:
@@ -124,7 +186,17 @@ def build_model(kind: str) -> nn.Module:
         return OutputMlpAdapter()
     if kind in ("b", "image", "image_residual"):
         return ImageResidualAdapter()
-    raise ValueError(f"Unknown model kind '{kind}'. Use 'a' (output-only) or 'b' (image-conditioned).")
+    if kind in ("c", "embedding", "embedding_head"):
+        return EmbeddingHeadAdapter()
+    if kind in ("c-small", "embedding_small"):
+        return EmbeddingHeadAdapter(width=128)
+    raise ValueError(
+        f"Unknown model kind '{kind}'. Use 'a' (output-only), 'b' (image-conditioned) "
+        "or 'c' (stock embedding).")
+
+
+def uses_embedding(model: nn.Module) -> bool:
+    return bool(getattr(model, "uses_embedding", False))
 
 
 def parameter_count(model: nn.Module) -> int:

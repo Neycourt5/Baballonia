@@ -43,6 +43,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--temporal", type=float, default=0.5,
                         help="Weight on residual smoothness between consecutive frames (0 disables). "
                              "Damps correction jitter without slowing the output down.")
+    parser.add_argument("--embedding-noise", type=float, default=0.01,
+                        help="Model C's counterpart to --consistency: the residual must not swing "
+                             "on small wobbles in the embedding it reads. 0 disables.")
     parser.add_argument("--dim-boost", default=None, metavar="Name=W,...",
                         help="Weight specific expressions more heavily, e.g. 'JawOpen=2.0'. "
                              "Symmetric: emphasises being right about zeros and about genuine "
@@ -94,7 +97,8 @@ class _Batch:
     duplicating the image tensor, which is the largest thing in memory for model B.
     """
 
-    def __init__(self, sessions, label_set: lbl.LabelSet, need_images: bool):
+    def __init__(self, sessions, label_set: lbl.LabelSet, need_images: bool,
+                 need_embeddings: bool = False):
         self.stock = torch.from_numpy(label_set.stock)
         self.targets = torch.from_numpy(label_set.targets)
         self.weights = torch.from_numpy(label_set.weights)
@@ -106,6 +110,12 @@ class _Batch:
         else:
             # Keep the signature identical for both models without paying for image loading.
             self.images = torch.zeros((len(label_set), 1, 1, 1), dtype=torch.float32)
+
+        self.embeddings = (torch.from_numpy(ds.load_embeddings(sessions))
+                           if need_embeddings else None)
+
+    def embedding_rows(self, index: torch.Tensor) -> torch.Tensor | None:
+        return None if self.embeddings is None else self.embeddings[index]
 
     def __len__(self) -> int:
         return len(self.stock)
@@ -159,6 +169,7 @@ def _run_epoch(
     temporal: float = 0.0,
     fp_penalty: float = 0.0,
     fp_dims: Sequence[int] = (),
+    embedding_noise: float = 0.0,
     generator: torch.Generator | None = None,
 ) -> dict[str, float]:
     """One pass over the data.
@@ -181,9 +192,10 @@ def _run_epoch(
     for (index,) in loader:
         images, stock = data.images[index], data.stock[index]
         targets, weights = data.targets[index], data.weights[index]
+        embeddings = data.embedding_rows(index)
 
         with torch.set_grad_enabled(train):
-            residual = model.residual(images, stock)
+            residual = model.residual(images, stock, embeddings)
             predicted = torch.clamp(stock + residual, 0.0, 1.0)
             loss, parts = models.masked_residual_loss(
                 predicted, residual, targets, weights, shrinkage=shrinkage
@@ -195,6 +207,15 @@ def _run_epoch(
                 # Same stock vector on purpose: the model must not be able to satisfy this by
                 # leaning on stock, only by making the image branch illumination-invariant.
                 penalty = models.consistency_penalty(residual, model.residual(jittered, stock))
+                loss = loss + consistency * penalty
+                consistency_value = float(penalty.detach())
+            elif train and embedding_noise > 0 and embeddings is not None:
+                # Model C has no pixels to re-light, but the same idea applies: the correction
+                # should not swing on small wobbles in the feature vector it is reading.
+                noisy = embeddings + torch.randn(
+                    embeddings.shape, generator=generator) * embedding_noise * embeddings.std()
+                penalty = models.consistency_penalty(
+                    residual, model.residual(images, stock, noisy))
                 loss = loss + consistency * penalty
                 consistency_value = float(penalty.detach())
 
@@ -212,7 +233,8 @@ def _run_epoch(
                 previous = data.previous[index]
                 penalty = models.temporal_penalty(
                     residual,
-                    model.residual(data.images[previous], data.stock[previous]),
+                    model.residual(data.images[previous], data.stock[previous],
+                                   data.embedding_rows(previous)),
                     data.valid[index],
                 )
                 loss = loss + temporal * penalty
@@ -236,11 +258,16 @@ def _run_epoch(
 
 
 @torch.no_grad()
-def _predict(model, images: torch.Tensor, stock: torch.Tensor, batch_size: int = 512) -> np.ndarray:
+def _predict(model, images: torch.Tensor, stock: torch.Tensor,
+             embeddings: torch.Tensor | None = None, batch_size: int = 512) -> np.ndarray:
     model.eval()
     out = []
     for start in range(0, len(stock), batch_size):
-        out.append(model(images[start:start + batch_size], stock[start:start + batch_size]).numpy())
+        stop = start + batch_size
+        residual = model.residual(
+            images[start:stop], stock[start:stop],
+            None if embeddings is None else embeddings[start:stop])
+        out.append(torch.clamp(stock[start:stop] + residual, 0.0, 1.0).numpy())
     return np.concatenate(out) if out else np.zeros((0, schema.EXPRESSION_COUNT), dtype=np.float32)
 
 
@@ -294,12 +321,21 @@ def main(argv: list[str] | None = None) -> int:
 
     model = models.build_model(args.model)
     need_images = model.uses_image
+    need_embeddings = models.uses_embedding(model)
+
+    if need_embeddings and not ds.has_embeddings(sessions):
+        print("\nERROR: model C needs the stock visual embedding for every frame, and at least one "
+              "session has none.\nCompute them first:\n"
+              "  python -m babble_personal.derive_embedding --stock <faceModel.onnx>\n"
+              "  python -m babble_personal.compute_embeddings --data <root> "
+              "--model <faceModelWithEmbedding.onnx>")
+        return 1
 
     # Augmentation draws from its own generator so a run stays reproducible from --seed.
     generator = torch.Generator().manual_seed(args.seed)
     print(f"\nModel: {model.adapter_type} ({models.parameter_count(model):,} parameters)")
 
-    train_data = _Batch(train_sessions, train_labels, need_images)
+    train_data = _Batch(train_sessions, train_labels, need_images, need_embeddings)
 
     sample_weights = train_data.hard_negative_weights(
         fp_dims or evaluate.WATCHED_DIMS, args.hard_negative_boost, args.hard_negative_threshold)
@@ -315,9 +351,12 @@ def main(argv: list[str] | None = None) -> int:
 
     train_loader = train_data.loader(args.batch_size, shuffle=True, sample_weights=sample_weights)
 
-    consistency = args.consistency if need_images else 0.0
+    # Model C reuses the consistency weight against embedding noise rather than re-lighting.
+    consistency = args.consistency if (need_images or need_embeddings) else 0.0
     if need_images and consistency > 0:
         print(f"  illumination consistency: {consistency} (model B sees pixels, so it needs this)")
+    if need_embeddings and consistency > 0 and args.embedding_noise > 0:
+        print(f"  embedding-noise consistency: {consistency} (sigma {args.embedding_noise})")
     if args.temporal > 0:
         print(f"  residual smoothness: {args.temporal}")
 
@@ -327,7 +366,7 @@ def main(argv: list[str] | None = None) -> int:
     if val_sessions:
         val_labels = lbl.build_labels(val_sessions, use_speech_pseudo_labels=use_pseudo,
                                       dim_boost=dim_boost)
-        val_data = _Batch(val_sessions, val_labels, need_images)
+        val_data = _Batch(val_sessions, val_labels, need_images, need_embeddings)
         val_loader = val_data.loader(args.batch_size, shuffle=False)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -348,6 +387,7 @@ def main(argv: list[str] | None = None) -> int:
             model, train_data, train_loader, optimizer, args.shrinkage, train=True,
             consistency=consistency, temporal=args.temporal, generator=generator,
             fp_penalty=args.fp_penalty, fp_dims=fp_dims,
+            embedding_noise=args.embedding_noise if need_embeddings else 0.0,
         )
         scheduler.step()
 
@@ -388,8 +428,10 @@ def main(argv: list[str] | None = None) -> int:
 
     images = (torch.from_numpy(ds.load_images(report_sessions)) if need_images
               else torch.zeros((len(report_labels), 1, 1, 1)))
+    report_embeddings = (torch.from_numpy(ds.load_embeddings(report_sessions))
+                         if need_embeddings else None)
     stock_t = torch.from_numpy(report_labels.stock)
-    personal = _predict(model, images, stock_t)
+    personal = _predict(model, images, stock_t, report_embeddings)
 
     print(f"\n=== Evaluation on {scope} ===")
     expression_reports = evaluate.per_expression_mae(
@@ -402,7 +444,10 @@ def main(argv: list[str] | None = None) -> int:
         neutral_labels = lbl.build_labels(neutral_sessions, use_speech_pseudo_labels=False)
         neutral_images = (torch.from_numpy(ds.load_images(neutral_sessions)) if need_images
                           else torch.zeros((len(neutral_labels), 1, 1, 1)))
-        neutral_personal = _predict(model, neutral_images, torch.from_numpy(neutral_labels.stock))
+        neutral_embeddings = (torch.from_numpy(ds.load_embeddings(neutral_sessions))
+                              if need_embeddings else None)
+        neutral_personal = _predict(model, neutral_images, torch.from_numpy(neutral_labels.stock),
+                                    neutral_embeddings)
         neutral = evaluate.neutral_report(neutral_labels.stock, neutral_personal)
 
     # The expressions the user still complains about, examined in detail: how badly they misfire

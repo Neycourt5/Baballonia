@@ -32,6 +32,11 @@ from . import models, schema
 
 PERSONAL_ADAPTER_VERSION = 1
 
+#: Models A and B take (image, stock); model C takes (stock, embedding) and is useless without a
+#: runtime that can supply the stock network's internal features. The version is what makes an
+#: older build refuse it cleanly instead of failing at the first inference.
+EMBEDDING_ADAPTER_VERSION = 2
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export a personal adapter to ONNX.")
@@ -67,7 +72,13 @@ def export(
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     adapter_type = checkpoint.get("adapter_type", "output_mlp_v1")
 
-    kind = "b" if adapter_type.startswith("image") else "a"
+    if adapter_type.startswith("embedding"):
+        kind = "c"
+    elif adapter_type.startswith("image"):
+        kind = "b"
+    else:
+        kind = "a"
+
     model = models.build_model(kind)
     model.load_state_dict(checkpoint["state_dict"])
     model.eval()
@@ -78,18 +89,37 @@ def export(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    torch.onnx.export(
-        model,
-        (dummy_image, dummy_stock),
-        str(output_path),
-        input_names=["image", "stock"],
-        output_names=["personal"],
-        opset_version=17,
-        dynamo=False,
-    )
+    embedding_model = models.uses_embedding(model)
+
+    if embedding_model:
+        # A different graph signature, and therefore a different adapter version. Model C consumes
+        # the stock network's internal features instead of pixels, so it has no `image` input at
+        # all - and an older runtime that cannot supply an embedding must refuse it outright rather
+        # than feed it something plausible. Bumping the version is what makes that refusal happen.
+        dummy_embedding = torch.zeros((1, model.embedding_dim), dtype=torch.float32)
+        torch.onnx.export(
+            model,
+            (dummy_stock, dummy_embedding),
+            str(output_path),
+            input_names=["stock", "embedding"],
+            output_names=["personal"],
+            opset_version=17,
+            dynamo=False,
+        )
+    else:
+        torch.onnx.export(
+            model,
+            (dummy_image, dummy_stock),
+            str(output_path),
+            input_names=["image", "stock"],
+            output_names=["personal"],
+            opset_version=17,
+            dynamo=False,
+        )
 
     metadata = {
-        "personal_adapter_version": str(PERSONAL_ADAPTER_VERSION),
+        "personal_adapter_version": str(
+            EMBEDDING_ADAPTER_VERSION if embedding_model else PERSONAL_ADAPTER_VERSION),
         "adapter_type": adapter_type,
         "expression_names": json.dumps(list(schema.EXPRESSION_NAMES)),
         "expression_schema_sha256": schema.SCHEMA_SHA256,
@@ -99,6 +129,9 @@ def export(
         "trained_utc": datetime.now(timezone.utc).isoformat(),
         "parameters": str(models.parameter_count(model)),
     }
+    if embedding_model:
+        metadata["requires_embedding"] = "1"
+        metadata["embedding_dim"] = str(model.embedding_dim)
     if base_model is not None and base_model.exists():
         metadata["base_model_md5"] = _md5(base_model)
     if roi:
@@ -127,15 +160,25 @@ def _verify_parity(model, onnx_path: Path, samples: int, tolerance: float) -> No
     rng = np.random.default_rng(0)
     size = schema.IMAGE_SIZE
     worst = 0.0
+    embedding_model = models.uses_embedding(model)
 
     for _ in range(samples):
-        image = rng.random((1, 1, size, size), dtype=np.float32)
         stock = rng.random((1, schema.EXPRESSION_COUNT), dtype=np.float32)
 
-        with torch.no_grad():
-            expected = model(torch.from_numpy(image), torch.from_numpy(stock)).numpy()
+        if embedding_model:
+            # Standard-normal rather than uniform: the real embedding is a post-activation feature
+            # vector spanning both signs, and testing parity only on positive inputs would leave
+            # half the LayerNorm's behaviour unexercised.
+            embedding = rng.standard_normal((1, model.embedding_dim)).astype(np.float32)
+            with torch.no_grad():
+                expected = model(torch.from_numpy(stock), torch.from_numpy(embedding)).numpy()
+            actual = session.run(["personal"], {"stock": stock, "embedding": embedding})[0]
+        else:
+            image = rng.random((1, 1, size, size), dtype=np.float32)
+            with torch.no_grad():
+                expected = model(torch.from_numpy(image), torch.from_numpy(stock)).numpy()
+            actual = session.run(["personal"], {"image": image, "stock": stock})[0]
 
-        actual = session.run(["personal"], {"image": image, "stock": stock})[0]
         worst = max(worst, float(np.abs(expected - actual).max()))
 
     if worst > tolerance:
