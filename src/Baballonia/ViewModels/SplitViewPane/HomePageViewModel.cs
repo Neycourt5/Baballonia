@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Threading;
 using Baballonia.Contracts;
 using Baballonia.Helpers;
 using Baballonia.Services;
@@ -11,6 +12,7 @@ using Baballonia.Services.Inference;
 using Baballonia.Services.Inference.Enums;
 using Baballonia.Services.Inference.Models;
 using Baballonia.Services.Inference.Platforms;
+using Baballonia.Services.EyeV2;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -19,6 +21,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Buffer = System.Buffer;
 using Rect = Avalonia.Rect;
@@ -385,6 +388,22 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private bool _shouldEnableEyeCalibration;
     public TextBlock SelectedCalibrationTextBlock;
 
+    public ObservableCollection<string> EyeTrackingModes { get; } =
+        ["Default Baballonia", "Experimental / Eye V2"];
+
+    [ObservableProperty] private int _selectedEyeTrackingModeIndex;
+    [ObservableProperty] private string _eyeV2Status = "Default Baballonia eye tracking is active.";
+    [ObservableProperty] private string _eyeV2Instruction = "";
+    [ObservableProperty] private double _eyeV2Progress;
+    [ObservableProperty] private bool _eyeV2Busy;
+    [ObservableProperty] private bool _eyeV2TargetVisible;
+    [ObservableProperty] private double _eyeV2TargetCanvasX = 152;
+    [ObservableProperty] private double _eyeV2TargetCanvasY = 82;
+    [ObservableProperty] private bool _eyeV2AdvancedVisible;
+    [ObservableProperty] private string _eyeV2LeftDebug = "No V2 data yet.";
+    [ObservableProperty] private string _eyeV2RightDebug = "No V2 data yet.";
+    [ObservableProperty] private string _eyeV2AnchorDebug = "Calibrate Eye V2 to populate personal anchors.";
+
     public bool IsRunningAsAdmin => Utils.HasAdmin;
 
     [ObservableProperty] private bool _isInitialized = false;
@@ -398,17 +417,23 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     private readonly FacePipelineManager _facePipelineManager;
     private readonly IFacePipelineEventBus _facePipelineEventBus;
     private readonly EyePipelineManager _eyePipelineManager;
+    private readonly EyeV2Manager _eyeV2Manager;
+    private readonly EyeV2CalibrationService _eyeV2Calibration;
     private readonly IEyePipelineEventBus _eyePipelineEventBus;
     private readonly IVROverlay _vrOverlay;
     private readonly IDeviceEnumerator _deviceEnumerator;
     private readonly ILocalSettingsService _localSettings;
     private readonly ILogger<HomePageViewModel> _logger;
     private readonly IPlatformConnector _platformConnector;
+    private CancellationTokenSource? _eyeV2Cancellation;
+    private bool _changingEyeMode;
 
     public CalibrationRoutine.Routines RequestedVRCalibration = CalibrationRoutine.Map["BasicCalibration"];
 
     public HomePageViewModel(FacePipelineManager facePipelineManager,
         EyePipelineManager eyePipelineManager,
+        EyeV2Manager eyeV2Manager,
+        EyeV2CalibrationService eyeV2Calibration,
         IFacePipelineEventBus facePipelineEventBus,
         IEyePipelineEventBus eyePipelineEventBus,
         IVROverlay vrOverlay,
@@ -420,6 +445,8 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     {
         _facePipelineManager = facePipelineManager;
         _eyePipelineManager = eyePipelineManager;
+        _eyeV2Manager = eyeV2Manager;
+        _eyeV2Calibration = eyeV2Calibration;
         _facePipelineEventBus = facePipelineEventBus;
         _eyePipelineEventBus = eyePipelineEventBus;
         _vrOverlay = vrOverlay;
@@ -431,11 +458,151 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
 
         _localSettings.Load(this);
 
+        _selectedEyeTrackingModeIndex = (int)_eyeV2Manager.Mode;
+        EyeV2Status = _eyeV2Manager.Status;
+        EyeV2AdvancedVisible = _localSettings.ReadSetting("AppSettings_AdvancedOptions", false);
+        _eyeV2Manager.StateChanged += EyeV2StateChanged;
+        _eyeV2Manager.DiagnosticsChanged += EyeV2DiagnosticsChanged;
+
         MessagesInPerSecCount = "0";
         MessagesOutPerSecCount = "0";
 
         Initialize();
+
+        if (_eyeV2Manager.Mode == EyeTrackingMode.ExperimentalV2)
+            _ = RunEyeValidityAsync(silent: true);
     }
+
+    partial void OnSelectedEyeTrackingModeIndexChanged(int value)
+    {
+        if (_changingEyeMode) return;
+        var requested = value == (int)EyeTrackingMode.ExperimentalV2
+            ? EyeTrackingMode.ExperimentalV2
+            : EyeTrackingMode.DefaultBaballonia;
+        if (_eyeV2Manager.TrySetMode(requested)) return;
+
+        _changingEyeMode = true;
+        SelectedEyeTrackingModeIndex = (int)_eyeV2Manager.Mode;
+        _changingEyeMode = false;
+        EyeV2Status = _eyeV2Manager.Status;
+    }
+
+    [RelayCommand]
+    private async Task CalibrateEyesV2()
+    {
+        if (EyeV2Busy) return;
+        await RunEyeOperationAsync((progress, token) => _eyeV2Calibration.CalibrateAsync(progress, token));
+    }
+
+    [RelayCommand]
+    private async Task RecenterEyesV2()
+    {
+        if (EyeV2Busy) return;
+        await RunEyeOperationAsync((progress, token) => _eyeV2Calibration.RecenterAsync(progress, token));
+    }
+
+    [RelayCommand]
+    private async Task CheckEyeV2Validity()
+    {
+        if (EyeV2Busy) return;
+        await RunEyeValidityAsync(silent: false);
+    }
+
+    [RelayCommand]
+    private void CancelEyeV2Operation() => _eyeV2Cancellation?.Cancel();
+
+    private async Task RunEyeOperationAsync(Func<IProgress<EyeV2CalibrationProgress>, CancellationToken, Task> operation)
+    {
+        EyeV2Busy = true;
+        EyeV2Progress = 0;
+        _eyeV2Cancellation = new CancellationTokenSource();
+        var progress = new Progress<EyeV2CalibrationProgress>(p =>
+        {
+            EyeV2Instruction = p.Instruction;
+            EyeV2Progress = p.Fraction;
+            EyeV2TargetVisible = p.TargetX.HasValue && p.TargetY.HasValue;
+            if (p.TargetX.HasValue && p.TargetY.HasValue)
+            {
+                EyeV2TargetCanvasX = 152 + p.TargetX.Value * 150;
+                EyeV2TargetCanvasY = 82 + p.TargetY.Value * 75;
+            }
+        });
+
+        try
+        {
+            await operation(progress, _eyeV2Cancellation.Token);
+            _changingEyeMode = true;
+            SelectedEyeTrackingModeIndex = (int)_eyeV2Manager.Mode;
+            _changingEyeMode = false;
+            EyeV2Status = _eyeV2Manager.Status;
+        }
+        catch (OperationCanceledException)
+        {
+            EyeV2Instruction = "Eye V2 operation cancelled; the previous eye path is still active.";
+        }
+        catch (Exception ex)
+        {
+            EyeV2Instruction = ex.Message;
+            EyeV2Status = _eyeV2Manager.Status;
+        }
+        finally
+        {
+            _eyeV2Cancellation.Dispose();
+            _eyeV2Cancellation = null;
+            EyeV2Busy = false;
+            EyeV2TargetVisible = false;
+        }
+    }
+
+    private async Task RunEyeValidityAsync(bool silent)
+    {
+        if (EyeV2Busy || _eyeV2Manager.Mode != EyeTrackingMode.ExperimentalV2) return;
+        if (!silent)
+        {
+            await RunEyeOperationAsync(async (progress, token) =>
+            {
+                await _eyeV2Calibration.CheckValidityAsync(progress, token);
+            });
+            return;
+        }
+
+        try
+        {
+            await _eyeV2Calibration.CheckValidityAsync(null, CancellationToken.None);
+            EyeV2Status = _eyeV2Manager.Status;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Eye V2 startup validity check could not run yet.");
+        }
+    }
+
+    private void EyeV2StateChanged()
+    {
+        EyeV2Status = _eyeV2Manager.Status;
+    }
+
+    private void EyeV2DiagnosticsChanged(EyeV2Diagnostics diagnostics)
+    {
+        // Diagnostics originate on the processing loop, not Avalonia's UI thread.
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_disposed) return;
+            EyeV2LeftDebug = FormatEyeDebug("Left", diagnostics.Left);
+            EyeV2RightDebug = FormatEyeDebug("Right", diagnostics.Right);
+            EyeV2AnchorDebug =
+                $"L lid closed/neutral/squint/wide: {diagnostics.Calibration.Left.Lid.Closed:F3} / " +
+                $"{diagnostics.Calibration.Left.Lid.Neutral:F3} / {diagnostics.Calibration.Left.Lid.Squint:F3} / {diagnostics.Calibration.Left.Lid.Wide:F3}\n" +
+                $"R lid closed/neutral/squint/wide: {diagnostics.Calibration.Right.Lid.Closed:F3} / " +
+                $"{diagnostics.Calibration.Right.Lid.Neutral:F3} / {diagnostics.Calibration.Right.Lid.Squint:F3} / {diagnostics.Calibration.Right.Lid.Wide:F3}";
+        });
+    }
+
+    private static string FormatEyeDebug(string name, EyeV2PerEyeDiagnostics eye) =>
+        $"{name}: raw gaze ({eye.RawX:F3}, {eye.RawY:F3}) -> mapped ({eye.MappedX:F3}, {eye.MappedY:F3}); " +
+        $"raw lid {eye.RawOpenness:F3}, open {eye.NormalizedOpenness:F3}, " +
+        $"Squint {eye.Squint:F3}, Wide {eye.Wide:F3}, blink {(eye.Blink ? "yes" : "no")}, " +
+        $"fixation jitter {eye.FixationJitter:F4}";
 
     private void Initialize()
     {
@@ -756,6 +923,10 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     private void CleanupResources()
     {
         if (_disposed) return;
+        _disposed = true;
+        _eyeV2Cancellation?.Cancel();
+        _eyeV2Manager.StateChanged -= EyeV2StateChanged;
+        _eyeV2Manager.DiagnosticsChanged -= EyeV2DiagnosticsChanged;
         FaceCamera.CamViewMode = CamViewMode.Tracking;
         LeftCamera.CamViewMode = CamViewMode.Tracking;
         RightCamera.CamViewMode = CamViewMode.Tracking;

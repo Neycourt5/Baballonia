@@ -7,6 +7,7 @@ using Baballonia.Services.Inference;
 using Baballonia.Services.Inference.Enums;
 using Baballonia.Services.Inference.Filters;
 using Baballonia.Services.Inference.VideoSources;
+using Baballonia.Services.EyeV2;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using OpenCvSharp;
@@ -179,6 +180,48 @@ public class EyeProcessingPipelineTickTest
         Assert.AreEqual(1, filter.Calls, "the filter should run once per tick");
     }
 
+    [TestMethod]
+    public void NullMapper_PreservesTheLegacySixValuePath()
+    {
+        _pipeline.Mapper = null;
+
+        var result = RunUntilInference();
+
+        Assert.IsNotNull(result);
+        Assert.AreEqual(EyeStateLayout.LegacyCount, result.Length);
+    }
+
+    [TestMethod]
+    public void Mapper_RunsAfterPostProcessingAndCanAppendV2State()
+    {
+        var mapper = new RecordingMapper();
+        _pipeline.Mapper = mapper;
+
+        var result = RunUntilInference();
+
+        Assert.IsNotNull(mapper.StockSeen);
+        Assert.IsNotNull(mapper.RawSeen);
+        Assert.AreEqual(EyeStateLayout.LegacyCount, mapper.StockSeen.Length);
+        CollectionAssert.AreNotEqual(FakeRunner.Output, mapper.StockSeen,
+            "mapper must run after current postprocessing");
+        CollectionAssert.AreEqual(FakeRunner.Output, mapper.RawSeen,
+            "with no filter, mapper must receive the same tick's per-eye raw values");
+        Assert.AreEqual(EyeStateLayout.V2Count, result!.Length);
+    }
+
+    [TestMethod]
+    public void MapperFailure_FallsBackOnTheSameTickAndClearsExperimentalStage()
+    {
+        _pipeline.Mapper = new ThrowingMapper();
+
+        var result = RunUntilInference();
+
+        Assert.IsNotNull(result);
+        Assert.AreEqual(EyeStateLayout.LegacyCount, result.Length,
+            "the already-computed stock state should survive mapper failure");
+        Assert.IsNull(_pipeline.Mapper, "a failing mapper must not be retried every tick");
+    }
+
     // =============================================================================================
     // Resource lifetime
     // =============================================================================================
@@ -340,5 +383,28 @@ public class EyeProcessingPipelineTickTest
             Calls++;
             return input;
         }
+    }
+
+    private sealed class RecordingMapper : IEyeStateMapper
+    {
+        public float[]? StockSeen { get; private set; }
+        public float[]? RawSeen { get; private set; }
+
+        public float[] Map(float[] stockState, float[] filteredRawState, long timestampTicks)
+        {
+            StockSeen = (float[])stockState.Clone();
+            RawSeen = (float[])filteredRawState.Clone();
+            return new float[EyeStateLayout.V2Count];
+        }
+
+        public void Reset() { }
+    }
+
+    private sealed class ThrowingMapper : IEyeStateMapper
+    {
+        public float[] Map(float[] stockState, float[] filteredRawState, long timestampTicks) =>
+            throw new InvalidOperationException("synthetic mapper failure");
+
+        public void Reset() { }
     }
 }

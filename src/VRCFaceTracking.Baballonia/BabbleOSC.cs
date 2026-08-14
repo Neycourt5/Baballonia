@@ -87,11 +87,14 @@ public class BabbleOsc
                             case "/LeftEyeWiden":
                                 EyeExpressions[(int)ExpressionMapping.EyeLeftWiden] = value;
                                 break;
+                            case "/LeftEyeSquint":
+                                EyeExpressions[(int)ExpressionMapping.EyeLeftSquint] = value;
+                                break;
                             // case "/LeftEyeLower":
                             //     EyeExpressions[(int)ExpressionMapping.EyeLeftLower] = value;
                             //     break;
                             case "/LeftEyeBrow":
-                                EyeExpressions[(int)ExpressionMapping.EyeLeftSquint] = value;
+                                EyeExpressions[(int)ExpressionMapping.EyeLeftLower] = value;
                                 break;
                             case "/RightEyeX":
                                 EyeExpressions[(int)ExpressionMapping.EyeRightX] = value;
@@ -105,11 +108,14 @@ public class BabbleOsc
                             case "/RightEyeWiden":
                                 EyeExpressions[(int)ExpressionMapping.EyeRightWiden] = value;
                                 break;
+                            case "/RightEyeSquint":
+                                EyeExpressions[(int)ExpressionMapping.EyeRightSquint] = value;
+                                break;
                             // case "/RightEyeLower":
                             //     EyeExpressions[(int)ExpressionMapping.EyeRightLower] = value;
                             //     break;
                             case "/RightEyeBrow":
-                                EyeExpressions[(int)ExpressionMapping.EyeRightSquint] = value;
+                                EyeExpressions[(int)ExpressionMapping.EyeRightLower] = value;
                                 break;
                             default:
                                 if (BabbleExpressions.BabbleExpressionMap.ContainsKey2(oscMessage.Address))

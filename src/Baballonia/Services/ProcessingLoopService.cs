@@ -1,6 +1,7 @@
 ﻿using Avalonia.Threading;
 using Baballonia.Services.events;
 using Baballonia.Services.Inference;
+using Baballonia.Services.EyeV2;
 using Microsoft.Extensions.Logging;
 using System;
 
@@ -30,7 +31,8 @@ public class ProcessingLoopService : IDisposable
         ILogger<ProcessingLoopService> logger,
         EyeProcessingPipeline eyeProcessingPipeline, FaceProcessingPipeline faceProcessingPipeline,
         IFacePipelineEventBus facePipelineEventBus, IEyePipelineEventBus eyePipelineEventBus,
-        FacePipelineManager facePipelineManager, EyePipelineManager eyePipelineManager)
+        FacePipelineManager facePipelineManager, EyePipelineManager eyePipelineManager,
+        EyeV2Manager eyeV2Manager)
     {
         _logger = logger;
         _eyeProcessingPipeline = eyeProcessingPipeline;
@@ -39,6 +41,9 @@ public class ProcessingLoopService : IDisposable
         _eyePipelineEventBus = eyePipelineEventBus;
         _facePipelineManager = facePipelineManager;
         _eyePipelineManager = eyePipelineManager;
+        // Force construction at app startup so a saved V2 mode is restored before the first eye
+        // tick, even if the Home page has not been opened yet.
+        _ = eyeV2Manager;
 
         _drawTimer.Tick += TimerEvent;
         _drawTimer.Start();

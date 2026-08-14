@@ -77,8 +77,8 @@ public class BabbleVrc : ExtTrackingModule
             // BrowDownRight
 
             // Left Eye Squint
-            // UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeSquintLeft].Weight =
-            //     BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeLeftSquint];
+            UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeSquintLeft].Weight =
+                BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeLeftSquint];
 
             /* --- */
 
@@ -100,8 +100,8 @@ public class BabbleVrc : ExtTrackingModule
                 BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeRightLower];
 
             // Right Eye Squint
-            // UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeSquintRight].Weight =
-            //     BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeRightSquint];
+            UnifiedTracking.Data.Shapes[(int)UnifiedExpressions.EyeSquintRight].Weight =
+                BabbleOsc.EyeExpressions[(int)ExpressionMapping.EyeRightSquint];
         }
 
         if (needsExpression)

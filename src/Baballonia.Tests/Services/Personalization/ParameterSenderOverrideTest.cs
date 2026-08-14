@@ -7,6 +7,7 @@ using Baballonia.Contracts;
 using Baballonia.Services;
 using Baballonia.Services.Calibration;
 using Baballonia.Services.Personalization;
+using Baballonia.Services.EyeV2;
 using JetBrains.Annotations;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
@@ -153,6 +154,47 @@ public class ParameterSenderOverrideTest
             "Calibration overrides the face channel only; eye tracking must be unaffected.");
         Assert.IsTrue(Queue.All(m => m.Address.Contains("Eye")),
             "Only eye addresses should be present.");
+    }
+
+    [TestMethod]
+    public void EyeV2Vector_SendsNamedWideAndSquintWithoutDefaultCalibrationRemap()
+    {
+        var v2 = new float[EyeStateLayout.V2Count];
+        v2[EyeStateLayout.LeftX] = -0.4f;
+        v2[EyeStateLayout.LeftY] = 0.3f;
+        v2[EyeStateLayout.LeftLid] = 0.8f;
+        v2[EyeStateLayout.RightX] = 0.2f;
+        v2[EyeStateLayout.RightY] = -0.1f;
+        v2[EyeStateLayout.RightLid] = 0.7f;
+        v2[EyeStateLayout.LeftWide] = 0.6f;
+        v2[EyeStateLayout.LeftSquint] = 0.5f;
+        v2[EyeStateLayout.RightWide] = 0.4f;
+        v2[EyeStateLayout.RightSquint] = 0.3f;
+
+        Invoke("ProcessEyeExpressionData", v2);
+
+        var sent = DrainByAddress();
+        Assert.AreEqual(EyeStateLayout.V2Count, sent.Count);
+        Assert.AreEqual(-0.4f, sent["/LeftEyeX"], 1e-6);
+        Assert.AreEqual(0.8f, sent["/LeftEyeLid"], 1e-6);
+        Assert.AreEqual(0.6f, sent["/LeftEyeWiden"], 1e-6);
+        Assert.AreEqual(0.5f, sent["/LeftEyeSquint"], 1e-6);
+        Assert.AreEqual(0.4f, sent["/RightEyeWiden"], 1e-6);
+        Assert.AreEqual(0.3f, sent["/RightEyeSquint"], 1e-6);
+        _calibration.Verify(c => c.GetExpressionSettings(It.IsAny<string>()), Times.Never,
+            "V2 must not read Default Baballonia calibration state.");
+    }
+
+    [TestMethod]
+    public void LegacySixEyeVector_StillUsesDefaultCalibrationPath()
+    {
+        Invoke("ProcessEyeExpressionData", new[] { 0.2f, 0.4f, 0.6f, 0.8f, 1f, 0.5f });
+
+        var sent = DrainByAddress();
+        Assert.AreEqual(6, sent.Count);
+        Assert.AreEqual(0.1f, sent["/LeftEyeX"], 1e-6);
+        Assert.AreEqual(0.3f, sent["/LeftEyeLid"], 1e-6);
+        Assert.IsFalse(sent.ContainsKey("/LeftEyeWiden"));
     }
 
     [TestMethod]

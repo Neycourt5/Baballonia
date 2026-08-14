@@ -1,6 +1,7 @@
 ﻿using Baballonia.Contracts;
 using Baballonia.Helpers;
 using Baballonia.Services.Personalization;
+using Baballonia.Services.EyeV2;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using OscCore;
@@ -44,15 +45,14 @@ public class ParameterSenderService : BackgroundService
         { "LeftEyeX", "/LeftEyeX" },
         { "LeftEyeY", "/LeftEyeY" },
         { "LeftEyeLid", "/LeftEyeLid" },
-        //{ "LeftEyeWiden", "/LeftEyeWiden" },
-        //{ "LeftEyeLower", "/LeftEyeLower" },
-        //{ "LeftEyeBrow", "/LeftEyeBrow" },
         { "RightEyeX", "/RightEyeX" },
         { "RightEyeY", "/RightEyeY" },
         { "RightEyeLid", "/RightEyeLid" },
-        //{ "RightEyeWiden", "/RightEyeWiden" },
-        //{ "RightEyeLower", "/RightEyeLower" },
-        //{ "RightEyeBrow", "/RightEyeBrow" },
+        // V2 appends these after the exact legacy six-value prefix.
+        { "LeftEyeWiden", "/LeftEyeWiden" },
+        { "LeftEyeSquint", "/LeftEyeSquint" },
+        { "RightEyeWiden", "/RightEyeWiden" },
+        { "RightEyeSquint", "/RightEyeSquint" },
     };
 
     public readonly Dictionary<string, string> FaceExpressionMap = new()
@@ -167,14 +167,29 @@ public class ParameterSenderService : BackgroundService
         if (expressions is null) return;
         if (expressions.Length == 0) return;
 
+        var eyeV2 = expressions.Length >= EyeStateLayout.V2Count;
+
         for (var i = 0; i < Math.Min(expressions.Length, _eyeExpressionMap.Count); i++)
         {
             var weight = expressions[i];
             var eyeElement = _eyeExpressionMap.ElementAt(i);
-            var settings = _calibrationService.GetExpressionSettings(eyeElement.Key);
+            float sent;
+            if (eyeV2)
+            {
+                // V2 is already in canonical units and owns separate personal calibration. Never
+                // pass it through Default's CalibrationParams or the two modes cease to be
+                // independent. Gaze is signed; lid/wide/squint are unit weights.
+                var signed = i is EyeStateLayout.LeftX or EyeStateLayout.LeftY or
+                    EyeStateLayout.RightX or EyeStateLayout.RightY;
+                sent = Math.Clamp(weight, signed ? -1f : 0f, 1f);
+            }
+            else
+            {
+                var settings = _calibrationService.GetExpressionSettings(eyeElement.Key);
+                sent = weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max);
+            }
 
-            var msg = new OscMessage(_prefix + eyeElement.Value,
-                weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max));
+            var msg = new OscMessage(_prefix + eyeElement.Value, sent);
             _vrcftQueue.Enqueue(msg);
         }
 
@@ -194,10 +209,16 @@ public class ParameterSenderService : BackgroundService
         var rightEyeY = expressions[4];
         var rightEyeLid = expressions[5];
 
-        var leftEyeLidSettings = _calibrationService.GetExpressionSettings("LeftEyeLid");
-        var rightEyeLidSettings = _calibrationService.GetExpressionSettings("RightEyeLid");
-        var weightedLeftEyeLid = leftEyeLid.Remap(leftEyeLidSettings.Lower, leftEyeLidSettings.Upper, leftEyeLidSettings.Min, leftEyeLidSettings.Max);
-        var weightedRightEyeLid = rightEyeLid.Remap(rightEyeLidSettings.Lower, rightEyeLidSettings.Upper, rightEyeLidSettings.Min, rightEyeLidSettings.Max);
+        var eyeV2 = expressions.Length >= EyeStateLayout.V2Count;
+        var weightedLeftEyeLid = leftEyeLid;
+        var weightedRightEyeLid = rightEyeLid;
+        if (!eyeV2)
+        {
+            var leftEyeLidSettings = _calibrationService.GetExpressionSettings("LeftEyeLid");
+            var rightEyeLidSettings = _calibrationService.GetExpressionSettings("RightEyeLid");
+            weightedLeftEyeLid = leftEyeLid.Remap(leftEyeLidSettings.Lower, leftEyeLidSettings.Upper, leftEyeLidSettings.Min, leftEyeLidSettings.Max);
+            weightedRightEyeLid = rightEyeLid.Remap(rightEyeLidSettings.Lower, rightEyeLidSettings.Upper, rightEyeLidSettings.Min, rightEyeLidSettings.Max);
+        }
         var averageLid = (weightedLeftEyeLid + weightedRightEyeLid) / 2f;
         queue.Enqueue(new OscMessage("/tracking/eye/EyesClosedAmount", 1f - Math.Clamp(averageLid, 0f, 1f)));
 
