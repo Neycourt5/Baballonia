@@ -17,7 +17,7 @@ namespace Baballonia.Services.Personalization;
 /// A broken personal model must never break tracking, so any inference failure permanently disables
 /// this corrector and the pipeline continues on pure stock output.
 /// </summary>
-public sealed class PersonalModelCorrector : IExpressionCorrector, IDisposable
+public sealed class PersonalModelCorrector : IExpressionCorrector, IPersonalCorrector
 {
     public const string ImageInputName = "image";
     public const string StockInputName = "stock";

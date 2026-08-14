@@ -20,7 +20,9 @@ public sealed record PersonalModelMetadata(
     int InputSize,
     string? TrainedUtc,
     string? BaseModelMd5,
-    string? RoiSettings)
+    string? RoiSettings,
+    bool RequiresEmbedding = false,
+    int EmbeddingDim = 0)
 {
     /// <summary>
     /// "Model A" / "Model B" plus what that means, for the status line. The adapter type is the
@@ -43,7 +45,9 @@ public sealed record PersonalModelMetadata(
             InputSize: int.TryParse(Get("input_size"), out var s) ? s : 0,
             TrainedUtc: Get("trained_utc"),
             BaseModelMd5: Get("base_model_md5"),
-            RoiSettings: Get("roi_settings"));
+            RoiSettings: Get("roi_settings"),
+            RequiresEmbedding: Get("requires_embedding") == "1",
+            EmbeddingDim: int.TryParse(Get("embedding_dim"), out var e) ? e : 0);
     }
 }
 
@@ -67,15 +71,32 @@ public sealed class PersonalModelManager : IDisposable
     public const string PathSetting = "PersonalModel_Path";
     public const string BlendSetting = "PersonalModel_Blend";
 
-    /// <summary>Adapter formats this build knows how to feed.</summary>
-    public const int SupportedAdapterVersion = 1;
+    /// <summary>
+    /// Whether the face pipeline should load the derived model that also outputs the stock visual
+    /// embedding. Off by default: model C is unproven on real data, and the derived graph's
+    /// behaviour under DirectML has not yet been verified on hardware.
+    /// </summary>
+    public const string EmbeddingRunnerSetting = "PersonalModel_UseEmbeddingRunner";
+
+    /// <summary>
+    /// Adapter formats this build knows how to feed.
+    /// <para>
+    /// v1 takes (image, stock); v2 takes (stock, embedding) and needs the embedding runner enabled.
+    /// The version is what makes a build lacking that support refuse a model C file outright rather
+    /// than feed it something plausible and ship whatever comes back.
+    /// </para>
+    /// </summary>
+    public const int SupportedAdapterVersion = 2;
+
+    /// <summary>Adapter version that requires the stock visual embedding.</summary>
+    public const int EmbeddingAdapterVersion = 2;
 
     private readonly FacePipelineManager _facePipelineManager;
     private readonly ILocalSettingsService _settings;
     private readonly ILogger<PersonalModelManager> _logger;
     private readonly SemaphoreSlim _reloadLock = new(1, 1);
 
-    private PersonalModelCorrector? _corrector;
+    private IPersonalCorrector? _corrector;
 
     public PersonalModelManager(
         FacePipelineManager facePipelineManager,
@@ -149,6 +170,30 @@ public sealed class PersonalModelManager : IDisposable
 
             var path = ModelPath;
             var result = await Task.Run(() => TryLoad(path));
+
+            // One rung of fallback before giving up on personalization entirely. The installer keeps
+            // the outgoing model as .previous.onnx, so the common failure - a model C adapter
+            // installed while the embedding runner is off - lands on the model that was working an
+            // hour ago rather than dropping the user all the way back to stock without explanation.
+            if (!result.Success)
+            {
+                var previous = PreviousModelPath(path);
+                if (File.Exists(previous))
+                {
+                    _logger.LogWarning("Personal model not loaded ({Reason}); trying the previous one",
+                        result.Message);
+
+                    var fallback = await Task.Run(() => TryLoad(previous));
+                    if (fallback.Success)
+                    {
+                        LastResult = PersonalModelLoadResult.Ok(
+                            $"{fallback.Message} (using the previous model: {result.Message})");
+                        _logger.LogInformation("Personal model active: {Message}", LastResult.Message);
+                        return LastResult;
+                    }
+                }
+            }
+
             LastResult = result;
 
             if (result.Success)
@@ -190,7 +235,10 @@ public sealed class PersonalModelManager : IDisposable
             }
 
             var metadata = PersonalModelMetadata.FromSession(session);
-            var corrector = new PersonalModelCorrector(session, metadata, _logger) { Blend = Blend };
+
+            IPersonalCorrector corrector = RequiresEmbedding(metadata)
+                ? new EmbeddingModelCorrector(session, metadata, _logger) { Blend = Blend }
+                : new PersonalModelCorrector(session, metadata, _logger) { Blend = Blend };
 
             _corrector = corrector;
             _facePipelineManager.SetCorrector(corrector);
@@ -239,23 +287,51 @@ public sealed class PersonalModelManager : IDisposable
 
         var inputs = session.InputMetadata;
 
-        if (!inputs.TryGetValue(PersonalModelCorrector.ImageInputName, out var image))
-            return PersonalModelLoadResult.Fail($"Model has no '{PersonalModelCorrector.ImageInputName}' input.");
-
         if (!inputs.TryGetValue(PersonalModelCorrector.StockInputName, out var stock))
             return PersonalModelLoadResult.Fail($"Model has no '{PersonalModelCorrector.StockInputName}' input.");
-
-        if (!ShapeMatches(image.Dimensions, [1, 1, metadata.InputSize, metadata.InputSize]))
-        {
-            return PersonalModelLoadResult.Fail(
-                $"Image input shape [{string.Join(",", image.Dimensions)}] does not match the " +
-                $"declared input_size {metadata.InputSize}.");
-        }
 
         if (!ShapeMatches(stock.Dimensions, [1, n]))
         {
             return PersonalModelLoadResult.Fail(
                 $"Stock input shape [{string.Join(",", stock.Dimensions)}] should be [1,{n}].");
+        }
+
+        if (RequiresEmbedding(metadata))
+        {
+            if (!inputs.TryGetValue(EmbeddingModelCorrector.EmbeddingInputName, out var embedding))
+            {
+                return PersonalModelLoadResult.Fail(
+                    $"Model declares itself embedding-based but has no " +
+                    $"'{EmbeddingModelCorrector.EmbeddingInputName}' input.");
+            }
+
+            if (!ShapeMatches(embedding.Dimensions, [1, metadata.EmbeddingDim]))
+            {
+                return PersonalModelLoadResult.Fail(
+                    $"Embedding input shape [{string.Join(",", embedding.Dimensions)}] should be " +
+                    $"[1,{metadata.EmbeddingDim}].");
+            }
+
+            // Refused rather than run degraded: without the runner there is no embedding to feed it,
+            // and a model C adapter with no features is just a slower passthrough pretending to work.
+            if (!_facePipelineManager.EmbeddingAvailable)
+            {
+                return PersonalModelLoadResult.Fail(
+                    "This model needs the stock visual embedding, which is not switched on. " +
+                    "Enable the embedding runner under Advanced, or install a model A/B instead.");
+            }
+        }
+        else
+        {
+            if (!inputs.TryGetValue(PersonalModelCorrector.ImageInputName, out var image))
+                return PersonalModelLoadResult.Fail($"Model has no '{PersonalModelCorrector.ImageInputName}' input.");
+
+            if (!ShapeMatches(image.Dimensions, [1, 1, metadata.InputSize, metadata.InputSize]))
+            {
+                return PersonalModelLoadResult.Fail(
+                    $"Image input shape [{string.Join(",", image.Dimensions)}] does not match the " +
+                    $"declared input_size {metadata.InputSize}.");
+            }
         }
 
         if (!session.OutputMetadata.ContainsKey(PersonalModelCorrector.OutputName))
@@ -272,6 +348,17 @@ public sealed class PersonalModelManager : IDisposable
 
         return PersonalModelLoadResult.Ok("valid");
     }
+
+    /// <summary>
+    /// The rollback copy the installer leaves behind. Matches the name used when installing, so the
+    /// two cannot drift apart silently.
+    /// </summary>
+    public static string PreviousModelPath(string modelPath) =>
+        Path.ChangeExtension(modelPath, ".previous.onnx");
+
+    /// <summary>Whether a model consumes the stock network's visual features rather than the frame.</summary>
+    private static bool RequiresEmbedding(PersonalModelMetadata metadata) =>
+        metadata.RequiresEmbedding || metadata.AdapterVersion >= EmbeddingAdapterVersion;
 
     private static bool ShapeMatches(IReadOnlyList<int> actual, IReadOnlyList<int> expected)
     {

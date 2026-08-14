@@ -99,12 +99,32 @@ def derive(
     if any(output.name == EMBEDDING_OUTPUT_NAME for output in graph.output):
         raise ValueError(f"{stock_path.name} already exposes an '{EMBEDDING_OUTPUT_NAME}' output.")
 
+    if EMBEDDING_OUTPUT_NAME in produced:
+        raise ValueError(
+            f"{stock_path.name} already has a tensor called '{EMBEDDING_OUTPUT_NAME}'; "
+            "the tap would collide with it.")
+
     original_outputs = [output.name for output in graph.output]
+
+    # Exposed through an Identity node rather than by naming the internal tensor directly, so the
+    # output has a stable name of our choosing. The internal one is an artefact of how PyTorch
+    # happened to export the graph ("/model/global_pool/flatten/Flatten_output_0"); making the C#
+    # runtime depend on that string would tie it to an export detail that a future upstream model
+    # could change for no reason. Identity is a copy at worst and usually folded away entirely.
+    #
+    # It also leaves the original tensor untouched, so the classifier Gemm still consumes exactly
+    # what it consumed before - which is what keeps the stock output bit-identical.
+    graph.node.append(helper.make_node(
+        "Identity",
+        inputs=[tensor_name],
+        outputs=[EMBEDDING_OUTPUT_NAME],
+        name="personal_embedding_tap",
+    ))
 
     # Appended, never inserted: the existing output keeps index 0 so any reader that indexes
     # positionally still finds the expressions where it expects them.
     graph.output.append(
-        helper.make_tensor_value_info(tensor_name, TensorProto.FLOAT, [1, EMBEDDING_DIM]))
+        helper.make_tensor_value_info(EMBEDDING_OUTPUT_NAME, TensorProto.FLOAT, [1, EMBEDDING_DIM]))
 
     onnx.checker.check_model(model)
 

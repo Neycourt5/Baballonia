@@ -165,6 +165,19 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private bool _showAdvanced;
     [ObservableProperty] private bool _sortByDelta = true;
 
+    /// <summary>
+    /// Whether the face pipeline loads the derived model that also emits the stock visual embedding.
+    /// </summary>
+    /// <remarks>
+    /// Advanced and off by default, deliberately. Model C is unproven against real recordings, and
+    /// the derived graph has not yet been exercised on a GPU. Turning this on changes which face
+    /// model file is loaded - the weights are identical and the expression output is verified
+    /// bit-identical, so the risk is not accuracy but a load failure, which falls back to stock.
+    /// </remarks>
+    [ObservableProperty] private bool _useEmbeddingRunner;
+
+    [ObservableProperty] private string _embeddingRunnerStatus = "";
+
     public ObservableCollection<ExpressionComparisonRow> Comparison { get; } = [];
 
     /// <summary>Guided sessions need the cue engine, which is a later phase.</summary>
@@ -209,6 +222,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         _personalModelEnabled = _modelManager.Enabled;
         _personalStrength = _modelManager.Blend * 100.0;
+        _useEmbeddingRunner = _settings.ReadSetting<bool>(PersonalModelManager.EmbeddingRunnerSetting);
 
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _statusTimer.Tick += (_, _) => OnTick();
@@ -345,6 +359,46 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         System.IO.Directory.CreateDirectory(PersonalizationPaths.DatasetRoot);
         Utils.OpenUrl(PersonalizationPaths.DatasetRoot);
+    }
+
+    /// <summary>
+    /// Switches the face pipeline between the stock model and the derived one that also emits the
+    /// visual embedding, building the derived model first if it is missing or stale.
+    /// </summary>
+    partial void OnUseEmbeddingRunnerChanged(bool value)
+    {
+        _settings.SaveSetting(PersonalModelManager.EmbeddingRunnerSetting, value);
+        _ = ApplyEmbeddingRunnerAsync(value);
+    }
+
+    private async Task ApplyEmbeddingRunnerAsync(bool enabled)
+    {
+        if (!enabled)
+        {
+            EmbeddingRunnerStatus = "";
+            await _modelManager.ReloadAsync();
+            RefreshSetup();
+            return;
+        }
+
+        var stockModel = System.IO.Path.Combine(AppContext.BaseDirectory, "faceModel.onnx");
+        var validation = EmbeddingModelStore.TryGetValid(stockModel);
+
+        if (!validation.Valid)
+        {
+            EmbeddingRunnerStatus = "Building the embedding model...";
+            var built = await _trainingService.RegenerateEmbeddingModelAsync();
+            if (!built.Success)
+            {
+                EmbeddingRunnerStatus = built.Message;
+                // Leave the setting on: the pipeline falls back to stock on its own, and flipping
+                // the toggle back here would fight the user rather than explain the problem.
+                return;
+            }
+        }
+
+        EmbeddingRunnerStatus = "Embedding model active.";
+        RefreshSetup();
     }
 
     // =============================================================================================

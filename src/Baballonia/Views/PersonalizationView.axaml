@@ -326,6 +326,22 @@
               <Button Command="{Binding ReloadModelCommand}" Content="Reload Model" />
             </StackPanel>
 
+            <!--
+              Experimental and off by default. Enabling it loads a derived copy of the face model
+              that also emits the visual features a "C" adapter reads. The weights are identical and
+              the expression output is verified bit-identical, so a failure here falls back to the
+              stock model rather than degrading tracking.
+            -->
+            <CheckBox
+                Content="Use the face model's visual features (needed for model C)"
+                IsChecked="{Binding UseEmbeddingRunner}" />
+
+            <TextBlock
+                IsVisible="{Binding EmbeddingRunnerStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                Opacity="0.7"
+                Text="{Binding EmbeddingRunnerStatus}"
+                TextWrapping="Wrap" />
+
             <CheckBox Content="Sort by largest change" IsChecked="{Binding SortByDelta}" />
 
             <Grid ColumnDefinitions="180,70,70,70">

@@ -1,4 +1,5 @@
 ﻿using Baballonia.Contracts;
+using Baballonia.Services.Personalization;
 using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
@@ -11,7 +12,7 @@ using System.Linq;
 
 namespace Baballonia.Services;
 
-public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRunner
+public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRunner, IEmbeddingSource
 {
     public Size InputSize { get; private set; }
     public int OutputSize { get; private set; }
@@ -21,6 +22,25 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRu
     private InferenceSession _session;
     private string[] _outputExpressionNames;
     private bool _isOldEyeModel;
+
+    /// <summary>
+    /// Name of a second graph output to capture alongside the primary one, or null for the usual
+    /// single-output behavior.
+    /// </summary>
+    /// <remarks>
+    /// Set before <see cref="Setup"/>. This exists for the derived face model, which exposes the
+    /// stock network's internal 1280-d visual embedding as an extra output so a personal adapter can
+    /// reuse it. ONNX Runtime computes every declared output in the one pass it was already making,
+    /// so capturing it costs nothing measurable.
+    ///
+    /// When null, <see cref="Run"/> behaves exactly as it always has. The eye pipeline and the plain
+    /// stock face path never set it and are therefore untouched by this.
+    /// </remarks>
+    public string SecondaryOutputName { get; set; }
+
+    private string _primaryOutputName;
+    private DenseTensor<float> _secondaryTensor;
+    private bool _secondaryAvailable;
 
 
     /// <summary>
@@ -46,10 +66,56 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRu
 
         InputTensor = new DenseTensor<float>([1, dimensions[1], dimensions[2], dimensions[3]]);
 
+        ConfigureSecondaryOutput();
         InitializeModelMetadata();
 
         _logger.LogInformation("{} initialization finished", modelPath);
     }
+
+    /// <summary>
+    /// Resolves the secondary output, if one was requested and the loaded model has it.
+    /// </summary>
+    /// <remarks>
+    /// A missing secondary output is not an error: the caller falls back to plain stock behavior,
+    /// which is exactly what should happen if a derived model was replaced by an ordinary one.
+    /// The primary is identified as "the output that is not the secondary" rather than by index, so
+    /// a graph that lists them in the other order still returns expressions from <see cref="Run"/>.
+    /// </remarks>
+    private void ConfigureSecondaryOutput()
+    {
+        _secondaryAvailable = false;
+        _secondaryTensor = null;
+        _primaryOutputName = null;
+
+        if (string.IsNullOrEmpty(SecondaryOutputName))
+            return;
+
+        if (!_session.OutputMetadata.TryGetValue(SecondaryOutputName, out var metadata))
+        {
+            _logger.LogWarning(
+                "Model has no '{Output}' output; continuing without it", SecondaryOutputName);
+            return;
+        }
+
+        _primaryOutputName = _session.OutputMetadata.Keys
+            .FirstOrDefault(name => name != SecondaryOutputName);
+
+        if (_primaryOutputName == null)
+        {
+            _logger.LogWarning("Model exposes only '{Output}'; ignoring it", SecondaryOutputName);
+            return;
+        }
+
+        var dimensions = metadata.Dimensions.Select(d => d > 0 ? d : 1).ToArray();
+        _secondaryTensor = new DenseTensor<float>(dimensions);
+        _secondaryAvailable = true;
+
+        _logger.LogInformation("Capturing secondary output '{Output}' ({Length} values)",
+            SecondaryOutputName, _secondaryTensor.Length);
+    }
+
+    /// <inheritdoc />
+    public DenseTensor<float> GetEmbedding() => _secondaryAvailable ? _secondaryTensor : null;
 
     /// <summary>
     /// Reads and caches model metadata once during initialization
@@ -188,7 +254,42 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) : IInferenceRu
 
         using var results = _session.Run(inputs);
 
-        var output = results[0].AsEnumerable<float>().ToArray();
+        // Fast path, byte for byte what this method has always done. Anything that does not opt into
+        // a secondary output - the eye pipeline, the plain stock face model - takes this branch.
+        if (!_secondaryAvailable)
+        {
+            var single = results[0].AsEnumerable<float>().ToArray();
+            OutputSize = single.Length;
+            return single;
+        }
+
+        float[] output = null;
+        foreach (var result in results)
+        {
+            if (result.Name == SecondaryOutputName)
+            {
+                // Copied into our own buffer because `results` is disposed on leaving this method.
+                var span = _secondaryTensor.Buffer.Span;
+                var index = 0;
+                foreach (var value in result.AsEnumerable<float>())
+                {
+                    if (index >= span.Length) break;
+                    span[index++] = value;
+                }
+            }
+            else if (result.Name == _primaryOutputName)
+            {
+                output = result.AsEnumerable<float>().ToArray();
+            }
+        }
+
+        if (output == null)
+        {
+            // Should be unreachable, but returning stale expressions would be far worse than a null.
+            _logger.LogWarning("Primary output '{Output}' missing from results", _primaryOutputName);
+            return null;
+        }
+
         OutputSize = output.Length;
         return output;
     }

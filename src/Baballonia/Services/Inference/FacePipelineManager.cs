@@ -55,10 +55,54 @@ public class FacePipelineManager
         _pipeline.InferenceService = CreateInference();
     }
 
+    /// <summary>
+    /// True when the loaded face model also emits the stock visual embedding that model C needs.
+    /// </summary>
+    /// <remarks>
+    /// Read by <see cref="PersonalModelManager"/> before accepting an embedding-based adapter. An
+    /// adapter that needs features from a runner that is not producing them would run as a slow
+    /// passthrough while appearing to work, so it is refused at load instead.
+    /// </remarks>
+    public bool EmbeddingAvailable =>
+        (_pipeline.InferenceService as IEmbeddingSource)?.GetEmbedding() != null;
+
     public DefaultInferenceRunner CreateInference()
     {
         const string defaultFaceModel = "faceModel.onnx";
-        return _inferenceFactory.Create(Path.Combine(AppContext.BaseDirectory, defaultFaceModel));
+        var stockPath = Path.Combine(AppContext.BaseDirectory, defaultFaceModel);
+
+        // Opt-in and off by default. When enabled, this swaps in a derived copy of the stock graph
+        // that exposes the 1280-d visual embedding as a second output. The weights are identical and
+        // the expression output is bit-identical, so the only risk is loading a derived model built
+        // from a *different* stock file - which the store's MD5 check refuses outright, because an
+        // embedding from another network would produce confident nonsense rather than an error.
+        if (_localSettings.ReadSetting<bool>(PersonalModelManager.EmbeddingRunnerSetting))
+        {
+            var validation = EmbeddingModelStore.TryGetValid(stockPath);
+            if (validation is { Valid: true, Path: not null })
+            {
+                try
+                {
+                    var runner = _inferenceFactory.Create(validation.Path,
+                        secondaryOutputName: EmbeddingModelStore.EmbeddingOutputName);
+                    _logger.LogInformation("Face model loaded with visual embedding output");
+                    return runner;
+                }
+                catch (Exception ex)
+                {
+                    // Any failure here falls through to stock: personalization is optional, tracking
+                    // is not.
+                    _logger.LogWarning(ex, "Could not load the embedding model; using stock");
+                }
+            }
+            else
+            {
+                _logger.LogWarning("Embedding runner requested but unavailable: {Reason}",
+                    validation.Message);
+            }
+        }
+
+        return _inferenceFactory.Create(stockPath);
     }
 
     public void LoadFilter()

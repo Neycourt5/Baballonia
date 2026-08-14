@@ -132,6 +132,69 @@ public sealed class PersonalTrainingService(
     /// <see cref="PersonalizationEnvironment.DefaultVenvDirectory"/>, outside the repository, so a
     /// synced Documents folder never sees it.
     /// </summary>
+    /// <summary>
+    /// Rebuilds the derived face model that exposes the stock visual embedding (model C's input).
+    /// </summary>
+    /// <remarks>
+    /// Needed after any change to the stock model, because a derived graph built from a different
+    /// base describes a different feature space - and would produce confident nonsense rather than
+    /// an error. <see cref="EmbeddingModelStore"/> refuses a stale one, and this is how the user
+    /// makes a fresh one without opening a terminal.
+    ///
+    /// The stock weights are untouched: the derived file is a copy with one extra output, and the
+    /// script verifies the expression output is bit-identical before writing anything.
+    /// </remarks>
+    public async Task<TrainingResult> RegenerateEmbeddingModelAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.CompareExchange(ref _running, 1, 0) != 0)
+            return new TrainingResult(false, "Something is already running. Wait for it to finish.");
+
+        try
+        {
+            ClearLog();
+
+            var trainingRoot = PersonalizationEnvironment.FindTrainingRoot();
+            if (trainingRoot == null)
+                return new TrainingResult(false, "The training scripts could not be found.");
+
+            var python = PersonalizationEnvironment.VenvPython(
+                PersonalizationEnvironment.DefaultVenvDirectory);
+
+            if (!File.Exists(python))
+            {
+                return new TrainingResult(false,
+                    "The Python training environment is missing. Set up the training tools first.",
+                    Remedy: "Set Up Training Tools");
+            }
+
+            var stockModel = Path.Combine(AppContext.BaseDirectory, "faceModel.onnx");
+            if (!File.Exists(stockModel))
+                return new TrainingResult(false, "The stock face model could not be found.");
+
+            Directory.CreateDirectory(PersonalizationPaths.ModelsRoot);
+
+            var result = await RunAsync(python,
+            [
+                "-m", "babble_personal.derive_embedding",
+                "--stock", stockModel,
+                "--out", EmbeddingModelStore.ModelPath
+            ], trainingRoot, cancellationToken);
+
+            if (!result.Success)
+            {
+                return new TrainingResult(false,
+                    "Could not build the embedding model. See details.", Remedy: "Show Details");
+            }
+
+            return new TrainingResult(true, "Embedding model ready.");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _running, 0);
+        }
+    }
+
     public async Task<TrainingResult> SetUpTrainingToolsAsync(
         IProgress<TrainingProgress>? progress = null,
         CancellationToken cancellationToken = default)
@@ -385,7 +448,7 @@ public sealed class PersonalTrainingService(
 
             if (File.Exists(destination))
             {
-                var backup = Path.ChangeExtension(destination, ".previous.onnx");
+                var backup = PersonalModelManager.PreviousModelPath(destination);
                 File.Copy(destination, backup, overwrite: true);
             }
 

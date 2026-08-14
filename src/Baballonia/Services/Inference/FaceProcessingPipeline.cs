@@ -55,7 +55,14 @@ public class FaceProcessingPipeline(IFacePipelineEventBus facePipelineEventBus) 
         var corrector = Corrector;
         if (corrector != null)
         {
-            result = corrector.Correct(InferenceService.GetInputTensor(), rawResult);
+            // Model C reads the stock network's internal features instead of the frame. The type
+            // check keeps models A and B on exactly the path they have always taken, and costs
+            // nothing when no embedding-aware model is installed.
+            result = corrector is IExpressionCorrector and IEmbeddingAwareCorrector embeddingAware
+                ? embeddingAware.Correct(InferenceService.GetInputTensor(), rawResult,
+                    (InferenceService as IEmbeddingSource)?.GetEmbedding())
+                : corrector.Correct(InferenceService.GetInputTensor(), rawResult);
+
             facePipelineEventBus.Publish(
                 new FacePipelineEvents.NewCorrectedExpressionsEvent(rawResult, result));
         }
