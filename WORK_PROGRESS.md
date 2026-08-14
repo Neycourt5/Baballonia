@@ -9,19 +9,16 @@ should be able to continue without any prior conversation.
 
 ```
 Current phase: PHASE 2 IMPLEMENTED (M1-M5, M7 complete and committed).
-               PHASE 3 PLANNED (2026-08-14): face models A-E re-ranked with Model E
-               analyzed, Eye Tracking V2 designed against the Paper Tracker benchmark.
-               See "PHASE 3 PLAN" below. The home-PC checklist is still the
-               immediate queue; the first Phase 3 implementation milestones
-               (P3-1 guided expansion + P3-2 eye spike) are agent-safe and do
-               not block on it.
-Branch: main (19 commits ahead of upstream 84eca8c, not pushed)
+               PHASE 3 P3-1 THROUGH P3-4 IMPLEMENTED. Eye V2-A is selectable,
+               separately calibrated, fail-safe, OSC/VRCFT-integrated, and built.
+               STOP at the P3-4 HOME-PC hardware/VRChat gate below. Do not begin
+               P3-5 geometry or a learned eye model before that verdict.
+Branch: main (29 commits ahead of upstream 84eca8c, not pushed)
 Build: OK (core, Desktop, tests).
-Suite: 205 passed / 9 failed / 2 skipped.  The 9 are the same pre-existing
+Suite: 258 passed / 9 failed / 2 skipped.  The 9 are the same pre-existing
        hardware failures (serial board, firmware JSON, missing BabbleTrainer.exe);
        the 2 skips need PyTorch state or real recordings.
-Python: 8 smoke + 9 regularizer + 8 encoding + 14 labels + 24 metrics
-        + 11 corrections + 17 embedding = 91 checks, all passing.
+Python: 102 checks across 8 suites, all passing (unchanged by P3-4).
 Recordings (HOME PC): 4+ sessions (2 neutral, 2 speech + later additions), ~6,375 frames.
 ```
 
@@ -1204,15 +1201,16 @@ without adopting its branch. Keep `main` as the base.
 
 ---
 
-## PHASE 3 PROGRESS — P3-1, P3-2, P3-3 COMPLETE (2026-08-14, work PC)
+## PHASE 3 PROGRESS — P3-1 THROUGH P3-4 COMPLETE (2026-08-14, work PC)
 
 | Milestone | Commit | Result |
 |---|---|---|
 | P3-1 guided expansion | `e0e1b66` | 13 cues (8 core + 2 asymmetric + 3 combos), routine picker, coverage census, extended exclusions |
 | P3-2 eye research spike | `0b5ed4e` | findings above; expr-dev measured, capacity ladder benchmarked |
 | P3-3 eye observability | `969aa49` | raw eye event, per-tick leak fixes, temporal reset, swap hygiene |
+| P3-4 Eye V2-A | `ad0846d` | selectable personal affine mapping, ~43 s anchors, 2 s recenter/validity, Wide/Squint OSC + module fix |
 
-**Test totals after P3-3:** C# **235 passed / 9 failed / 2 skipped** — the 9 are the unchanged
+**Test totals after P3-4:** C# **258 passed / 9 failed / 2 skipped** — the 9 are the unchanged
 pre-existing hardware failures (8 ESP32 serial + `TrainerServiceTest` needing `BabbleTrainer.exe`).
 Python **102 checks** across 8 suites, all passing (`test_coverage.py` is new: 11).
 
@@ -1232,6 +1230,72 @@ findings are a *relative ladder only*.
 
 ---
 
+## P3-4 — EYE V2-A IMPLEMENTATION RECORD (2026-08-14, work PC)
+
+Implementation commit: **`ad0846d`** (`eye: add selectable personal Eye V2 mapping calibration`).
+
+### What shipped
+
+- Added `IEyeStateMapper` as an optional final eye stage after stock `ProcessExpressions` and a
+  manager hot-swap hook. `Mapper == null` takes the exact old six-value path with no V2 copy or
+  allocation. A mapper exception clears V2 and returns the already-computed stock result on that
+  same tick.
+- Added a deterministic per-eye **2-D affine** gaze fit (gain, offset, and cross-axis terms) from
+  center/left/right/up/down robust medians. Five points support this model well; a polynomial would
+  add poorly constrained coefficients. Left and right eyes fit independently.
+- Added the exact guided protocol: relax 5 s, slow blinks 8 s, squint 5 s, wide 5 s, then five gaze
+  targets at 2 s each, with 750 ms preparation between steps. UI wall-clock is about **42.75 s**.
+  The gaze steps display an actual moving target, not text alone.
+- Added personal closed/neutral-envelope/squint/wide anchors, blink-duration estimation, calibrated
+  openness, personal **Wide**, and temporal **Squint**. A partial closure must outlast 75% of the
+  personal typical blink duration (clamped to 300–700 ms); reaching the closed region marks a
+  blink and suppresses Squint until recovery.
+- Added `EyeV2_Calibration.json`, schema version 1, capture metadata, atomic save, and one setting
+  key (`EyeV2_Mode`). V2 never reads or writes `EyeHome_EyeModel`, `CalibrationParams`, or the
+  Default model/calibration state.
+- Added one-press **Recenter** (~2 s; offsets only) and a 2 s relaxed validity check. Gaze-center
+  drift with plausible lid geometry recommends Recenter; material lid-anchor drift recommends a
+  full calibration. Saved V2 mode restores before the first processing tick and runs the check
+  when the Home page opens.
+- Appended four outputs after the exact legacy six-value prefix:
+  `LeftEyeWiden`, `LeftEyeSquint`, `RightEyeWiden`, `RightEyeSquint`. V2 outputs bypass Default's
+  slider calibration because they are already canonical and must remain separate. Legacy six-value
+  sends retain their existing remap exactly.
+- Corrected the forked VRCFT module to consume the two explicit Squint OSC addresses and drive
+  `EyeSquintLeft/Right`; Wide remains connected. The Release zip is produced at
+  `src/VRCFaceTracking.Baballonia/bin/Release/net10.0/VRCFaceTracking.Baballonia.zip` (ignored
+  build output; rebuild it after checkout).
+- Added a normal-mode selector and three obvious actions (Calibrate, Recenter, Check headset
+  position). Advanced users get raw→mapped gaze, raw/normalized lids, anchors, Wide, Squint, blink,
+  and live fixation jitter. Processing-thread diagnostics are marshalled to Avalonia's UI thread.
+
+### Safety, tests, and builds
+
+- Focused Eye V2/pipeline/OSC suite: **45 passed / 0 failed / 0 skipped**.
+- Full C# suite: **258 passed / 9 failed / 2 skipped**. This is exactly the documented hardware
+  baseline plus 23 new passing tests; there is no new failure.
+- Desktop Release build: **succeeded, 0 errors**. VRCFT module Release build and zip: **succeeded,
+  0 errors**. Existing NuGet vulnerability/compatibility and nullability warnings remain.
+- Synthetic mapper guard: 20,000 steady-state mappings after JIT warm-up must average **<0.20 ms
+  per tick**; passed on the work PC. The mapper adds only its required ten-float output allocation;
+  diagnostics are capped at 10 Hz.
+- Tests cover five-point/per-eye affine recovery, anchor robustness, degenerate rejection, recenter
+  invariants, validity classification, normal/wide/asymmetric states, short and slow blinks,
+  sustained Squint and recovery, missing/stale/malformed calibration fallback, mode A/B/A swaps,
+  separation from Default keys, exact null-pipeline behavior, mapper same-tick/failure fallback,
+  and legacy versus V2 OSC mapping.
+- No Python changed; the previously passing **102 checks** were therefore not rerun.
+
+### Honest limitation
+
+The shipped model exposes only one lid scalar per eye. Time separates ordinary blinks from a
+sustained partial closure, but cannot fully distinguish a tensed squint from a long half-blink at
+the same aperture. V2-A is expected to buy calibration UX, per-user ranges, Wide, recenter, and
+better gaze mapping. Benchmark-grade Squint remains the principal reason for P3-5 geometry or the
+learned split-head track — but only if the home gate authorizes it.
+
+---
+
 ## PHASE 3 — NEXT EXACT TASK
 
 ### For the HOME PC (unchanged priority — the F0 checklist above still comes first)
@@ -1245,29 +1309,47 @@ Run the F0 checklist items 1–7 as written. Two additions from this session:
 9. **Re-run the eye capacity ladder on the 4090/7950X3D**, CPU and DirectML, to fix the absolute
    numbers (script: `scratchpad/eye_capacity_bench_ort.py`, or reconstruct from the P3-2 section).
 
-### For the next agent session (agent-safe)
+### P3-4 HOME-PC HARDWARE / VRCHAT GATE — STOP HERE
 
-**P3-4 — Eye V2-A: personal mapping calibration.** Now unblocked: the raw event exists, the
-lifetimes are correct, and P3-2 established the design. Build in this order:
+Do not implement P3-5, V2-L, or another learned eye model yet. Run this on the real cameras and
+headset, using the Release Desktop build and the newly rebuilt/reinstalled VRCFT module zip:
 
-1. `Services/EyeV2/` — `IEyeStateMapper` + a volatile `Mapper` stage on `EyeProcessingPipeline`
-   (after `ProcessExpressions`), `SetMapper` on `EyePipelineManager`, `EyeV2_*` settings.
-   Null mapper ⇒ byte-identical current behaviour, asserted.
-2. Anchor calibration per the plan's §13 protocol (relax / slow blinks / squint hold / wide hold /
-   5-dot gaze), persisted separately from the default calibration; **Recenter**; startup validity
-   check against stored anchors.
-3. Derived outputs: calibrated per-eye gaze, openness, **Wide** (above personal neutral envelope),
-   **Squint** (sustained partial closure — temporal discrimination from blinks). Extend
-   `_eyeExpressionMap` with the already-commented Widen/Squint addresses and fix the module-side
-   Squint mapping in our fork.
-4. Eye Tracking Mode selector (Default / Experimental V2) + debug panel showing raw vs calibrated,
-   per-eye values, anchors, and live fixation-jitter / step-latency meters.
+1. **Default safety A/B:** launch with Default selected; confirm tracking is unchanged. Switch
+   Default → V2 → Default repeatedly and restart in each saved mode. Missing/invalid V2 calibration
+   must fall back to Default, and Default calibration/model state must remain intact.
+2. **Calibration UX/repeatability:** run full V2 calibration twice. Record wall-clock, actions,
+   whether every prompt/target is visible and practical with the headset on, and the two sets of
+   left/right gaze coefficients plus closed/neutral/squint/wide anchors. Note retries or confusing
+   poses.
+3. **Gaze ABAB versus current Baballonia and Paper Tracker:** at center/L/R/U/D, hold 5 s and
+   record fixation jitter; perform center↔edge steps for response latency/overshoot; inspect corner
+   error; then run 15 minutes for drift. Use the same sitting/headset fit and record OSC where
+   possible.
+4. **Reseat/recovery:** deliberately reseat the headset. Run Check headset position: a center shift
+   with stable lids should recommend the ~2 s Recenter; a meaningful geometry/lid shift should
+   recommend full calibration. Time recovery and verify Recenter changes offsets only.
+5. **Blink/Squint:** annotate 20 natural and 10 deliberate blinks, including at least 5 slow
+   blinks. Then perform 5 × 5 s deliberate Squint holds and conversational half-blinks. Record
+   missed/false blinks, Squint detection/hold stability, release behavior, and half-blink false
+   positives per eye.
+6. **Wide:** perform 5 deliberate Wide holds; confirm per-eye VRCFT/VRChat Wide output and count
+   false Wide activations during ordinary gaze shifts.
+7. **OSC/module:** verify `LeftEyeWiden`, `LeftEyeSquint`, `RightEyeWiden`, and `RightEyeSquint`
+   independently in VRCFT/VRChat; make sure the updated module zip, rather than a cached older
+   module, is installed.
+8. **Subjective mirror verdict:** finish with same-session ABAB in a VRChat mirror: Default,
+   Eye V2-A, Paper, Eye V2-A. Record which wins gaze precision/responsiveness, calibration effort,
+   blink stability, Squint, and Wide.
 
-Honest ceiling to state in the UI: squint from a single lid scalar plus time is *partial*. V2-A
-buys calibration UX, personal ranges, wide-eye and better gaze mapping. Benchmark-grade squint
-needs V2-B's geometry features or the V2-L learned track.
+**Precommitted gate:** if V2-A is clearly better than current Baballonia on gaze and calibration UX
+and is within sight of Paper, preserve it and authorize P3-5; Squint is expected to be its principal
+gap. If V2-A cannot beat current Baballonia, stop eye work, reassess the raw/model assumptions, and
+keep Paper Tracker. Record the measurements and verdict in this file before any next milestone.
 
-**Then P3-6** (E/D harness) once P3-1's data starts arriving, and **P3-5/V2-L** per their gates.
+### For the next agent session
+
+There is no authorized agent-safe Eye V2 implementation task until the HOME-PC P3-4 verdict is
+recorded. Do not infer permission for P3-5 from the fact that its design already exists.
 
 ---
 
