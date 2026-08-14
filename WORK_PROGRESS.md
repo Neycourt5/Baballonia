@@ -603,17 +603,22 @@ features that are already built and switched off.
 Record the outcome of each **in this file** as you go. The numbers are the point; without them the
 next session is guessing again.
 
-### 1. Rebuild and reinstall
+### 1. Get a build with all of this in it
 
-The last build predates all of this. From the repo root:
+A complete Release build already exists at **`bin\Baballonia-v5\`** (built and verified on the work
+PC — see BUILD CONVENTION below). If the repo is synced, just run it; `bin\Baballonia-v4` stays as
+the fallback.
+
+To rebuild from scratch on the home PC, note the two gotchas documented under BUILD CONVENTION:
+initialize submodules first, and do not pass `-o` (the comma in the repo path breaks MSBuild):
 
 ```
-%LOCALAPPDATA%\Microsoft\dotnet\dotnet.exe publish src/Baballonia.Desktop/Baballonia.Desktop.csproj ^
-    -c Release -r win-x64 --self-contained true -o bin\Baballonia-v5
+git submodule update --init --recursive
+cd src\Baballonia.Desktop
+%LOCALAPPDATA%\Microsoft\dotnet\dotnet.exe publish -c Release -r win-x64 --self-contained true
 ```
 
-Per the build convention, that is a **new** folder — leave `bin\Baballonia-v4` intact as the
-fallback. Verify `Modules\` has 4 capture DLLs and `training\babble_personal\` is present.
+then copy `bin\Release\net10.0\win-x64\publish` to a new `bin\Baballonia-v6`.
 
 ### 2. Establish the JawOpen baseline (M1)
 
@@ -1269,10 +1274,25 @@ Every build goes to a **new** versioned folder under the repo's gitignored `bin/
 `bin\Baballonia-v2`, `bin\Baballonia-v3`, ... Never overwrite a previous build — the last known-good
 one must stay available to fall back to.
 
-Current: **`bin\Baballonia-v4\Baballonia.Desktop.exe`** (model B regularizers + resting-jitter reporting).
-Previous: **`bin\Baballonia-v3\Baballonia.Desktop.exe`** (BOM fix, model A/B selector, active-model display, test no longer deletes the installed model).
+Current: **`bin\Baballonia-v5\Baballonia.Desktop.exe`** — all of phase 2 (M1-M5, M7). Built on the
+work PC 2026-08-14, Release/win-x64/self-contained, 433 MB. Verified: 4 capture DLLs in `Modules\`,
+`training\babble_personal\` present including the new `derive_embedding`, `compute_embeddings` and
+`experiment` modules, `NAudio.dll` present, `faceModel.onnx` present.
+Previous: `bin\Baballonia-v4` (model B regularizers + resting-jitter reporting).
+Previous: `bin\Baballonia-v3` (BOM fix, model A/B selector, active-model display, test no longer deletes the installed model).
 Previous: `bin\Baballonia-v2` (BOM fix + selector).
 Previous: `bin\Baballonia-bomfix` (BOM fix only), and the pre-fix install at `%LOCALAPPDATA%\Baballonia`.
+
+**Two build gotchas found on the work PC**, both environmental rather than code:
+
+1. **Submodules must be initialized before a Release publish.** A Debug build succeeds without them,
+   but Avalonia compiles XAML during Release and fails with `AVLN2000: Unable to resolve ... Url` on
+   `OnboardingView.axaml` — the `Hyperlink` control lives in `HyperText.Avalonia`. Fix:
+   `git submodule update --init --recursive`.
+2. **`dotnet publish -o <path>` breaks on this repo's path.** The absolute path contains a comma
+   ("Monitor Technologies, LLC") and MSBuild parses it as a property separator
+   (`MSB1006: Property is not valid`). Publish from inside `src/Baballonia.Desktop` with no `-o`,
+   then copy `bin/Release/net10.0/win-x64/publish` to the versioned folder.
 
 ---
 
