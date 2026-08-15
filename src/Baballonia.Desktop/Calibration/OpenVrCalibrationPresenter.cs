@@ -22,6 +22,14 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
     private const string OverlayKey = "projectbabble.calibration.presenter.v1";
     private const string OverlayName = "Baballonia calibration";
 
+    /// <summary>
+    /// Consecutive upload failures tolerated before the surface is torn down. SteamVR can refuse a
+    /// single frame across a compositor hiccup or scene-application switch; destroying the overlay
+    /// on the first of those makes the panel vanish mid-calibration for a fault that would have
+    /// cleared on its own. A genuine loss fails every attempt, so it still surfaces immediately.
+    /// </summary>
+    private const int MaxConsecutiveFailures = 3;
+
     private readonly OpenVRService _openVr;
     private readonly ILogger<OpenVrCalibrationPresenter> _logger;
     private readonly object _sync = new();
@@ -31,7 +39,23 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
     private bool _healthy;
     private VrCalibrationAction _pendingAction;
     private VrCalibrationFrame? _lastFrame;
+    private VrCalibrationFrame? _lastRendered;
     private Timer? _completionTimer;
+    private bool _showingCompletion;
+    private int _consecutiveFailures;
+
+    // The drawing surface outlives individual frames. Besides saving an allocation and a clear per
+    // update, this keeps the pixel buffer handed to SetOverlayRaw alive for as long as the overlay
+    // exists, rather than freeing it the instant the call returns.
+    private SKBitmap? _surface;
+    private SKCanvas? _canvas;
+
+    // Font lookup is the expensive part of drawing text, and the old code paid it per string - eight
+    // or more times per frame, twenty times a second.
+    private static readonly Lazy<SKTypeface> RegularTypeface =
+        new(() => SKTypeface.FromFamilyName(null, SKFontStyle.Normal) ?? SKTypeface.Default);
+    private static readonly Lazy<SKTypeface> BoldTypeface =
+        new(() => SKTypeface.FromFamilyName(null, SKFontStyle.Bold) ?? SKTypeface.Default);
 
     public OpenVrCalibrationPresenter(
         OpenVRService openVr,
@@ -79,15 +103,26 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
             // Eye and guided calibration share this singleton presenter. Replacing an active
             // overlay here would leave the first calibration sampling against a display owned by
             // the second one, so contention must fail closed rather than "helpfully" stealing it.
+            //
+            // A finished session lingering on its completion message is not contention: nothing is
+            // sampling against it. Starting the next calibration within those two seconds used to be
+            // refused as if a routine were still running, so take the surface over instead.
             if (_handle != 0)
             {
-                return VrPresenterStartResult.Failure(
-                    "Another in-headset calibration is already active. Finish or cancel it first.");
+                if (!_showingCompletion)
+                {
+                    return VrPresenterStartResult.Failure(
+                        "Another in-headset calibration is already active. Finish or cancel it first.");
+                }
+
+                CloseOverlayLocked(preserveStatus: true);
             }
 
             _completionTimer?.Dispose();
             _completionTimer = null;
+            _showingCompletion = false;
             _healthy = false;
+            _consecutiveFailures = 0;
 
             if (!OperatingSystem.IsWindows())
                 return VrPresenterStartResult.Failure(
@@ -128,6 +163,7 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
                     _handle, OpenVR.k_unTrackedDeviceIndex_Hmd, ref transform), "attach overlay to headset");
 
                 _pendingAction = VrCalibrationAction.None;
+                CreateSurfaceLocked();
                 PresentLocked(new VrCalibrationFrame(
                     sessionTitle, "Get ready. Calibration will begin in the headset.",
                     VrCalibrationPhase.Preparing, 0, AllowCancel: true));
@@ -153,10 +189,26 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
             try
             {
                 PresentLocked(frame.Clamp());
+                _consecutiveFailures = 0;
             }
             catch (Exception ex)
             {
+                _consecutiveFailures++;
                 _status = $"SteamVR presenter update failed: {ex.Message}";
+
+                if (_consecutiveFailures < MaxConsecutiveFailures && IsCosmeticUpdate(frame))
+                {
+                    // The instruction on screen is still the right one - only a progress bar or a
+                    // countdown digit failed to land - so leaving the previous frame up is correct
+                    // and the next tick can retry. A failed update that carried NEW instructions is
+                    // never tolerated: the headset would say one thing while the recorder labelled
+                    // another, which is exactly how a session gets confidently mislabelled.
+                    _logger.LogDebug(ex,
+                        "Cosmetic overlay update {Failure} of {Limit} failed; retrying next tick",
+                        _consecutiveFailures, MaxConsecutiveFailures);
+                    return;
+                }
+
                 _logger.LogError(ex, "Could not update the OpenVR calibration presenter");
                 // A stale instruction is worse than no instruction: close the surface and expose
                 // unhealthy state so calibration services abort before publishing more samples.
@@ -248,10 +300,16 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
                         "CALIBRATION COMPLETE", completionMessage, VrCalibrationPhase.Complete,
                         1, 1, AllowCancel: false));
                     _status = completionMessage;
+                    _showingCompletion = true;
                     _completionTimer?.Dispose();
                     _completionTimer = new Timer(_ =>
                     {
-                        lock (_sync) CloseOverlayLocked();
+                        lock (_sync)
+                        {
+                            // Only tear down if this is still the completion frame; a calibration
+                            // started in the meantime now owns the surface.
+                            if (_showingCompletion) CloseOverlayLocked();
+                        }
                     }, null, TimeSpan.FromSeconds(2), Timeout.InfiniteTimeSpan);
                 }
                 catch (Exception ex)
@@ -268,15 +326,60 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         }
     }
 
+    /// <summary>
+    /// True when <paramref name="frame"/> says the same thing to the user as the frame currently on
+    /// screen, differing only in progress, countdown or intensity readouts. Determines whether a
+    /// failed upload can be retried or has to fail closed.
+    /// </summary>
+    public static bool IsCosmeticUpdate(VrCalibrationFrame frame, VrCalibrationFrame? onScreen) =>
+        onScreen is not null &&
+        onScreen.Title == frame.Title &&
+        onScreen.Instruction == frame.Instruction &&
+        onScreen.Phase == frame.Phase &&
+        onScreen.Repetition == frame.Repetition &&
+        onScreen.AllowRetry == frame.AllowRetry &&
+        onScreen.AllowSkip == frame.AllowSkip &&
+        onScreen.AllowCancel == frame.AllowCancel &&
+        onScreen.TargetX.Equals(frame.TargetX) &&
+        onScreen.TargetY.Equals(frame.TargetY);
+
+    private bool IsCosmeticUpdate(VrCalibrationFrame frame) => IsCosmeticUpdate(frame, _lastRendered);
+
+    /// <summary>Allocates the reusable drawing surface. Called once per overlay session.</summary>
+    private void CreateSurfaceLocked()
+    {
+        DisposeSurfaceLocked();
+        _surface = new SKBitmap(new SKImageInfo(
+            TextureWidth, TextureHeight, SKColorType.Rgba8888, SKAlphaType.Premul));
+        _canvas = new SKCanvas(_surface);
+        _lastRendered = null;
+    }
+
+    private void DisposeSurfaceLocked()
+    {
+        _canvas?.Dispose();
+        _surface?.Dispose();
+        _canvas = null;
+        _surface = null;
+        _lastRendered = null;
+    }
+
     private void PresentLocked(VrCalibrationFrame frame)
     {
         if (_overlay == null || _handle == 0) return;
-        _lastFrame = frame;
+        if (_surface == null || _canvas == null) CreateSurfaceLocked();
 
-        using var bitmap = new SKBitmap(new SKImageInfo(
-            TextureWidth, TextureHeight, SKColorType.Rgba8888, SKAlphaType.Premul));
-        using var canvas = new SKCanvas(bitmap);
-        canvas.Clear(new SKColor(7, 10, 18, 248));
+        // Skip identical content before drawing anything. Consumers publish far faster than the
+        // panel actually changes, and redrawing plus re-uploading a megabytes-wide texture for a
+        // pixel-identical result is what made the overlay visibly unstable.
+        frame = frame.Quantize();
+        _lastFrame = frame;
+        if (_lastRendered == frame) return;
+
+        var bitmap = _surface!;
+        var canvas = _canvas!;
+        // Fully opaque: a translucent panel shows every upload seam against the scene behind it.
+        canvas.Clear(new SKColor(7, 10, 18, 255));
 
         DrawText(canvas, frame.Title.ToUpperInvariant(), 54, 70, 46, SKColors.White, true);
 
@@ -333,6 +436,11 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
 
         var error = _overlay.SetOverlayRaw(_handle, bitmap.GetPixels(), TextureWidth, TextureHeight, 4);
         ThrowIfError(error, "upload overlay pixels");
+
+        // Only after the upload succeeds, so a failed frame leaves this describing what is still on
+        // screen. Present() relies on that to tell a retryable cosmetic update from a lost
+        // instruction change.
+        _lastRendered = frame;
     }
 
     private static void DrawProgress(
@@ -403,8 +511,9 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         Color = color,
         TextSize = size,
         IsAntialias = true,
-        Typeface = SKTypeface.FromFamilyName(null,
-            bold ? SKFontStyle.Bold : SKFontStyle.Normal),
+        // Resolved once per process. Looking a family up per string was the dominant cost of
+        // drawing a frame, and every frame draws eight or more of them.
+        Typeface = bold ? BoldTypeface.Value : RegularTypeface.Value,
     };
 
     private static void ThrowIfError(EVROverlayError error, string operation)
@@ -435,9 +544,12 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
             }
         }
 
+        DisposeSurfaceLocked();
         _handle = 0;
         _overlay = null;
         _healthy = false;
+        _showingCompletion = false;
+        _consecutiveFailures = 0;
         _lastFrame = null;
         _pendingAction = VrCalibrationAction.None;
         if (!preserveStatus) _status = "SteamVR presenter stopped.";

@@ -51,6 +51,32 @@ public sealed record VrCalibrationFrame(
         TargetY = TargetY is null ? null : Math.Clamp(TargetY.Value, -1f, 1f),
         Intensity = Intensity is null ? null : Math.Clamp(Intensity.Value, 0f, 1f),
     };
+
+    /// <summary>Progress-bar resolution. Fifty steps is finer than the eye reads on a 1 m panel.</summary>
+    private const double ProgressStep = 0.02;
+
+    /// <summary>
+    /// Snaps continuously-varying fields to the resolution actually drawn, so two frames that would
+    /// rasterize to identical pixels also compare equal.
+    ///
+    /// Callers tick far faster than the display changes - guided capture publishes 20 times a second
+    /// while a progress bar creeps across a thousand pixels - and without this every tick looks like
+    /// new content because a float moved in the sixth decimal. Quantizing lets the presenter skip
+    /// the work entirely rather than redrawing and re-uploading a texture nobody can tell apart.
+    /// </summary>
+    public VrCalibrationFrame Quantize() => this with
+    {
+        OverallProgress = Math.Round(OverallProgress / ProgressStep) * ProgressStep,
+        PhaseProgress = Math.Round(PhaseProgress / ProgressStep) * ProgressStep,
+        // Rendered as a whole-second countdown, so anything finer is invisible by construction.
+        CountdownSeconds = CountdownSeconds is null
+            ? null
+            : Math.Max(1, Math.Ceiling(CountdownSeconds.Value)),
+        // Drawn as a whole-percent readout.
+        Intensity = Intensity is null ? null : MathF.Round(Intensity.Value * 100f) / 100f,
+        TargetX = TargetX is null ? null : MathF.Round(TargetX.Value / 0.002f) * 0.002f,
+        TargetY = TargetY is null ? null : MathF.Round(TargetY.Value / 0.002f) * 0.002f,
+    };
 }
 
 public sealed record VrPresenterStartResult(bool Started, string Message)

@@ -250,6 +250,10 @@ public sealed class GuidedCalibrationService : IDisposable
         }
         else
         {
+            // Presented on every tick on purpose. The presenter discards frames whose content has
+            // not changed before it draws anything, so an idle tick costs a comparison rather than
+            // a texture upload - and keeping the call unconditional means a dead headset is still
+            // discovered on the very next tick instead of one refresh interval later.
             if (!PresentCurrent(routine))
                 return AbortForPresenterFailure(routine);
         }
