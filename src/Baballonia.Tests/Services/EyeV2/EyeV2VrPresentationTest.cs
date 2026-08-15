@@ -96,7 +96,8 @@ public sealed class EyeV2VrPresentationTest
         Assert.AreEqual(EyeTrackingMode.ExperimentalV2, manager.Mode);
         Assert.AreEqual("Eye V2-A mapping was saved and activated.", presenter.CompletionMessage);
         Assert.AreEqual(1d, presenter.Frames.Max(frame => frame.OverallProgress), 0.0001,
-            "the displayed routine total must match its actual 60 seconds");
+            "the progress bar must reach exactly full: the denominator is the sum of the steps, so " +
+            "this catches a step whose real duration drifted away from its declared one");
         Assert.IsTrue(presenter.Frames.Any(frame => frame.Title == "BLINK SLOWLY THREE TIMES"));
         Assert.IsTrue(presenter.Frames.Any(frame => frame.Title == "SQUINT AND HOLD"));
         Assert.IsTrue(presenter.Frames.Any(frame => frame.Title == "OPEN YOUR EYES WIDE"));
@@ -123,6 +124,116 @@ public sealed class EyeV2VrPresentationTest
                 frame.Title == title && frame.Phase != VrCalibrationPhase.Preparing);
             Assert.IsTrue(firstPrep >= 0 && firstPrep < firstSample, title);
         }
+    }
+
+    [TestMethod]
+    public void GazeTargetsSitAtComfortableVisualAngles()
+    {
+        // Straight ahead is straight ahead.
+        var (cx, cy, cz) = OpenVrCalibrationPresenter.GazeTargetPosition(0f, 0f);
+        Assert.AreEqual(0f, cx, 1e-5);
+        Assert.AreEqual(0f, cy, 1e-5);
+        Assert.IsTrue(cz < 0, "the target must be in front of the viewer");
+
+        var (lx, _, _) = OpenVrCalibrationPresenter.GazeTargetPosition(-0.7f, 0f);
+        var (rx, _, _) = OpenVrCalibrationPresenter.GazeTargetPosition(0.7f, 0f);
+        Assert.IsTrue(lx < 0 && rx > 0, "left and right anchors must be on opposite sides");
+        Assert.AreEqual(-lx, rx, 1e-5, "the anchors must be symmetric");
+
+        var (_, uy, _) = OpenVrCalibrationPresenter.GazeTargetPosition(0f, -0.7f);
+        var (_, dy, _) = OpenVrCalibrationPresenter.GazeTargetPosition(0f, 0.7f);
+        Assert.IsTrue(uy > 0, "negative Y is up");
+        Assert.IsTrue(dy < 0);
+
+        // Comfortably inside eye-in-head range. A target far enough out to need head movement
+        // measures the neck rather than the eye, and the whole point of the anchors is the eye.
+        foreach (var (x, y) in new[] { (-0.7f, 0f), (0.7f, 0f), (0f, -0.7f), (0f, 0.7f) })
+        {
+            var (px, py, pz) = OpenVrCalibrationPresenter.GazeTargetPosition(x, y);
+            var degrees = float.RadiansToDegrees(
+                MathF.Atan2(MathF.Sqrt(px * px + py * py), -pz));
+            Assert.IsTrue(degrees is > 4 and < 15,
+                $"({x},{y}) sits at {degrees:F1} degrees, outside the comfortable band");
+        }
+    }
+
+    [TestMethod]
+    public async Task GazeSamplingIgnoresTheEyeStillTravellingToTheTarget()
+    {
+        // The eye needs time to saccade and settle. If sampling began the instant the target
+        // appeared, every anchor would be dragged toward wherever the user had been looking, and
+        // the whole gaze map would inherit that bias. Here the "in flight" frames carry a wildly
+        // wrong gaze; a correct implementation must not let them reach the fit at all.
+        var contaminatedFrames = 0;
+
+        var clean = await RunCalibrationAsync(null);
+        var withFlight = await RunCalibrationAsync(ticksOnTarget =>
+        {
+            // 800 ms of acquisition at a 250 ms cadence covers the first three updates.
+            if (ticksOnTarget >= 3) return false;
+            contaminatedFrames++;
+            return true;
+        });
+
+        Assert.IsTrue(contaminatedFrames > 0, "the test never produced any in-flight frames");
+
+        // Byte-for-byte identical: not "close enough", because any leakage at all would move the
+        // medians the anchors are built from.
+        foreach (var (a, b) in new[] { (clean.Left, withFlight.Left), (clean.Right, withFlight.Right) })
+        {
+            Assert.AreEqual(a.Gaze.XX, b.Gaze.XX, 1e-9, "in-flight gaze reached the fit");
+            Assert.AreEqual(a.Gaze.YY, b.Gaze.YY, 1e-9, "in-flight gaze reached the fit");
+            Assert.AreEqual(a.Gaze.OffsetX, b.Gaze.OffsetX, 1e-9, "in-flight gaze reached the fit");
+            Assert.AreEqual(a.Gaze.OffsetY, b.Gaze.OffsetY, 1e-9, "in-flight gaze reached the fit");
+        }
+    }
+
+    /// <summary>
+    /// Runs a full calibration against synthetic eye data. <paramref name="corruptWhileAcquiring"/>
+    /// is asked, for each update spent on a gaze target, whether that frame should carry a wildly
+    /// wrong gaze - letting a test express "the eye had not arrived yet".
+    /// </summary>
+    private async Task<EyeV2Calibration> RunCalibrationAsync(Func<int, bool>? corruptWhileAcquiring)
+    {
+        var store = Store();
+        var manager = Manager(store);
+        var presenter = new RecordingPresenter();
+        var bus = new EyePipelineEventBus();
+        long ticks = DateTime.UnixEpoch.Ticks;
+        var blinkSample = 0;
+        (float? X, float? Y) previousTarget = (null, null);
+        var ticksOnThisTarget = 0;
+
+        Task Delay(int _, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            ticks += 33 * TimeSpan.TicksPerMillisecond;
+            var frame = presenter.LastFrame;
+            if (frame != null)
+            {
+                var raw = RawFor(frame, ref blinkSample);
+
+                if (frame.Phase == VrCalibrationPhase.Target)
+                {
+                    var isNewTarget = previousTarget.X != frame.TargetX ||
+                                      previousTarget.Y != frame.TargetY;
+                    ticksOnThisTarget = isNewTarget ? 0 : ticksOnThisTarget + 1;
+                    previousTarget = (frame.TargetX, frame.TargetY);
+
+                    if (corruptWhileAcquiring?.Invoke(ticksOnThisTarget) == true)
+                        for (var i = 0; i < 6; i++) raw[i] = 5f;
+                }
+
+                using var image = new Mat();
+                bus.Publish(new EyePipelineEvents.NewRawExpressionsEvent(image, raw, ticks));
+            }
+            return Task.CompletedTask;
+        }
+
+        using var service = new EyeV2CalibrationService(
+            bus, store, manager, Mock.Of<ILogger<EyeV2CalibrationService>>(), presenter, Delay);
+
+        return await service.CalibrateAsync();
     }
 
     [TestMethod]

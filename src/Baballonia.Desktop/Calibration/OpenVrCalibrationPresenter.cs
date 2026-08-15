@@ -22,6 +22,27 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
     private const string OverlayKey = "projectbabble.calibration.presenter.v1";
     private const string OverlayName = "Baballonia calibration";
 
+    private const string TargetOverlayKey = "projectbabble.calibration.target.v1";
+    private const string TargetOverlayName = "Baballonia gaze target";
+    private const int TargetTextureSize = 256;
+
+    /// <summary>Distance in front of the headset for both surfaces, in metres.</summary>
+    private const float PanelDistance = 1.25f;
+
+    /// <summary>
+    /// Where the gaze anchors sit, in degrees of visual angle, at the standard +/-0.7 anchor
+    /// position. Chosen to match the extents the old in-panel dot actually spanned, so the mapping
+    /// fit stays comparable across the change, and kept well inside comfortable eye-in-head range:
+    /// a target far enough out to need head movement measures the neck, not the eye.
+    /// </summary>
+    private const float AnchorYawDegrees = 11f;
+    private const float AnchorPitchDegrees = 8f;
+    private const float AnchorPosition = 0.7f;
+
+    /// <summary>Panel opacity while it is the main thing, and while a gaze target owns attention.</summary>
+    private const float PanelAlphaNormal = 0.98f;
+    private const float PanelAlphaRecessed = 0.45f;
+
     /// <summary>
     /// Consecutive upload failures tolerated before the surface is torn down. SteamVR can refuse a
     /// single frame across a compositor hiccup or scene-application switch; destroying the overlay
@@ -49,6 +70,14 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
     // exists, rather than freeing it the instant the call returns.
     private SKBitmap? _surface;
     private SKCanvas? _canvas;
+
+    // The gaze target is a second overlay rather than a dot drawn inside the instruction panel.
+    // A dot in a rectangle is a flat-screen affordance: it tells the eye to look at a picture of a
+    // target instead of at a point in space, and it caps how far apart the anchors can be. Its
+    // texture never changes, so only the transform is updated as the target moves.
+    private ulong _targetHandle;
+    private bool _targetVisible;
+    private float _panelAlpha = PanelAlphaNormal;
 
     // Font lookup is the expensive part of drawing text, and the old code paid it per string - eight
     // or more times per frame, twenty times a second.
@@ -163,7 +192,9 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
                     _handle, OpenVR.k_unTrackedDeviceIndex_Hmd, ref transform), "attach overlay to headset");
 
                 _pendingAction = VrCalibrationAction.None;
+                _panelAlpha = PanelAlphaNormal;
                 CreateSurfaceLocked();
+                CreateTargetOverlayLocked();
                 PresentLocked(new VrCalibrationFrame(
                     sessionTitle, "Get ready. Calibration will begin in the headset.",
                     VrCalibrationPhase.Preparing, 0, AllowCancel: true));
@@ -345,6 +376,109 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
 
     private bool IsCosmeticUpdate(VrCalibrationFrame frame) => IsCosmeticUpdate(frame, _lastRendered);
 
+    /// <summary>
+    /// Head-relative position of a gaze anchor, in metres, for a normalized target coordinate.
+    /// Returns OpenVR's convention: +X right, +Y up, -Z forward. <paramref name="y"/> is positive
+    /// downward, matching how the anchors are authored.
+    /// </summary>
+    public static (float X, float Y, float Z) GazeTargetPosition(float x, float y)
+    {
+        var yaw = float.DegreesToRadians(x / AnchorPosition * AnchorYawDegrees);
+        var pitch = float.DegreesToRadians(y / AnchorPosition * AnchorPitchDegrees);
+
+        return (
+            PanelDistance * MathF.Sin(yaw),
+            -PanelDistance * MathF.Sin(pitch),
+            -PanelDistance * MathF.Cos(yaw) * MathF.Cos(pitch));
+    }
+
+    private void CreateTargetOverlayLocked()
+    {
+        if (_overlay == null) return;
+
+        ulong stale = 0;
+        if (_overlay.FindOverlay(TargetOverlayKey, ref stale) == EVROverlayError.None && stale != 0)
+            _overlay.DestroyOverlay(stale);
+
+        if (_overlay.CreateOverlay(TargetOverlayKey, TargetOverlayName, ref _targetHandle)
+                != EVROverlayError.None || _targetHandle == 0)
+        {
+            // A missing target overlay is not fatal: the panel still carries the instruction, and
+            // the calibration math is identical either way.
+            _targetHandle = 0;
+            _logger.LogWarning("SteamVR would not create the gaze target overlay; using the panel only");
+            return;
+        }
+
+        _overlay.SetOverlayWidthInMeters(_targetHandle, 0.22f);
+        _overlay.SetOverlayAlpha(_targetHandle, 1f);
+
+        // Drawn once. The target's appearance never changes - only where it is - so there is no
+        // reason to re-upload it as it moves.
+        using var bitmap = new SKBitmap(new SKImageInfo(
+            TargetTextureSize, TargetTextureSize, SKColorType.Rgba8888, SKAlphaType.Premul));
+        using (var canvas = new SKCanvas(bitmap))
+        {
+            canvas.Clear(SKColors.Transparent);
+            var centre = TargetTextureSize / 2f;
+            using var halo = new SKPaint { Color = new SKColor(255, 224, 72, 70), IsAntialias = true };
+            using var ring = new SKPaint
+            {
+                Color = new SKColor(255, 224, 72, 200), IsAntialias = true,
+                Style = SKPaintStyle.Stroke, StrokeWidth = 6,
+            };
+            using var dot = new SKPaint { Color = new SKColor(255, 236, 140), IsAntialias = true };
+            canvas.DrawCircle(centre, centre, 104, halo);
+            canvas.DrawCircle(centre, centre, 104, ring);
+            canvas.DrawCircle(centre, centre, 34, dot);
+        }
+
+        _overlay.SetOverlayRaw(
+            _targetHandle, bitmap.GetPixels(), TargetTextureSize, TargetTextureSize, 4);
+        _targetVisible = false;
+    }
+
+    /// <summary>Moves, shows or hides the gaze target, and recesses the panel while it is up.</summary>
+    private void UpdateTargetOverlayLocked(VrCalibrationFrame frame)
+    {
+        if (_overlay == null) return;
+
+        var wanted = frame.Phase == VrCalibrationPhase.Target &&
+                     frame is { TargetX: not null, TargetY: not null };
+
+        if (wanted && _targetHandle != 0)
+        {
+            var (x, y, z) = GazeTargetPosition(frame.TargetX!.Value, frame.TargetY!.Value);
+            var transform = new HmdMatrix34_t
+            {
+                m0 = 1, m1 = 0, m2 = 0, m3 = x,
+                m4 = 0, m5 = 1, m6 = 0, m7 = y,
+                m8 = 0, m9 = 0, m10 = 1, m11 = z,
+            };
+            _overlay.SetOverlayTransformTrackedDeviceRelative(
+                _targetHandle, OpenVR.k_unTrackedDeviceIndex_Hmd, ref transform);
+
+            if (!_targetVisible)
+            {
+                _overlay.ShowOverlay(_targetHandle);
+                _targetVisible = true;
+            }
+        }
+        else if (_targetVisible && _targetHandle != 0)
+        {
+            _overlay.HideOverlay(_targetHandle);
+            _targetVisible = false;
+        }
+
+        // Step back the instructions while the user is supposed to be fixating on something else.
+        var alpha = wanted ? PanelAlphaRecessed : PanelAlphaNormal;
+        if (Math.Abs(alpha - _panelAlpha) > 0.001f && _handle != 0)
+        {
+            _overlay.SetOverlayAlpha(_handle, alpha);
+            _panelAlpha = alpha;
+        }
+    }
+
     /// <summary>Allocates the reusable drawing surface. Called once per overlay session.</summary>
     private void CreateSurfaceLocked()
     {
@@ -374,6 +508,11 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         // pixel-identical result is what made the overlay visibly unstable.
         frame = frame.Quantize();
         _lastFrame = frame;
+
+        // Outside the dirty check: the target moves and the panel dims independently of whether the
+        // panel's own pixels changed.
+        UpdateTargetOverlayLocked(frame);
+
         if (_lastRendered == frame) return;
 
         var bitmap = _surface!;
@@ -411,7 +550,9 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         DrawWrappedText(canvas, frame.Instruction, 54, 190, TextureWidth - 108, 34,
             new SKColor(230, 234, 243), 44);
 
-        if (frame.TargetX is { } targetX && frame.TargetY is { } targetY)
+        // Only fall back to drawing the target inside the panel when the dedicated overlay could not
+        // be created. Otherwise the user would be looking at two of them.
+        if (_targetHandle == 0 && frame.TargetX is { } targetX && frame.TargetY is { } targetY)
         {
             var x = TextureWidth / 2f + targetX * 340f;
             var y = 410f + targetY * 180f;
@@ -537,6 +678,12 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         {
             try
             {
+                if (_targetHandle != 0)
+                {
+                    _overlay.HideOverlay(_targetHandle);
+                    _overlay.DestroyOverlay(_targetHandle);
+                }
+
                 _overlay.HideOverlay(_handle);
                 _overlay.DestroyOverlay(_handle);
             }
@@ -546,6 +693,9 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
             }
         }
 
+        _targetHandle = 0;
+        _targetVisible = false;
+        _panelAlpha = PanelAlphaNormal;
         DisposeSurfaceLocked();
         _handle = 0;
         _overlay = null;

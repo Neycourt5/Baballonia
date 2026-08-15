@@ -18,6 +18,14 @@ public sealed class EyeV2CalibrationService : IDisposable
 {
     private const int PrepMilliseconds = 3000;
     private const int UpdateMilliseconds = 250;
+
+    /// <summary>
+    /// How long a gaze target is shown before any of its samples count. The eye needs time to
+    /// saccade to a new point and settle, and sampling from the instant the target appears folds
+    /// that flight into the fixation - which biases every anchor toward wherever the user was
+    /// looking previously, and therefore biases the whole gaze map.
+    /// </summary>
+    private const int GazeAcquisitionMilliseconds = 800;
     private const string Relax = "relax";
     private const string Blinks = "blinks";
     private const string Squint = "squint";
@@ -64,29 +72,34 @@ public sealed class EyeV2CalibrationService : IDisposable
         var completed = false;
         try
         {
-            presenterStarted = BeginPresenter("EYE V2-A MAPPING CALIBRATION");
+            presenterStarted = BeginPresenter("EYE CALIBRATION");
             lock (_sync) _samples.Clear();
-            // Each phase has a three-second visible preparation interval. 4 behavioral captures
-            // take 35 s total and the five gaze targets take 25 s: the actual routine is 60 s.
-            const double total = 60;
+
+            // Built as a list so the progress denominator is the sum of the steps rather than a
+            // number kept in step with them by hand.
+            var steps = new List<(string Key, string Instruction, int Seconds, EyeV2GazeTarget? Target)>
+            {
+                (Relax, "Relax your eyes and look straight ahead.", 5, null),
+                (Blinks, "Blink slowly three times, opening fully between blinks.", 8, null),
+                (Squint, "Hold a comfortable deliberate squint.", 5, null),
+                (Wide, "Open both eyes wide and hold.", 5, null),
+            };
+
+            steps.AddRange(EyeV2GazeTarget.FivePoint.Select(target => (
+                GazeKey(target),
+                $"Move only your eyes - look {target.Name.ToLowerInvariant()} and hold.",
+                2,
+                (EyeV2GazeTarget?)target)));
+
+            var total = steps.Sum(StepSeconds);
             double done = 0;
 
-            await CaptureAsync(Relax, "Relax your eyes and look straight ahead.", 5, done, total, progress, cancellationToken);
-            done += 8;
-            await CaptureAsync(Blinks, "Blink slowly three times, opening fully between blinks.", 8, done, total, progress, cancellationToken);
-            done += 11;
-            await CaptureAsync(Squint, "Hold a comfortable deliberate squint.", 5, done, total, progress, cancellationToken);
-            done += 8;
-            await CaptureAsync(Wide, "Open both eyes wide and hold.", 5, done, total, progress, cancellationToken);
-            done += 8;
-
-            foreach (var target in EyeV2GazeTarget.FivePoint)
+            foreach (var step in steps)
             {
                 await CaptureAsync(
-                    GazeKey(target),
-                    $"Keep your head still and look {target.Name.ToLowerInvariant()}.",
-                    2, done, total, progress, cancellationToken, target.X, target.Y);
-                done += 5;
+                    step.Key, step.Instruction, step.Seconds, done, total, progress,
+                    cancellationToken, step.Target?.X, step.Target?.Y);
+                done += StepSeconds(step);
             }
 
             var capture = BuildCapture();
@@ -182,6 +195,13 @@ public sealed class EyeV2CalibrationService : IDisposable
         }
     }
 
+    /// <summary>Wall-clock seconds one step occupies: countdown, acquisition, then sampling.</summary>
+    private static double StepSeconds(
+        (string Key, string Instruction, int Seconds, EyeV2GazeTarget? Target) step) =>
+        PrepMilliseconds / 1000.0 +
+        (step.Target is null ? 0 : GazeAcquisitionMilliseconds / 1000.0) +
+        step.Seconds;
+
     private async Task CaptureAsync(
         string key,
         string instruction,
@@ -225,19 +245,39 @@ public sealed class EyeV2CalibrationService : IDisposable
             PresentPhase(key, instruction, samplingPhase,
                 (completedSeconds + PrepMilliseconds / 1000.0) / totalSeconds,
                 0, null, targetX, targetY);
+
+            // The target is up, but nothing is recorded yet: the eye is still travelling to it.
+            // _activePhase stays null throughout, so these frames cannot reach the sample buffer.
+            if (targetX.HasValue)
+            {
+                for (var elapsed = 0;
+                     elapsed < GazeAcquisitionMilliseconds;
+                     elapsed += UpdateMilliseconds)
+                {
+                    await _delay(UpdateMilliseconds, cancellationToken);
+                    retry = HandlePresenterAction();
+                    if (retry) break;
+                }
+
+                if (retry) continue;
+            }
+
             lock (_sync) _activePhase = key;
+
+            // Everything before the first counted sample: the countdown, plus the acquisition pause
+            // on a gaze step.
+            var beforeSampling = completedSeconds + PrepMilliseconds / 1000.0 +
+                                 (targetX.HasValue ? GazeAcquisitionMilliseconds / 1000.0 : 0);
 
             var sampleMilliseconds = seconds * 1000;
             for (var elapsed = 0; elapsed < sampleMilliseconds; elapsed += UpdateMilliseconds)
             {
                 await _delay(UpdateMilliseconds, cancellationToken);
-                progress?.Report(new EyeV2CalibrationProgress(instruction,
-                    Math.Clamp((completedSeconds + PrepMilliseconds / 1000.0 +
-                                (elapsed + UpdateMilliseconds) / 1000.0) / totalSeconds, 0, 1),
-                    targetX, targetY));
-                PresentPhase(key, instruction, samplingPhase,
-                    (completedSeconds + PrepMilliseconds / 1000.0 +
-                     (elapsed + UpdateMilliseconds) / 1000.0) / totalSeconds,
+                var overall = Math.Clamp(
+                    (beforeSampling + (elapsed + UpdateMilliseconds) / 1000.0) / totalSeconds, 0, 1);
+
+                progress?.Report(new EyeV2CalibrationProgress(instruction, overall, targetX, targetY));
+                PresentPhase(key, instruction, samplingPhase, overall,
                     (elapsed + UpdateMilliseconds) / (double)sampleMilliseconds,
                     null, targetX, targetY);
 
@@ -285,8 +325,8 @@ public sealed class EyeV2CalibrationService : IDisposable
             Recenter => "LOOK STRAIGHT AHEAD",
             Validity => "HEADSET POSITION CHECK",
             _ when key.StartsWith("gaze:", StringComparison.Ordinal) =>
-                $"GAZE — {key[5..].ToUpperInvariant()}",
-            _ => "EYE V2-A CALIBRATION",
+                $"LOOK {key[5..].ToUpperInvariant()}",
+            _ => "EYE CALIBRATION",
         };
 
         _presenter.Present(new VrCalibrationFrame(
