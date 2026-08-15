@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using Baballonia.Services.Personalization;
 using JetBrains.Annotations;
@@ -72,6 +73,66 @@ public class PersonalizationEnvironmentTest
         Assert.AreEqual(1, status.GuidedSessions);
         Assert.AreEqual(4, status.TotalSessions);
         Assert.AreEqual(14, status.TotalFrames);
+    }
+
+    [TestMethod]
+    public void TrainingInventory_DistinguishesCumulativeDiscoveryOptimizationAndHoldout()
+    {
+        CreateInventorySession("20260813_100000_neutral", SessionType.Neutral, 2);
+        CreateInventorySession("20260813_110000_neutral", SessionType.Neutral, 3);
+        CreateInventorySession("20260813_120000_neutral", SessionType.Neutral, 4);
+        CreateInventorySession("20260813_130000_speech", SessionType.Speech, 5);
+        CreateInventorySession("20260813_140000_speech", SessionType.Speech, 6);
+        CreateInventorySession("20260813_150000_guided", SessionType.Guided, 7,
+            guidedDims: [PersonalizationSchema.IndexOf("JawOpen")]);
+        CreateInventorySession("20260813_160000_guided", SessionType.Guided, 8,
+            guidedDims: [PersonalizationSchema.IndexOf("MouthSmileLeft")]);
+        CreateInventorySession("20260813_170000_correction", SessionType.Correction, 9,
+            correctedDims: [PersonalizationSchema.IndexOf("JawOpen")]);
+
+        var inventory = PersonalizationEnvironment.InspectTrainingInventory(_root);
+
+        Assert.AreEqual(8, inventory.Discovered.Count);
+        Assert.AreEqual(44, inventory.DiscoveredFrames);
+        Assert.AreEqual(5, inventory.Training.Count);
+        Assert.AreEqual(26, inventory.TrainingFrames);
+        Assert.AreEqual(3, inventory.HeldOut.Count);
+        Assert.AreEqual(18, inventory.HeldOutFrames);
+        Assert.AreEqual("20260813_160000_guided", inventory.LatestGuidedSessionId);
+        Assert.IsFalse(inventory.LatestGuidedIsTraining,
+            "The newest of two Guided sessions is validation-only under the trainer's default split.");
+        CollectionAssert.AreEqual(new[] { "JawOpen" }, inventory.GuidedTrainingExpressions.ToArray(),
+            "Coverage must describe optimization, not a rich Guided pass that is only held out.");
+        Assert.AreEqual(1, inventory.CorrectionCounts["JawOpen"]);
+
+        var correction = inventory.Training.Single(x => x.Type == SessionType.Correction);
+        CollectionAssert.AreEqual(
+            new[] { PersonalizationSchema.IndexOf("JawOpen") }, correction.CorrectedDims.ToArray());
+    }
+
+    [TestMethod]
+    public void TrainingInventory_SkipsStructurallyInvalidJsonLinesWithoutCrashingCleanupUi()
+    {
+        var session = CreateInventorySession(
+            "20260813_100000_guided",
+            SessionType.Guided,
+            2,
+            guidedDims: [PersonalizationSchema.IndexOf("JawOpen")]);
+        File.WriteAllLines(Path.Combine(session, "labels.jsonl"),
+        [
+            // The image for frame zero is real, but cue dimensions are the wrong JSON type.
+            "{\"i\":0,\"cue\":{\"phase\":\"hold\",\"dims\":[\"bad\"],\"target\":[1]}}",
+            // Syntactically valid JSON that previously threw InvalidOperationException in GetInt32.
+            "{\"i\":\"not-an-integer\",\"cue\":{\"phase\":\"hold\",\"dims\":{},\"target\":[]}}",
+        ]);
+
+        var inventory = PersonalizationEnvironment.InspectTrainingInventory(_root);
+
+        Assert.AreEqual(1, inventory.Discovered.Count);
+        Assert.AreEqual(1, inventory.DiscoveredFrames,
+            "The valid frame remains visible while the malformed index is skipped.");
+        Assert.AreEqual(0, inventory.GuidedTrainingExpressions.Count,
+            "Malformed cue dimensions must not be invented into supervision coverage.");
     }
 
     [TestMethod]
@@ -226,5 +287,53 @@ public class PersonalizationEnvironmentTest
             count = frames,
             model_md5 = modelMd5
         }));
+    }
+
+    private string CreateInventorySession(
+        string id,
+        SessionType type,
+        int frames,
+        int[]? guidedDims = null,
+        int[]? correctedDims = null)
+    {
+        var path = Path.Combine(_root, id);
+        var framesPath = Path.Combine(path, "frames");
+        Directory.CreateDirectory(framesPath);
+        File.WriteAllText(Path.Combine(path, "session.json"), JsonSerializer.Serialize(new
+        {
+            SessionId = id,
+            SessionType = type.ToString(),
+            FrameCount = frames,
+        }));
+
+        var target = new float[PersonalizationSchema.ExpressionCount];
+        foreach (var dim in guidedDims ?? []) target[dim] = 1f;
+        var lines = new string[frames];
+        for (var i = 0; i < frames; i++)
+        {
+            File.WriteAllBytes(Path.Combine(framesPath, $"{i:D6}.jpg"), [0xFF, 0xD8, 0xFF]);
+            lines[i] = JsonSerializer.Serialize(new
+            {
+                i,
+                cue = guidedDims == null ? null : new
+                {
+                    phase = "hold",
+                    dims = guidedDims,
+                    target,
+                }
+            });
+        }
+        File.WriteAllLines(Path.Combine(path, "labels.jsonl"), lines);
+
+        if (correctedDims != null)
+        {
+            File.WriteAllText(Path.Combine(path, "correction.json"), JsonSerializer.Serialize(new
+            {
+                CorrectedDims = correctedDims,
+                Target = 0f,
+            }));
+        }
+
+        return path;
     }
 }

@@ -339,6 +339,28 @@ public class PersonalTrainingOrchestrationTest
     }
 
     [TestMethod]
+    public void ExactActivationGuard_RejectsSuccessfulRollbackFallback()
+    {
+        var guard = typeof(PersonalTrainingService).GetMethod(
+            "HasActivatedExactArtifact",
+            BindingFlags.NonPublic | BindingFlags.Static)!;
+        var installed = Path.Combine(Path.GetTempPath(), "newly-trained.onnx");
+        var previous = Path.Combine(Path.GetTempPath(), "newly-trained.previous.onnx");
+        var reloadSuccess = PersonalModelLoadResult.Ok("Previous model kept active.");
+
+        Assert.AreEqual(false, guard.Invoke(null,
+            [reloadSuccess, installed, previous, "new model failed validation"]),
+            "A rollback rescue is healthy runtime behavior, but must not be reported as activation " +
+            "of the newly trained artifact.");
+        Assert.AreEqual(false, guard.Invoke(null,
+            [reloadSuccess, installed, installed, "fallback was used"]),
+            "A fallback marker must prevent a false activation claim even if paths are misleading.");
+        Assert.AreEqual(true, guard.Invoke(null,
+            [reloadSuccess, installed, installed, null]),
+            "Only the exact installed artifact with no fallback should count as activated.");
+    }
+
+    [TestMethod]
     public async Task FullPipeline_TrainsExportsInstallsAndLoads()
     {
         if (!EnvironmentReady)

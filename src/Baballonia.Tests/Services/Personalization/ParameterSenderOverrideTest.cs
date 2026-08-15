@@ -1,14 +1,18 @@
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Baballonia.Contracts;
 using Baballonia.Services;
 using Baballonia.Services.Calibration;
 using Baballonia.Services.Personalization;
 using Baballonia.Services.EyeV2;
 using JetBrains.Annotations;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
 using OscCore;
@@ -70,12 +74,37 @@ public class ParameterSenderOverrideTest
             .GetField("_faceOverrideActive", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(_service, active);
 
+    private void SetPrefix(string prefix) =>
+        typeof(ParameterSenderService)
+            .GetField("_prefix", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .SetValue(_service, prefix);
+
     private void Invoke(string method, params object[] args) =>
         typeof(ParameterSenderService)
             .GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!
             .Invoke(_service, args);
 
+    private async Task InvokeAsync(string method, params object[] args)
+    {
+        var task = (Task)typeof(ParameterSenderService)
+            .GetMethod(method, BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(_service, args)!;
+        await task;
+    }
+
     private static float[] Ramp() => Enumerable.Range(0, N).Select(i => i / (float)(N - 1)).ToArray();
+
+    private ParameterSenderService CreateService(VrcftModuleSendService vrcftSender)
+    {
+        var loop = (ProcessingLoopService)RuntimeHelpers.GetUninitializedObject(typeof(ProcessingLoopService));
+        return new ParameterSenderService(
+            vrcftModuleSendService: vrcftSender,
+            dfrSendService: null!,
+            localSettingsService: null!,
+            calibrationService: _calibration.Object,
+            processingLoopService: loop,
+            logger: null!);
+    }
 
     private Dictionary<string, float> DrainByAddress()
     {
@@ -173,16 +202,101 @@ public class ParameterSenderOverrideTest
 
         Invoke("ProcessEyeExpressionData", v2);
 
-        var sent = DrainByAddress();
-        Assert.AreEqual(EyeStateLayout.V2Count, sent.Count);
-        Assert.AreEqual(-0.4f, sent["/LeftEyeX"], 1e-6);
-        Assert.AreEqual(0.8f, sent["/LeftEyeLid"], 1e-6);
-        Assert.AreEqual(0.6f, sent["/LeftEyeWiden"], 1e-6);
-        Assert.AreEqual(0.5f, sent["/LeftEyeSquint"], 1e-6);
-        Assert.AreEqual(0.4f, sent["/RightEyeWiden"], 1e-6);
-        Assert.AreEqual(0.3f, sent["/RightEyeSquint"], 1e-6);
+        var expectedAddresses = new[]
+        {
+            "/LeftEyeX", "/LeftEyeY", "/LeftEyeLid",
+            "/RightEyeX", "/RightEyeY", "/RightEyeLid",
+            "/LeftEyeWiden", "/LeftEyeSquint", "/RightEyeWiden", "/RightEyeSquint",
+        };
+        var expectedValues = new[] { -0.4f, 0.3f, 0.8f, 0.2f, -0.1f, 0.7f, 0.6f, 0.5f, 0.4f, 0.3f };
+
+        var queued = Queue.ToArray();
+        Assert.AreEqual(EyeStateLayout.V2Count, queued.Length);
+        CollectionAssert.AreEqual(expectedAddresses, queued.Select(message => message.Address).ToArray());
+        CollectionAssert.AreEqual(expectedValues, queued.Select(message => (float)message[0]).ToArray());
+
+        var snapshot = _service.LastEyeOscSendSnapshot;
+        Assert.IsNotNull(snapshot);
+        Assert.AreEqual(EyeOscTransportStatus.Queued, snapshot.TransportStatus);
+        CollectionAssert.AreEqual(expectedAddresses, snapshot.Values.Select(value => value.Address).ToArray());
+        CollectionAssert.AreEqual(expectedValues, snapshot.Values.Select(value => value.Value).ToArray());
+        Assert.IsNull(snapshot.Error);
         _calibration.Verify(c => c.GetExpressionSettings(It.IsAny<string>()), Times.Never,
             "V2 must not read Default Baballonia calibration state.");
+    }
+
+    [TestMethod]
+    public void LegacyEyeVector_PreservesPrefixAndSixChannelSnapshotContract()
+    {
+        SetPrefix("/legacy");
+
+        Invoke("ProcessEyeExpressionData", new[] { 0.2f, 0.4f, 0.6f, 0.8f, 1f, 0.5f });
+
+        var expectedAddresses = new[]
+        {
+            "/legacy/LeftEyeX", "/legacy/LeftEyeY", "/legacy/LeftEyeLid",
+            "/legacy/RightEyeX", "/legacy/RightEyeY", "/legacy/RightEyeLid",
+        };
+        CollectionAssert.AreEqual(expectedAddresses, Queue.Select(message => message.Address).ToArray());
+
+        var snapshot = _service.LastEyeOscSendSnapshot;
+        Assert.IsNotNull(snapshot);
+        Assert.AreEqual(EyeStateLayout.LegacyCount, snapshot.Values.Count);
+        CollectionAssert.AreEqual(expectedAddresses, snapshot.Values.Select(value => value.Address).ToArray());
+    }
+
+    [TestMethod]
+    public async Task EyeSnapshot_ReportsLocalUdpSendWithoutClaimingReceiverAcknowledgement()
+    {
+        var sender = new StubVrcftModuleSendService
+        {
+            NextResult = new OscDispatchResult(
+                true,
+                "127.0.0.1:8888",
+                DateTimeOffset.UtcNow,
+                EyeStateLayout.V2Count,
+                null),
+        };
+        _service = CreateService(sender);
+        var states = new List<EyeOscTransportStatus>();
+        _service.EyeOscSendSnapshotChanged += snapshot => states.Add(snapshot.TransportStatus);
+
+        Invoke("ProcessEyeExpressionData", Enumerable.Repeat(0.25f, EyeStateLayout.V2Count).ToArray());
+        await InvokeAsync("SendAndClearQueue", CancellationToken.None);
+
+        var snapshot = _service.LastEyeOscSendSnapshot;
+        Assert.IsNotNull(snapshot);
+        Assert.AreEqual(EyeOscTransportStatus.SentToUdpSocket, snapshot.TransportStatus);
+        Assert.AreEqual("127.0.0.1:8888", snapshot.Destination);
+        Assert.IsNull(snapshot.Error);
+        Assert.IsTrue(snapshot.UpdatedAtUtc >= snapshot.QueuedAtUtc);
+        CollectionAssert.AreEqual(
+            new[] { EyeOscTransportStatus.Queued, EyeOscTransportStatus.SentToUdpSocket },
+            states);
+    }
+
+    [TestMethod]
+    public async Task EyeSnapshot_ReportsTransportFailureAndExactError()
+    {
+        var sender = new StubVrcftModuleSendService
+        {
+            NextResult = new OscDispatchResult(
+                false,
+                "127.0.0.1:8888",
+                DateTimeOffset.UtcNow,
+                EyeStateLayout.LegacyCount,
+                "synthetic UDP failure"),
+        };
+        _service = CreateService(sender);
+
+        Invoke("ProcessEyeExpressionData", Enumerable.Repeat(0.25f, EyeStateLayout.LegacyCount).ToArray());
+        await InvokeAsync("SendAndClearQueue", CancellationToken.None);
+
+        var snapshot = _service.LastEyeOscSendSnapshot;
+        Assert.IsNotNull(snapshot);
+        Assert.AreEqual(EyeOscTransportStatus.TransportError, snapshot.TransportStatus);
+        Assert.AreEqual("synthetic UDP failure", snapshot.Error);
+        Assert.IsTrue(snapshot.UpdatedAtUtc >= snapshot.QueuedAtUtc);
     }
 
     [TestMethod]
@@ -223,5 +337,33 @@ public class ParameterSenderOverrideTest
         Invoke("ProcessFaceExpressionData", Ramp());
 
         Assert.AreEqual(N, Queue.Count, "Live face tracking must resume on the next frame.");
+    }
+
+    private sealed class StubVrcftModuleSendService : VrcftModuleSendService
+    {
+        public OscDispatchResult NextResult { get; set; } = null!;
+
+        public StubVrcftModuleSendService()
+            : base(NullLogger<OscSendService>.Instance, CreateTarget())
+        {
+        }
+
+        public override Task<OscDispatchResult> Send(
+            OscMessage[] messages,
+            CancellationToken ct) =>
+            Task.FromResult(NextResult with
+            {
+                CompletedAtUtc = DateTimeOffset.UtcNow,
+                MessageCount = messages.Length,
+            });
+
+        private static IOscTarget CreateTarget()
+        {
+            var target = new Mock<IOscTarget>();
+            target.SetupProperty(value => value.DestinationAddress, "127.0.0.1");
+            target.SetupProperty(value => value.OutPort, 8888);
+            target.SetupProperty(value => value.IsConnected, false);
+            return target.Object;
+        }
     }
 }

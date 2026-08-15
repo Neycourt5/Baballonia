@@ -24,7 +24,12 @@ public sealed record CueStep(
     double DurationSeconds,
     float Level,
     int Repetition,
-    string Instruction);
+    string Instruction,
+    string DisplayName = "",
+    int RepetitionCount = 0);
+
+/// <summary>Stable identity for one independently repeatable/validatable guided attempt.</summary>
+public readonly record struct GuidedAttemptIdentity(string CueId, int Repetition, int Attempt);
 
 /// <summary>
 /// Drives the avatar through a known sequence of expressions so the user can copy it.
@@ -63,6 +68,7 @@ public sealed class GuidedCaptureRoutine
     private int _index = -1;
     private long _stepStarted;
     private bool _finished;
+    private readonly Dictionary<(string CueId, int Repetition), int> _attempts = new();
 
     public GuidedCaptureRoutine(IReadOnlyList<CueStep> steps, Func<long>? clock = null,
                                 double? ticksPerSecond = null)
@@ -81,6 +87,17 @@ public sealed class GuidedCaptureRoutine
     public int StepIndex => _index;
     public int StepCount => _steps.Count;
     public bool IsFinished => _finished;
+    public double CurrentStepProgress => Current == null
+        ? (_finished ? 1 : 0)
+        : Math.Clamp(ElapsedInStep / Math.Max(Current.DurationSeconds, 1e-6), 0, 1);
+    public double CurrentStepSecondsRemaining => Current == null
+        ? 0
+        : Math.Max(0, Current.DurationSeconds - ElapsedInStep);
+
+    public GuidedAttemptIdentity? CurrentAttempt => Current is not { } step
+        ? null
+        : new GuidedAttemptIdentity(step.CueId, step.Repetition,
+            _attempts.GetValueOrDefault((step.CueId, step.Repetition)));
 
     /// <summary>Total length of the routine, for telling the user what they are signing up for.</summary>
     public double TotalSeconds => _steps.Sum(s => s.DurationSeconds);
@@ -137,7 +154,43 @@ public sealed class GuidedCaptureRoutine
         return ToPhase(_steps[_index], _stepStarted);
     }
 
-    private static CuePhase ToPhase(CueStep step, long startedAt) => new(
+    /// <summary>Replays only the current cue/level/repetition and gives the replay a new attempt id.</summary>
+    public CuePhase? RetryCurrentAttempt()
+    {
+        if (Current is not { Phase: "hold" } current) return null;
+        var key = (current.CueId, current.Repetition);
+        _attempts[key] = _attempts.GetValueOrDefault(key) + 1;
+
+        var first = _index;
+        while (first > 0 && SameAttempt(_steps[first - 1], current)) first--;
+        _index = first;
+        _stepStarted = _now();
+        _finished = false;
+        return ToPhase(_steps[_index], _stepStarted);
+    }
+
+    /// <summary>Skips the remainder of only the current cue/level/repetition.</summary>
+    public CuePhase? SkipCurrentAttempt()
+    {
+        if (Current is not { Phase: "hold" } current) return null;
+        var next = _index + 1;
+        while (next < _steps.Count && SameAttempt(_steps[next], current)) next++;
+        if (next >= _steps.Count)
+        {
+            _index = _steps.Count;
+            _finished = true;
+            return null;
+        }
+
+        _index = next;
+        _stepStarted = _now();
+        return ToPhase(_steps[_index], _stepStarted);
+    }
+
+    private static bool SameAttempt(CueStep candidate, CueStep current) =>
+        candidate.CueId == current.CueId && candidate.Repetition == current.Repetition;
+
+    private CuePhase ToPhase(CueStep step, long startedAt) => new(
         CueId: step.CueId,
         PhaseName: step.Phase,
         Dims: step.Dims,
@@ -146,7 +199,8 @@ public sealed class GuidedCaptureRoutine
         DurationSeconds: step.DurationSeconds,
         StartTimestamp: startedAt,
         Level: step.Level,
-        RepetitionIndex: step.Repetition);
+        RepetitionIndex: step.Repetition,
+        AttemptIndex: _attempts.GetValueOrDefault((step.CueId, step.Repetition)));
 
     // =============================================================================================
     // Routine construction
@@ -192,7 +246,7 @@ public sealed class GuidedCaptureRoutine
             // a rest so the settled part still supplies known-closed frames rather than being
             // wasted. In a multi-cue pass it doubles as "get ready for the next expression".
             steps.Add(new CueStep($"{cue.Id}LeadIn", "rest", dims, neutral, neutral,
-                timing.LeadInSeconds, 0f, 0, cue.LeadInInstruction));
+                timing.LeadInSeconds, 0f, 0, cue.LeadInInstruction, cue.DisplayName, repetitions));
 
             for (var rep = 0; rep < repetitions; rep++)
             {
@@ -207,16 +261,20 @@ public sealed class GuidedCaptureRoutine
                     var target = cue.TargetAt(level);
 
                     steps.Add(new CueStep(id, "transition", dims, neutral, target,
-                        timing.TransitionSeconds, level, rep, cue.ApproachInstruction(level)));
+                        timing.TransitionSeconds, level, rep, cue.ApproachInstruction(level),
+                        cue.DisplayName, repetitions));
 
                     steps.Add(new CueStep(id, "hold", dims, target, target,
-                        timing.HoldSeconds, level, rep, cue.HoldInstruction(level)));
+                        timing.HoldSeconds, level, rep, cue.HoldInstruction(level),
+                        cue.DisplayName, repetitions));
 
                     steps.Add(new CueStep(id, "transition", dims, target, neutral,
-                        timing.TransitionSeconds, level, rep, "And relax..."));
+                        timing.TransitionSeconds, level, rep, "And relax...",
+                        cue.DisplayName, repetitions));
 
                     steps.Add(new CueStep(id, "rest", dims, neutral, neutral,
-                        timing.RestSeconds, level, rep, cue.RestInstruction));
+                        timing.RestSeconds, level, rep, cue.RestInstruction,
+                        cue.DisplayName, repetitions));
                 }
             }
         }

@@ -58,11 +58,23 @@ public sealed record PersonalModelLoadResult(bool Success, string Message)
     public static PersonalModelLoadResult Fail(string message) => new(false, message);
 }
 
+public enum PersonalModelArtifactSource
+{
+    CanonicalSlot,
+    LegacySlot,
+    ConfiguredPath,
+    PreviousFallback,
+    TrainingRun
+}
+
+/// <summary>One independently selectable personal-model artifact.</summary>
 public sealed record AvailablePersonalModel(
     string Kind,
     string Label,
     string Path,
-    PersonalModelMetadata Metadata);
+    PersonalModelMetadata Metadata,
+    PersonalModelArtifactSource Source = PersonalModelArtifactSource.CanonicalSlot,
+    PersonalTrainingRun? TrainingRun = null);
 
 /// <summary>
 /// Owns the lifecycle of the personal model: settings, loading, validation, hot reload.
@@ -73,6 +85,16 @@ public sealed record AvailablePersonalModel(
 /// </summary>
 public sealed class PersonalModelManager : IDisposable
 {
+    private sealed record ModelCandidate(
+        string Path,
+        PersonalModelArtifactSource Source,
+        PersonalTrainingRun? TrainingRun = null);
+
+    private sealed record PreparedModel(
+        PersonalModelLoadResult Result,
+        IPersonalCorrector? Corrector = null,
+        string? FullPath = null);
+
     public const string EnabledSetting = "PersonalModel_Enabled";
     public const string PathSetting = "PersonalModel_Path";
     public const string BlendSetting = "PersonalModel_Blend";
@@ -123,6 +145,15 @@ public sealed class PersonalModelManager : IDisposable
 
     public bool IsActive => _corrector is { HasFailed: false };
 
+    /// <summary>The configured artifact the user requested, even if runtime loading fell back.</summary>
+    public string RequestedModelPath => ModelPath;
+
+    /// <summary>The exact ONNX file feeding the installed corrector; null on stock/failure.</summary>
+    public string? ActiveModelPath { get; private set; }
+
+    /// <summary>Why Requested and Active differ, without hiding the actually running model.</summary>
+    public string? FallbackReason { get; private set; }
+
     public string ModelPath
     {
         get
@@ -140,6 +171,7 @@ public sealed class PersonalModelManager : IDisposable
 
     /// <summary>True when the currently loaded stock face runner exposes model C's features.</summary>
     public bool EmbeddingRunnerAvailable => _facePipelineManager.EmbeddingAvailable;
+    public string StockInferenceProvider => _facePipelineManager.InferenceProvider;
 
     /// <summary>
     /// Persists the on/off state. Does not load or unload by itself - call
@@ -150,57 +182,123 @@ public sealed class PersonalModelManager : IDisposable
     public void SetModelPath(string path) => _settings.SaveSetting(PathSetting, path);
 
     /// <summary>
-    /// Finds independently installed A/B/C slots plus the pre-slot legacy file. Invalid or unknown
-    /// adapters are omitted; actual runtime validation still happens when the user presses Use.
+    /// Finds independently installed A/B/C slots, rollback files and every immutable completed
+    /// training artifact. Candidates are deduplicated by exact path only: several B runs are several
+    /// genuinely selectable models, not one family entry that silently hides history.
     /// </summary>
-    public IReadOnlyList<AvailablePersonalModel> DiscoverAvailableModels()
+    public IReadOnlyList<AvailablePersonalModel> DiscoverAvailableModels(
+        string? trainingRunsDirectory = null,
+        string? datasetRoot = null)
     {
+        var effectiveRunsDirectory = trainingRunsDirectory ??
+                                     PersonalizationEnvironment.TrainingRunsDirectory;
+        var effectiveDatasetRoot = datasetRoot ?? PersonalizationPaths.DatasetRoot;
         var primaryCandidates = TrainingModelChoice.Options
             .Select(option => PersonalizationPaths.PersonalModelPath(option.Kind))
             .Append(PersonalizationPaths.DefaultPersonalModelPath)
             .Append(ModelPath)
-            .Distinct(StringComparer.OrdinalIgnoreCase);
-        var candidates = primaryCandidates
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var installedCandidates = primaryCandidates
             // Earlier builds kept the outgoing trained adapter as .previous.onnx. Treat it as an
             // available model too so an existing A/B pair immediately appears in the new selector.
             .SelectMany(path => new[] { path, PreviousModelPath(path) })
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var fingerprint = string.Join("|", candidates.Select(path =>
-        {
-            var file = new FileInfo(path);
-            return file.Exists ? $"{path}:{file.Length}:{file.LastWriteTimeUtc.Ticks}" : $"{path}:missing";
-        }));
+        var fingerprint = string.Join("|", installedCandidates.Select(FileFingerprint)) + "|" +
+                          TrainingRunHistory.Fingerprint(effectiveRunsDirectory, effectiveDatasetRoot);
 
         // Reading ONNX metadata creates an inference session. Cache the catalog until one of the
-        // candidate files changes so merely opening or refreshing the page cannot burn CPU.
+        // candidate or provenance files changes so merely refreshing the page cannot burn CPU.
         if (string.Equals(fingerprint, _modelCatalogFingerprint, StringComparison.Ordinal))
             return _modelCatalog;
 
-        var byKind = new Dictionary<string, AvailablePersonalModel>(StringComparer.OrdinalIgnoreCase);
+        var candidates = new List<ModelCandidate>();
+        var candidateIndices = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var path in candidates.Where(File.Exists))
+        void AddCandidate(
+            string path,
+            PersonalModelArtifactSource source,
+            PersonalTrainingRun? trainingRun = null)
+        {
+            string fullPath;
+            try { fullPath = Path.GetFullPath(path); }
+            catch (Exception) { return; }
+
+            if (candidateIndices.TryGetValue(fullPath, out var existingIndex))
+            {
+                // A selected historical path is also the configured path. Keep its richer immutable
+                // provenance while retaining its original position in the selector.
+                if (trainingRun != null)
+                    candidates[existingIndex] = new ModelCandidate(
+                        fullPath, PersonalModelArtifactSource.TrainingRun, trainingRun);
+                return;
+            }
+
+            candidateIndices.Add(fullPath, candidates.Count);
+            candidates.Add(new ModelCandidate(fullPath, source, trainingRun));
+        }
+
+        foreach (var option in TrainingModelChoice.Options)
+            AddCandidate(PersonalizationPaths.PersonalModelPath(option.Kind),
+                PersonalModelArtifactSource.CanonicalSlot);
+        AddCandidate(PersonalizationPaths.DefaultPersonalModelPath,
+            PersonalModelArtifactSource.LegacySlot);
+        AddCandidate(ModelPath, PersonalModelArtifactSource.ConfiguredPath);
+
+        foreach (var path in primaryCandidates)
+            AddCandidate(PreviousModelPath(path), PersonalModelArtifactSource.PreviousFallback);
+
+        // Discover() is independently useful to the normal UI and returns newest first. Appending
+        // in that order preserves the familiar canonical A/B/C entries while making all historical
+        // artifacts available immediately afterwards.
+        foreach (var run in TrainingRunHistory.Discover(effectiveRunsDirectory, effectiveDatasetRoot))
+            AddCandidate(run.ModelPath, PersonalModelArtifactSource.TrainingRun, run);
+
+        var catalog = new List<AvailablePersonalModel>();
+
+        foreach (var path in candidates.Where(candidate => File.Exists(candidate.Path)))
         {
             try
             {
-                using var session = new InferenceSession(path);
+                using var session = new InferenceSession(path.Path);
                 var metadata = PersonalModelMetadata.FromSession(session);
                 var option = TrainingModelChoice.ForAdapterType(metadata.AdapterType);
-                if (option == null || byKind.ContainsKey(option.Kind))
+                if (option == null)
                     continue;
 
-                byKind[option.Kind] = new AvailablePersonalModel(
-                    option.Kind, option.Label, path, metadata);
+                // Full structural/schema validation, without treating a temporarily disabled Model
+                // C embedding runner as an incompatible artifact. The selector knows how to enable
+                // that runner before Use; malformed tensors or stale expression ordering stay out.
+                var validation = Validate(session, requireEmbeddingRunner: false);
+                if (!validation.Success)
+                {
+                    _logger.LogDebug(
+                        "Ignoring incompatible personal-model candidate {Path}: {Reason}",
+                        path.Path, validation.Message);
+                    continue;
+                }
+
+                catalog.Add(new AvailablePersonalModel(
+                    option.Kind,
+                    CatalogLabel(option, path),
+                    path.Path,
+                    metadata,
+                    path.Source,
+                    path.TrainingRun));
             }
             catch (Exception ex)
             {
-                _logger.LogDebug(ex, "Ignoring unreadable personal-model candidate {Path}", path);
+                _logger.LogDebug(ex, "Ignoring unreadable personal-model candidate {Path}", path.Path);
             }
         }
 
-        _modelCatalog = TrainingModelChoice.Options
-            .Where(option => byKind.ContainsKey(option.Kind))
-            .Select(option => byKind[option.Kind])
+        // The normal picker is a history browser, so chronology wins over canonical-slot grouping.
+        // A/B/C remain explicit in every label and the exact artifact path remains the selection key.
+        _modelCatalog = catalog
+            .OrderByDescending(ModelSortTimestamp)
+            .ThenByDescending(model => model.TrainingRun?.RunId ?? string.Empty, StringComparer.Ordinal)
+            .ThenBy(model => model.Path, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         _modelCatalogFingerprint = fingerprint;
         return _modelCatalog;
@@ -208,9 +306,60 @@ public sealed class PersonalModelManager : IDisposable
 
     public async Task<PersonalModelLoadResult> SelectModelAsync(string path)
     {
-        SetModelPath(path);
-        SetEnabled(true);
-        return await ReloadAsync();
+        await _reloadLock.WaitAsync();
+        try
+        {
+            // A picker choice is a proposed replacement, not permission to tear down the model
+            // that is already working. Open and validate it first so a corrupt, incompatible or
+            // temporarily unavailable artifact cannot persist a bad path or drop the live pipeline
+            // back to stock behavior.
+            var prepared = await Task.Run(() => PrepareModel(path));
+            if (!prepared.Result.Success)
+            {
+                LastResult = prepared.Result;
+                _logger.LogWarning(
+                    "Personal model selection rejected; keeping the active model: {Message}",
+                    prepared.Result.Message);
+                return prepared.Result;
+            }
+
+            var previousConfiguredPath = _settings.ReadSetting<string>(PathSetting) ?? "";
+            var previousEnabled = Enabled;
+            try
+            {
+                SetModelPath(path);
+                SetEnabled(true);
+                InstallPreparedModel(prepared);
+            }
+            catch (Exception ex)
+            {
+                RestoreSelectionSettings(previousConfiguredPath, previousEnabled);
+                try
+                {
+                    prepared.Corrector?.Dispose();
+                }
+                catch (Exception disposeException)
+                {
+                    _logger.LogWarning(disposeException,
+                        "Could not dispose a personal-model candidate after a failed selection");
+                }
+
+                LastResult = PersonalModelLoadResult.Fail(
+                    $"Could not select {Path.GetFileName(path)}: {ex.Message}");
+                _logger.LogWarning(ex,
+                    "Personal model selection failed while committing; keeping the active model");
+                return LastResult;
+            }
+
+            FallbackReason = null;
+            LastResult = prepared.Result;
+            _logger.LogInformation("Personal model active: {Message}", LastResult.Message);
+            return LastResult;
+        }
+        finally
+        {
+            _reloadLock.Release();
+        }
     }
 
     /// <summary>
@@ -229,9 +378,11 @@ public sealed class PersonalModelManager : IDisposable
     {
         get
         {
-            var value = _settings.ReadSetting<float>(BlendSetting);
-            // A brand-new settings file reads 0, which would make an enabled model look broken.
-            return value <= 0f ? 1f : Math.Clamp(value, 0f, 1f);
+            // The explicit default distinguishes a brand-new settings file from a deliberately
+            // persisted 0% blend. Zero is the exact Stock side of the UI comparison and must remain
+            // zero after restart rather than silently becoming 100% Personal.
+            var value = _settings.ReadSetting<float>(BlendSetting, 1f);
+            return Math.Clamp(value, 0f, 1f);
         }
         set
         {
@@ -252,6 +403,7 @@ public sealed class PersonalModelManager : IDisposable
         try
         {
             Uninstall();
+            FallbackReason = null;
 
             if (!Enabled)
             {
@@ -277,6 +429,7 @@ public sealed class PersonalModelManager : IDisposable
                     var fallback = await Task.Run(() => TryLoad(previous));
                     if (fallback.Success)
                     {
+                        FallbackReason = result.Message;
                         LastResult = PersonalModelLoadResult.Ok(
                             $"{fallback.Message} (using the previous model: {result.Message})");
                         _logger.LogInformation("Personal model active: {Message}", LastResult.Message);
@@ -302,12 +455,41 @@ public sealed class PersonalModelManager : IDisposable
 
     private PersonalModelLoadResult TryLoad(string path)
     {
+        var prepared = PrepareModel(path);
+        if (!prepared.Result.Success)
+            return prepared.Result;
+
+        try
+        {
+            InstallPreparedModel(prepared);
+            return prepared.Result;
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                prepared.Corrector?.Dispose();
+            }
+            catch (Exception disposeException)
+            {
+                _logger.LogWarning(disposeException,
+                    "Could not dispose a personal model after installation failed");
+            }
+
+            return PersonalModelLoadResult.Fail(
+                $"Could not load {Path.GetFileName(path)}: {ex.Message}");
+        }
+    }
+
+    private PreparedModel PrepareModel(string path)
+    {
         if (!File.Exists(path))
-            return PersonalModelLoadResult.Fail($"No personal model at {path}.");
+            return new PreparedModel(PersonalModelLoadResult.Fail($"No personal model at {path}."));
 
         InferenceSession? session = null;
         try
         {
+            var fullPath = Path.GetFullPath(path);
             var options = new SessionOptions();
             options.GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL;
             options.InterOpNumThreads = 1;
@@ -322,25 +504,82 @@ public sealed class PersonalModelManager : IDisposable
             if (!validation.Success)
             {
                 session.Dispose();
-                return validation;
+                session = null;
+                return new PreparedModel(validation);
             }
 
             var metadata = PersonalModelMetadata.FromSession(session);
+            var blend = Blend;
 
             IPersonalCorrector corrector = RequiresEmbedding(metadata)
-                ? new EmbeddingModelCorrector(session, metadata, _logger) { Blend = Blend }
-                : new PersonalModelCorrector(session, metadata, _logger) { Blend = Blend };
+                ? new EmbeddingModelCorrector(session, metadata, _logger) { Blend = blend }
+                : new PersonalModelCorrector(session, metadata, _logger) { Blend = blend };
+            session = null; // The corrector now owns the inference session.
 
-            _corrector = corrector;
-            _facePipelineManager.SetCorrector(corrector);
-
-            return PersonalModelLoadResult.Ok(
-                $"{metadata.AdapterType} (trained {metadata.TrainedUtc ?? "unknown"}), blend {Blend:P0}");
+            return new PreparedModel(
+                PersonalModelLoadResult.Ok(
+                    $"{metadata.AdapterType} (trained {metadata.TrainedUtc ?? "unknown"}), " +
+                    $"blend {blend:P0}"),
+                corrector,
+                fullPath);
         }
         catch (Exception ex)
         {
             session?.Dispose();
-            return PersonalModelLoadResult.Fail($"Could not load {Path.GetFileName(path)}: {ex.Message}");
+            return new PreparedModel(PersonalModelLoadResult.Fail(
+                $"Could not load {Path.GetFileName(path)}: {ex.Message}"));
+        }
+    }
+
+    private void InstallPreparedModel(PreparedModel prepared)
+    {
+        var corrector = prepared.Corrector
+            ?? throw new InvalidOperationException("A successful model preparation had no corrector.");
+        var fullPath = prepared.FullPath
+            ?? throw new InvalidOperationException("A successful model preparation had no path.");
+
+        // Publish the replacement before disposing the old session. SetCorrector is a volatile
+        // assignment, so the next pipeline tick sees either complete corrector, never a stock gap.
+        var previous = _corrector;
+        _facePipelineManager.SetCorrector(corrector);
+        _corrector = corrector;
+        ActiveModelPath = fullPath;
+
+        if (previous == null || ReferenceEquals(previous, corrector))
+            return;
+
+        try
+        {
+            previous.Dispose();
+        }
+        catch (Exception ex)
+        {
+            // The new corrector is already live. A cleanup failure must not roll that successful
+            // swap back or make the picker claim selection failed.
+            _logger.LogWarning(ex, "Could not dispose the replaced personal-model session");
+        }
+    }
+
+    private void RestoreSelectionSettings(string path, bool enabled)
+    {
+        try
+        {
+            _settings.SaveSetting(PathSetting, path);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Could not restore the personal-model path after a failed selection commit");
+        }
+
+        try
+        {
+            _settings.SaveSetting(EnabledSetting, enabled);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Could not restore the personal-model enabled state after a failed selection commit");
         }
     }
 
@@ -349,7 +588,9 @@ public sealed class PersonalModelManager : IDisposable
     /// model trained against a different expression ordering would apply every learned correction
     /// to the wrong expression, which looks like erratic tracking rather than an error.
     /// </summary>
-    private PersonalModelLoadResult Validate(InferenceSession session)
+    private PersonalModelLoadResult Validate(
+        InferenceSession session,
+        bool requireEmbeddingRunner = true)
     {
         var metadata = PersonalModelMetadata.FromSession(session);
         var n = PersonalizationSchema.ExpressionCount;
@@ -405,7 +646,7 @@ public sealed class PersonalModelManager : IDisposable
 
             // Refused rather than run degraded: without the runner there is no embedding to feed it,
             // and a model C adapter with no features is just a slower passthrough pretending to work.
-            if (!_facePipelineManager.EmbeddingAvailable)
+            if (requireEmbeddingRunner && !_facePipelineManager.EmbeddingAvailable)
             {
                 return PersonalModelLoadResult.Fail(
                     "This model needs the stock visual embedding, which is not switched on. " +
@@ -462,6 +703,58 @@ public sealed class PersonalModelManager : IDisposable
 
     private static string Shorten(string hash) => hash.Length <= 12 ? hash : hash[..12] + "...";
 
+    private static string FileFingerprint(string path)
+    {
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            var file = new FileInfo(fullPath);
+            return file.Exists
+                ? $"{fullPath}:{file.Length}:{file.LastWriteTimeUtc.Ticks}"
+                : $"{fullPath}:missing";
+        }
+        catch (Exception)
+        {
+            return $"{path}:invalid";
+        }
+    }
+
+    private static DateTimeOffset ModelSortTimestamp(AvailablePersonalModel model)
+    {
+        if (model.TrainingRun?.TrainedUtc is { } runTimestamp)
+            return runTimestamp;
+        if (DateTimeOffset.TryParse(model.Metadata.TrainedUtc, out var metadataTimestamp))
+            return metadataTimestamp;
+        try
+        {
+            return new DateTimeOffset(File.GetLastWriteTimeUtc(model.Path));
+        }
+        catch (Exception)
+        {
+            return DateTimeOffset.MinValue;
+        }
+    }
+
+    private static string CatalogLabel(TrainingModelChoice.Option option, ModelCandidate candidate)
+    {
+        if (candidate.TrainingRun is { } run)
+        {
+            var trained = run.TrainedUtc is { } timestamp
+                ? timestamp.UtcDateTime.ToString("yyyy-MM-dd HH:mm 'UTC'")
+                : "time unknown";
+            return $"{option.Kind.ToUpperInvariant()} — {trained} — {run.RunId}";
+        }
+
+        return candidate.Source switch
+        {
+            PersonalModelArtifactSource.LegacySlot => $"{option.Label} — Legacy slot",
+            PersonalModelArtifactSource.ConfiguredPath => $"{option.Label} — Configured file",
+            PersonalModelArtifactSource.PreviousFallback =>
+                $"{option.Label} — Previous fallback ({Path.GetFileName(candidate.Path)})",
+            _ => option.Label
+        };
+    }
+
     /// <summary>Removes the corrector so the pipeline returns to pure stock output.</summary>
     public void Uninstall()
     {
@@ -470,6 +763,7 @@ public sealed class PersonalModelManager : IDisposable
 
         var previous = _corrector;
         _corrector = null;
+        ActiveModelPath = null;
         previous?.Dispose();
     }
 

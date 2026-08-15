@@ -173,6 +173,7 @@ public sealed class FrameLabel
 
         [JsonPropertyName("level")] public float Level { get; init; }
         [JsonPropertyName("rep")] public int Repetition { get; init; }
+        [JsonPropertyName("attempt")] public int Attempt { get; init; }
 
         /// <summary>"avatar" when the VRChat avatar was the visual teacher, otherwise "bar".</summary>
         [JsonPropertyName("source")] public string Source { get; init; } = "bar";

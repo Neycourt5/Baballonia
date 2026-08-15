@@ -63,6 +63,45 @@ public sealed record DatasetStatus(
     }
 }
 
+/// <summary>One session as the trainer will see it, without loading camera pixels into memory.</summary>
+public sealed record TrainingDatasetSession(
+    string Id,
+    SessionType Type,
+    int Frames,
+    IReadOnlySet<int> GuidedPositiveDims,
+    IReadOnlySet<int> CorrectedDims);
+
+/// <summary>Counts for one evidence type, split exactly like <c>dataset.split_sessions</c>.</summary>
+public sealed record TrainingDatasetTypeSummary(
+    SessionType Type,
+    int DiscoveredSessions,
+    int DiscoveredFrames,
+    int TrainingSessions,
+    int TrainingFrames,
+    int HeldOutSessions,
+    int HeldOutFrames);
+
+/// <summary>
+/// A cheap, read-only preview of the cumulative corpus and the default session-level split.
+/// This is intentionally a C# mirror of Python's <c>split_sessions</c>: sorted chronologically,
+/// hold out the newest session of each type only when that type has at least two sessions.
+/// Tests on both sides pin the rule so the normal UI can say what will actually be optimized.
+/// </summary>
+public sealed record TrainingDatasetInventory(
+    IReadOnlyList<TrainingDatasetSession> Discovered,
+    IReadOnlyList<TrainingDatasetSession> Training,
+    IReadOnlyList<TrainingDatasetSession> HeldOut,
+    IReadOnlyList<TrainingDatasetTypeSummary> ByType,
+    IReadOnlyList<string> GuidedTrainingExpressions,
+    IReadOnlyDictionary<string, int> CorrectionCounts,
+    string? LatestGuidedSessionId,
+    bool LatestGuidedIsTraining)
+{
+    public int DiscoveredFrames => Discovered.Sum(x => x.Frames);
+    public int TrainingFrames => Training.Sum(x => x.Frames);
+    public int HeldOutFrames => HeldOut.Sum(x => x.Frames);
+}
+
 /// <summary>Coverage of model C's visual-feature sidecars across recorded sessions.</summary>
 public sealed record EmbeddingDatasetStatus(int Sessions, int ReadySessions, string Summary)
 {
@@ -159,6 +198,203 @@ public sealed class PersonalizationEnvironment
         }
 
         return new DatasetStatus(neutral, speech, guided, frames, correction);
+    }
+
+    /// <summary>
+    /// Inspects every cumulative session and previews the trainer's default split. No recording is
+    /// modified, excluded, or moved. A malformed session is skipped here just as it cannot be
+    /// meaningfully described in the UI; the Python loader still remains the final validation gate.
+    /// </summary>
+    public static TrainingDatasetInventory InspectTrainingInventory(string? datasetRoot = null)
+    {
+        var root = datasetRoot ?? PersonalizationPaths.DatasetRoot;
+        if (!Directory.Exists(root))
+            return EmptyInventory();
+
+        var sessions = new List<TrainingDatasetSession>();
+        foreach (var directory in Directory.EnumerateDirectories(root).OrderBy(Path.GetFileName,
+                     StringComparer.Ordinal))
+        {
+            var metadataPath = Path.Combine(directory, "session.json");
+            if (!File.Exists(metadataPath) || !TryReadSessionType(directory, metadataPath, out var type))
+                continue;
+
+            var frames = CountUsableFrames(directory);
+            var guidedDims = type == SessionType.Guided
+                ? ReadGuidedPositiveDims(directory)
+                : new HashSet<int>();
+            var correctedDims = type == SessionType.Correction
+                ? ReadCorrectionDims(directory)
+                : new HashSet<int>();
+
+            sessions.Add(new TrainingDatasetSession(
+                Path.GetFileName(directory), type, frames, guidedDims, correctedDims));
+        }
+
+        if (sessions.Count == 0)
+            return EmptyInventory();
+
+        var heldOutIds = sessions
+            .GroupBy(x => x.Type)
+            .Where(group => group.Count() > 1)
+            .Select(group => group.Last().Id)
+            .ToHashSet(StringComparer.Ordinal);
+        var training = sessions.Where(x => !heldOutIds.Contains(x.Id)).ToArray();
+        var heldOut = sessions.Where(x => heldOutIds.Contains(x.Id)).ToArray();
+
+        var byType = Enum.GetValues<SessionType>()
+            .Select(type =>
+            {
+                var discovered = sessions.Where(x => x.Type == type).ToArray();
+                var train = training.Where(x => x.Type == type).ToArray();
+                var val = heldOut.Where(x => x.Type == type).ToArray();
+                return new TrainingDatasetTypeSummary(
+                    type,
+                    discovered.Length, discovered.Sum(x => x.Frames),
+                    train.Length, train.Sum(x => x.Frames),
+                    val.Length, val.Sum(x => x.Frames));
+            })
+            .ToArray();
+
+        var guidedTrainingExpressions = training
+            .Where(x => x.Type == SessionType.Guided)
+            .SelectMany(x => x.GuidedPositiveDims)
+            .Where(dim => dim >= 0 && dim < PersonalizationSchema.ExpressionCount)
+            .Distinct()
+            .Order()
+            .Select(dim => PersonalizationSchema.ExpressionNames[dim])
+            .ToArray();
+        var correctionCounts = sessions
+            .Where(x => x.Type == SessionType.Correction)
+            .SelectMany(x => x.CorrectedDims)
+            .Where(dim => dim >= 0 && dim < PersonalizationSchema.ExpressionCount)
+            .GroupBy(dim => PersonalizationSchema.ExpressionNames[dim])
+            .ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
+        var latestGuided = sessions.LastOrDefault(x => x.Type == SessionType.Guided);
+
+        return new TrainingDatasetInventory(
+            sessions, training, heldOut, byType, guidedTrainingExpressions, correctionCounts,
+            latestGuided?.Id,
+            latestGuided != null && !heldOutIds.Contains(latestGuided.Id));
+    }
+
+    private static TrainingDatasetInventory EmptyInventory() => new(
+        [], [], [], [], [], new Dictionary<string, int>(), null, false);
+
+    private static bool TryReadSessionType(string directory, string metadataPath, out SessionType type)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(metadataPath));
+            if (document.RootElement.TryGetProperty("SessionType", out var value) &&
+                Enum.TryParse(value.GetString(), ignoreCase: true, out type))
+                return true;
+        }
+        catch (Exception)
+        {
+            // The folder suffix remains a safe fallback for older/truncated recorder metadata.
+        }
+
+        var suffix = Path.GetFileName(directory).Split('_').LastOrDefault();
+        return Enum.TryParse(suffix, ignoreCase: true, out type);
+    }
+
+    private static int CountUsableFrames(string sessionDirectory)
+    {
+        var labels = Path.Combine(sessionDirectory, "labels.jsonl");
+        var frames = Path.Combine(sessionDirectory, "frames");
+        if (!File.Exists(labels) || !Directory.Exists(frames))
+            return Directory.Exists(frames) ? Directory.EnumerateFiles(frames, "*.jpg").Count() : 0;
+
+        var count = 0;
+        foreach (var line in File.ReadLines(labels))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            try
+            {
+                using var document = JsonDocument.Parse(line.TrimStart('\uFEFF'));
+                if (!document.RootElement.TryGetProperty("i", out var index) ||
+                    index.ValueKind != JsonValueKind.Number ||
+                    !index.TryGetInt32(out var frameIndex) || frameIndex < 0)
+                    continue;
+                if (File.Exists(Path.Combine(frames, $"{frameIndex:D6}.jpg"))) count++;
+            }
+            catch (Exception)
+            {
+                // Inventory is a cleanup aid, not the strict training validator. One scuffed line
+                // must not take down the page that gives the user its Show-in-Folder button. The
+                // Python loader will report the corrupt line precisely if training is attempted.
+            }
+        }
+
+        return count;
+    }
+
+    private static IReadOnlySet<int> ReadGuidedPositiveDims(string sessionDirectory)
+    {
+        var result = new HashSet<int>();
+        var labels = Path.Combine(sessionDirectory, "labels.jsonl");
+        if (!File.Exists(labels)) return result;
+
+        foreach (var line in File.ReadLines(labels))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            try
+            {
+                using var document = JsonDocument.Parse(line.TrimStart('\uFEFF'));
+                if (!document.RootElement.TryGetProperty("cue", out var cue) ||
+                    cue.ValueKind != JsonValueKind.Object ||
+                    !cue.TryGetProperty("phase", out var phase) ||
+                    phase.ValueKind != JsonValueKind.String ||
+                    !string.Equals(phase.GetString(), "hold", StringComparison.OrdinalIgnoreCase) ||
+                    !cue.TryGetProperty("dims", out var dims) ||
+                    dims.ValueKind != JsonValueKind.Array ||
+                    !cue.TryGetProperty("target", out var target) ||
+                    target.ValueKind != JsonValueKind.Array)
+                    continue;
+
+                foreach (var dimElement in dims.EnumerateArray())
+                {
+                    if (dimElement.ValueKind != JsonValueKind.Number ||
+                        !dimElement.TryGetInt32(out var dim) ||
+                        dim < 0 || dim >= target.GetArrayLength())
+                        continue;
+                    var targetElement = target[dim];
+                    if (targetElement.ValueKind == JsonValueKind.Number &&
+                        targetElement.TryGetSingle(out var targetValue) && targetValue > 0f)
+                        result.Add(dim);
+                }
+            }
+            catch (Exception)
+            {
+                // Keep the inventory usable; training itself remains strict.
+            }
+        }
+
+        return result;
+    }
+
+    private static IReadOnlySet<int> ReadCorrectionDims(string sessionDirectory)
+    {
+        var result = new HashSet<int>();
+        var path = Path.Combine(sessionDirectory, "correction.json");
+        if (!File.Exists(path)) return result;
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            var root = document.RootElement;
+            if (!root.TryGetProperty("CorrectedDims", out var dims) &&
+                !root.TryGetProperty("corrected_dims", out dims))
+                return result;
+            foreach (var dim in dims.EnumerateArray()) result.Add(dim.GetInt32());
+        }
+        catch (Exception)
+        {
+            // A malformed correction is never invented into the summary or treated as all-neutral.
+        }
+
+        return result;
     }
 
     /// <summary>

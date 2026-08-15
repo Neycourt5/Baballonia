@@ -41,20 +41,40 @@ public sealed class DatasetRecorderService : IDisposable
     private readonly IFacePipelineEventBus _eventBus;
     private readonly ILogger<DatasetRecorderService> _logger;
     private readonly IReadOnlyCueStateSource? _cueState;
+    private readonly TrainingCaptureGate? _captureGate;
 
     private readonly Action<FacePipelineEvents.NewRawExpressionsEvent> _handler;
     private readonly object _sessionLock = new();
 
     private RecordingSession? _session;
+    private IDisposable? _captureLease;
+    private long _lastSourceFrameTimestamp;
+
+    /// <summary>
+    /// A positive readiness signal from the same post-transform/inference event that recordings
+    /// consume. Camera selection or a running capture object alone is insufficient: guided labels
+    /// must not start until a real, usable face frame has reached the recorder tap.
+    /// </summary>
+    public bool HasRecentSourceFrame
+    {
+        get
+        {
+            var last = Interlocked.Read(ref _lastSourceFrameTimestamp);
+            return last != 0 &&
+                   Stopwatch.GetElapsedTime(last, Stopwatch.GetTimestamp()) <= TimeSpan.FromSeconds(2);
+        }
+    }
 
     public DatasetRecorderService(
         IFacePipelineEventBus eventBus,
         ILogger<DatasetRecorderService> logger,
-        IReadOnlyCueStateSource? cueState = null)
+        IReadOnlyCueStateSource? cueState = null,
+        TrainingCaptureGate? captureGate = null)
     {
         _eventBus = eventBus;
         _logger = logger;
         _cueState = cueState;
+        _captureGate = captureGate;
 
         _handler = OnRawExpressions;
         _eventBus.Subscribe(_handler);
@@ -79,38 +99,68 @@ public sealed class DatasetRecorderService : IDisposable
     /// Starts a session and returns its id. Metadata is written immediately so a crashed session
     /// still leaves an interpretable directory.
     /// </summary>
-    public string StartSession(SessionType type, SessionMetadata.CameraGeometry? camera = null, string? notes = null)
+    public string StartSession(
+        SessionType type,
+        SessionMetadata.CameraGeometry? camera = null,
+        string? notes = null,
+        bool requireRecentSourceFrame = false)
     {
         lock (_sessionLock)
         {
             if (_session != null)
                 throw new InvalidOperationException($"Session '{_session.SessionId}' is already recording.");
 
-            var startedUtc = DateTime.UtcNow;
-            var sessionId = PersonalizationPaths.NewSessionId(type, startedUtc);
-
-            Directory.CreateDirectory(PersonalizationPaths.FramesDirectory(sessionId));
-
-            var metadata = new SessionMetadata
+            // UI enablement is advisory and can become stale between frames. Callers that are
+            // creating user-facing recordings opt into this backend check so a stopped camera can
+            // never create a zero-frame session directory merely because a button stayed enabled.
+            if (requireRecentSourceFrame && !HasRecentSourceFrame)
             {
-                SessionId = sessionId,
-                SessionType = type.ToString(),
-                StartedUtc = startedUtc.ToString("o"),
-                AppVersion = typeof(DatasetRecorderService).Assembly.GetName().Version?.ToString() ?? "unknown",
-                ImageWidth = 0,
-                ImageHeight = 0,
-                JpegQuality = JpegQuality,
-                Camera = camera,
-                Notes = notes
-            };
+                throw new InvalidOperationException(
+                    "No fresh face-camera inference frame is available. Start the face camera, " +
+                    "wait for tracking to move, then try again.");
+            }
 
-            _session = new RecordingSession(sessionId, metadata, _logger);
-            _session.Start();
+            IDisposable? captureLease = null;
+            if (_captureGate != null &&
+                !_captureGate.TryEnter($"a {type} training recording", out captureLease, out var message))
+            {
+                throw new InvalidOperationException(message);
+            }
 
-            _logger.LogInformation("Personalization: recording session {SessionId} to {Path}",
-                sessionId, PersonalizationPaths.SessionDirectory(sessionId));
+            try
+            {
+                var startedUtc = DateTime.UtcNow;
+                var sessionId = PersonalizationPaths.NewSessionId(type, startedUtc);
 
-            return sessionId;
+                Directory.CreateDirectory(PersonalizationPaths.FramesDirectory(sessionId));
+
+                var metadata = new SessionMetadata
+                {
+                    SessionId = sessionId,
+                    SessionType = type.ToString(),
+                    StartedUtc = startedUtc.ToString("o"),
+                    AppVersion = typeof(DatasetRecorderService).Assembly.GetName().Version?.ToString() ?? "unknown",
+                    ImageWidth = 0,
+                    ImageHeight = 0,
+                    JpegQuality = JpegQuality,
+                    Camera = camera,
+                    Notes = notes
+                };
+
+                _session = new RecordingSession(sessionId, metadata, _logger);
+                _session.Start();
+                _captureLease = captureLease;
+
+                _logger.LogInformation("Personalization: recording session {SessionId} to {Path}",
+                    sessionId, PersonalizationPaths.SessionDirectory(sessionId));
+
+                return sessionId;
+            }
+            catch
+            {
+                captureLease?.Dispose();
+                throw;
+            }
         }
     }
 
@@ -121,11 +171,16 @@ public sealed class DatasetRecorderService : IDisposable
     public async Task<SessionSummary?> StopSessionAsync()
     {
         RecordingSession? session;
+        IDisposable? captureLease;
         lock (_sessionLock)
         {
             session = _session;
             _session = null;
+            captureLease = _captureLease;
+            _captureLease = null;
         }
+
+        captureLease?.Dispose();
 
         if (session == null)
             return null;
@@ -151,6 +206,10 @@ public sealed class DatasetRecorderService : IDisposable
     /// </summary>
     private void OnRawExpressions(FacePipelineEvents.NewRawExpressionsEvent e)
     {
+        if (e.transformedFrame is { } frame && !frame.Empty() &&
+            e.rawResult.Length >= PersonalizationSchema.ExpressionCount)
+            Interlocked.Exchange(ref _lastSourceFrameTimestamp, Stopwatch.GetTimestamp());
+
         RecordingSession? session;
         lock (_sessionLock) session = _session;
 
@@ -173,12 +232,16 @@ public sealed class DatasetRecorderService : IDisposable
         _eventBus.Unsubscribe(_handler);
 
         RecordingSession? session;
+        IDisposable? captureLease;
         lock (_sessionLock)
         {
             session = _session;
             _session = null;
+            captureLease = _captureLease;
+            _captureLease = null;
         }
 
+        captureLease?.Dispose();
         session?.CompleteAsync().GetAwaiter().GetResult();
     }
 

@@ -47,6 +47,24 @@
         </None>
     </ItemGroup>
 
+    <!-- Compile the dependency-free module route contract into this test assembly, and copy the
+         package metadata so tests verify the same files that the module zip target consumes. -->
+    <ItemGroup>
+        <Compile Include="..\VRCFaceTracking.Baballonia\ExpressionMapping.cs"
+                 Link="ModuleContract\ExpressionMapping.cs" />
+        <Compile Include="..\VRCFaceTracking.Baballonia\EyeExpressionRouter.cs"
+                 Link="ModuleContract\EyeExpressionRouter.cs" />
+        <None Include="..\VRCFaceTracking.Baballonia\BabbleConfig.json"
+              Link="ModulePackage\BabbleConfig.json"
+              CopyToOutputDirectory="PreserveNewest" />
+        <None Include="..\VRCFaceTracking.Baballonia\module.json"
+              Link="ModulePackage\module.json"
+              CopyToOutputDirectory="PreserveNewest" />
+        <None Include="..\VRCFaceTracking.Baballonia\VRCFaceTracking.Baballonia.csproj"
+              Link="ModulePackage\VRCFaceTracking.Baballonia.csproj"
+              CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
     <ItemGroup>
         <Folder Include="Firmware\Linux\" />
         <Folder Include="Firmware\MacOS\" />

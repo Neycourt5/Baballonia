@@ -32,7 +32,8 @@ public sealed record CuePhase(
     double DurationSeconds,
     long StartTimestamp,
     float Level = 0f,
-    int RepetitionIndex = 0)
+    int RepetitionIndex = 0,
+    int AttemptIndex = 0)
 {
     /// <summary>Validates lengths early; a malformed cue must not reach the avatar.</summary>
     public void Validate()

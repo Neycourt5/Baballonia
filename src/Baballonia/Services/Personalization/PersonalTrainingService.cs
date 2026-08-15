@@ -82,7 +82,13 @@ public sealed record TrainingResult(
     bool Success,
     string Message,
     TrainingSummary? Summary = null,
-    string? Remedy = null);
+    string? Remedy = null,
+    bool TrainingSucceeded = false,
+    bool ActivationSucceeded = false,
+    string? RunDirectory = null,
+    string? ExportedModelPath = null,
+    string? InstalledModelPath = null,
+    PersonalTrainingRun? Run = null);
 
 /// <summary>Everything model C needs beyond the ordinary A/B training prerequisites.</summary>
 public sealed record ModelCReadiness(
@@ -563,7 +569,8 @@ public sealed class PersonalTrainingService(
             {
                 return new TrainingResult(false,
                     "The model trained successfully but could not be exported. See details.",
-                    Remedy: "Show Details");
+                    Remedy: "Show Details", TrainingSucceeded: true,
+                    RunDirectory: runDirectory);
             }
 
             var exported = Path.Combine(runDirectory, "personalFaceModel.onnx");
@@ -571,29 +578,55 @@ public sealed class PersonalTrainingService(
             {
                 return new TrainingResult(false,
                     "Export reported success but produced no model file. See details.",
-                    Remedy: "Show Details");
+                    Remedy: "Show Details", TrainingSucceeded: true,
+                    RunDirectory: runDirectory);
             }
 
             // --- install -----------------------------------------------------------------------
             progress?.Report(new TrainingProgress(TrainingStage.Installing, "Installing the model..."));
 
             var summary = ReadSummary(runDirectory);
+            var immutableRun = TrainingRunHistory.Discover(runsDirectory, PersonalizationPaths.DatasetRoot)
+                .FirstOrDefault(run => string.Equals(
+                    Path.GetFullPath(run.ModelPath), Path.GetFullPath(exported),
+                    StringComparison.OrdinalIgnoreCase));
+            var installedPath = PersonalizationPaths.PersonalModelPath(modelKind);
             var installed = InstallModel(exported, modelKind);
             if (installed != null)
-                return new TrainingResult(false, installed, summary, Remedy: "Show Details");
+                return new TrainingResult(false, installed, summary, Remedy: "Show Details",
+                    TrainingSucceeded: true, RunDirectory: runDirectory,
+                    ExportedModelPath: exported, InstalledModelPath: installedPath, Run: immutableRun);
 
             modelManager.SetEnabled(true);
             var reload = await modelManager.ReloadAsync();
 
-            if (!reload.Success)
+            // ReloadAsync deliberately reports success when it rescued a failed load with the
+            // previous rollback model. That is good runtime safety, but it is not success for this
+            // training operation: the artifact we just created must be the exact file now active.
+            if (!HasActivatedExactArtifact(
+                    reload, installedPath, modelManager.ActiveModelPath, modelManager.FallbackReason))
             {
+                var activationDetail = reload.Success
+                    ? $"The newly trained model did not become active. Baballonia kept " +
+                      $"{(modelManager.ActiveModelPath is { Length: > 0 } active
+                          ? Path.GetFileName(active)
+                          : "the stock model")} running instead" +
+                      (string.IsNullOrWhiteSpace(modelManager.FallbackReason)
+                          ? "."
+                          : $": {modelManager.FallbackReason}")
+                    : $"The model was trained but could not be loaded: {reload.Message}";
                 return new TrainingResult(false,
-                    $"The model was trained but could not be loaded: {reload.Message}",
-                    summary, Remedy: "Show Details");
+                    activationDetail,
+                    summary, Remedy: "Show Details", TrainingSucceeded: true,
+                    RunDirectory: runDirectory, ExportedModelPath: exported,
+                    InstalledModelPath: installedPath, Run: immutableRun);
             }
 
             progress?.Report(new TrainingProgress(TrainingStage.Done, "Your personal model is ready."));
-            return new TrainingResult(true, "Your personal model is ready.", summary);
+            return new TrainingResult(true, "Your personal model is ready.", summary,
+                TrainingSucceeded: true, ActivationSucceeded: true,
+                RunDirectory: runDirectory, ExportedModelPath: exported,
+                InstalledModelPath: installedPath, Run: immutableRun);
         }
         catch (OperationCanceledException)
         {
@@ -608,6 +641,29 @@ public sealed class PersonalTrainingService(
         finally
         {
             Interlocked.Exchange(ref _running, 0);
+        }
+    }
+
+    private static bool HasActivatedExactArtifact(
+        PersonalModelLoadResult reload,
+        string installedPath,
+        string? activePath,
+        string? fallbackReason)
+    {
+        if (!reload.Success || !string.IsNullOrWhiteSpace(fallbackReason) ||
+            string.IsNullOrWhiteSpace(activePath))
+            return false;
+
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(installedPath),
+                Path.GetFullPath(activePath),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 

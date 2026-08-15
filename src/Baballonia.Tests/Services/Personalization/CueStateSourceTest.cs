@@ -1,12 +1,17 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Baballonia.Contracts;
+using Baballonia.Services.Calibration;
+using Baballonia.Services.events;
 using Baballonia.Services.Personalization;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
+using OpenCvSharp;
 
 namespace Baballonia.Tests.Services.Personalization;
 
@@ -117,6 +122,27 @@ public class CueStateSourceTest
     }
 
     [TestMethod]
+    public void AvatarDeadmanLapseStopsCueStampingAtTheSameBoundary()
+    {
+        var overrideService = new ExpressionOverrideService(() => _clock, 1);
+        var source = new CueStateSource(
+            () => _clock, 1, () => overrideService.IsCommandHealthy);
+        var phase = new CuePhase(
+            "JawOpen100", "hold", [Jaw], Vector(1), Vector(1), 10, _clock, 1, 0);
+
+        overrideService.Activate();
+        overrideService.PushPhase(phase);
+        source.SetPhase(phase);
+        Assert.IsNotNull(source.CurrentCue());
+
+        _clock += 2; // longer than the shared one-second sender/cue deadman
+
+        Assert.IsFalse(overrideService.IsCommandHealthy);
+        Assert.IsNull(source.CurrentCue(),
+            "a label must not outlive the avatar command that visually teaches it");
+    }
+
+    [TestMethod]
     public void SourceLabelDistinguishesAvatarFromBar()
     {
         var source = new CueStateSource(() => _clock, Stopwatch.Frequency) { Source = "bar" };
@@ -183,7 +209,8 @@ public class GuidedCalibrationServiceTest
             new CueStateSource(),
             recorder,
             settings.Object,
-            NullLogger<GuidedCalibrationService>.Instance);
+            NullLogger<GuidedCalibrationService>.Instance,
+            cameraFrameReady: () => true);
     }
 
     private static DatasetRecorderService Recorder() =>
@@ -197,6 +224,32 @@ public class GuidedCalibrationServiceTest
         var service = Build("", recorder);
 
         Assert.IsTrue(service.Preflight().Started);
+    }
+
+    [TestMethod]
+    public void PreflightRequiresARealRecentFaceInferenceFrame()
+    {
+        var bus = new Baballonia.Services.FacePipelineEventBus();
+        using var recorder = new DatasetRecorderService(
+            bus, NullLogger<DatasetRecorderService>.Instance);
+        var settings = new Mock<ILocalSettingsService>();
+        settings.Setup(s => s.ReadSetting<string>(
+                GuidedCalibrationService.OscPrefixSetting, It.IsAny<string>(), It.IsAny<bool>()))
+            .Returns("");
+        var service = new GuidedCalibrationService(
+            new ExpressionOverrideService(), new CueStateSource(), recorder,
+            settings.Object, NullLogger<GuidedCalibrationService>.Instance);
+
+        var before = service.Preflight();
+        Assert.IsFalse(before.Started);
+        StringAssert.Contains(before.Message, "face-camera inference frame");
+
+        using var image = new Mat(8, 8, MatType.CV_8UC1, Scalar.All(127));
+        bus.Publish(new FacePipelineEvents.NewRawExpressionsEvent(
+            image, new float[PersonalizationSchema.ExpressionCount], DateTime.UtcNow.Ticks));
+
+        Assert.IsTrue(service.Preflight().Started,
+            "the same usable raw-expression frame consumed by recording should satisfy readiness");
     }
 
     [TestMethod]
@@ -286,5 +339,244 @@ public class GuidedCalibrationServiceTest
         var target = overrideService.SampleTarget();
         Assert.IsTrue(target is null || target.All(v => v == 0f),
             "after disposal the avatar must be neutral or released, never held mid-expression");
+    }
+
+    [TestMethod]
+    public async Task VrCancelInvalidatesThePartialAttemptBeforeFinalizing()
+    {
+        long clock = 1_000;
+        var presenter = new ActionPresenter();
+        var overrideService = new ExpressionOverrideService(() => clock, 1_000);
+        var cueState = new CueStateSource(() => clock, 1_000, () => overrideService.IsCommandHealthy);
+        using var recorder = new DatasetRecorderService(
+            new Baballonia.Services.FacePipelineEventBus(),
+            NullLogger<DatasetRecorderService>.Instance,
+            cueState);
+        var service = BuildAdvanced(overrideService, cueState, recorder, presenter);
+        var routine = ShortRoutine(() => clock);
+        string? directory = null;
+
+        try
+        {
+            Assert.IsTrue(service.Start(routine).Started);
+            directory = PersonalizationPaths.SessionDirectory(recorder.CurrentSessionId!);
+            ReachFirstHold(service, routine, ref clock);
+
+            presenter.NextAction = VrCalibrationAction.Cancel;
+            Assert.IsFalse(service.Tick());
+            await service.StopAsync();
+
+            CollectionAssert.Contains(QualityReasons(directory), "cancelled-in-vr");
+            Assert.IsFalse(recorder.IsRecording);
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteSession(directory);
+        }
+    }
+
+    [TestMethod]
+    public async Task DeadmanLapseAbortsAndInvalidatesTheInterruptedAttempt()
+    {
+        long clock = 1_000;
+        var presenter = new ActionPresenter();
+        var overrideService = new ExpressionOverrideService(() => clock, 1_000);
+        var cueState = new CueStateSource(() => clock, 1_000, () => overrideService.IsCommandHealthy);
+        using var recorder = new DatasetRecorderService(
+            new Baballonia.Services.FacePipelineEventBus(),
+            NullLogger<DatasetRecorderService>.Instance,
+            cueState);
+        var service = BuildAdvanced(overrideService, cueState, recorder, presenter);
+        var routine = ShortRoutine(() => clock);
+        string? directory = null;
+
+        try
+        {
+            Assert.IsTrue(service.Start(routine).Started);
+            directory = PersonalizationPaths.SessionDirectory(recorder.CurrentSessionId!);
+            ReachFirstHold(service, routine, ref clock);
+
+            clock += 1_500;
+            Assert.IsFalse(service.Tick(), "a lapsed visual command must abort the guided session");
+            await service.StopAsync();
+
+            CollectionAssert.Contains(QualityReasons(directory), "override-deadman-lapsed");
+            Assert.IsFalse(recorder.IsRecording);
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteSession(directory);
+        }
+    }
+
+    [TestMethod]
+    public void DisposeFinalizesTheRecorderAndPersistsRetryQuality()
+    {
+        long clock = 1_000;
+        var presenter = new ActionPresenter();
+        var overrideService = new ExpressionOverrideService(() => clock, 1_000);
+        var cueState = new CueStateSource(() => clock, 1_000, () => overrideService.IsCommandHealthy);
+        using var recorder = new DatasetRecorderService(
+            new Baballonia.Services.FacePipelineEventBus(),
+            NullLogger<DatasetRecorderService>.Instance,
+            cueState);
+        var service = BuildAdvanced(overrideService, cueState, recorder, presenter);
+        var routine = ShortRoutine(() => clock);
+        string? directory = null;
+
+        try
+        {
+            Assert.IsTrue(service.Start(routine).Started);
+            directory = PersonalizationPaths.SessionDirectory(recorder.CurrentSessionId!);
+            ReachFirstHold(service, routine, ref clock);
+
+            presenter.NextAction = VrCalibrationAction.Retry;
+            Assert.IsTrue(service.Tick());
+            service.Dispose();
+
+            Assert.IsFalse(recorder.IsRecording,
+                "disposing guided calibration must finalize, not leave the recorder running");
+            CollectionAssert.Contains(QualityReasons(directory), "retried-in-vr");
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteSession(directory);
+        }
+    }
+
+    [TestMethod]
+    public async Task PresenterUpdateFailureClearsCueAndInvalidatesAttemptImmediately()
+    {
+        long clock = 1_000;
+        var presenter = new ActionPresenter();
+        var overrideService = new ExpressionOverrideService(() => clock, 1_000);
+        var cueState = new CueStateSource(() => clock, 1_000, () => overrideService.IsCommandHealthy);
+        using var recorder = new DatasetRecorderService(
+            new Baballonia.Services.FacePipelineEventBus(),
+            NullLogger<DatasetRecorderService>.Instance,
+            cueState);
+        var service = BuildAdvanced(overrideService, cueState, recorder, presenter);
+        var routine = ShortRoutine(() => clock);
+        string? directory = null;
+
+        try
+        {
+            Assert.IsTrue(service.Start(routine).Started);
+            directory = PersonalizationPaths.SessionDirectory(recorder.CurrentSessionId!);
+            ReachFirstHold(service, routine, ref clock);
+            Assert.IsNotNull(cueState.CurrentCue());
+
+            presenter.FailNextPresent = true;
+            Assert.IsFalse(service.Tick());
+            Assert.IsNull(cueState.CurrentCue(),
+                "a frame arriving before StopAsync must not retain a stale guided target");
+            Assert.IsFalse(overrideService.IsCommandHealthy);
+            var safeTarget = overrideService.SampleTarget();
+            Assert.IsTrue(safeTarget is null || safeTarget.All(value => value == 0f),
+                "presenter failure may use the normal neutral flush but must not hold an expression");
+
+            await service.StopAsync();
+            CollectionAssert.Contains(QualityReasons(directory), "vr-presenter-failed");
+        }
+        finally
+        {
+            service.Dispose();
+            DeleteSession(directory);
+        }
+    }
+
+    private static GuidedCalibrationService BuildAdvanced(
+        ExpressionOverrideService overrideService,
+        CueStateSource cueState,
+        DatasetRecorderService recorder,
+        IVrCalibrationPresenter presenter)
+    {
+        var settings = new Mock<ILocalSettingsService>();
+        settings.Setup(s => s.ReadSetting<string>(
+                GuidedCalibrationService.OscPrefixSetting, It.IsAny<string>(), It.IsAny<bool>()))
+            .Returns("");
+        return new GuidedCalibrationService(
+            overrideService, cueState, recorder, settings.Object,
+            NullLogger<GuidedCalibrationService>.Instance, presenter,
+            cameraFrameReady: () => true);
+    }
+
+    private static GuidedCaptureRoutine ShortRoutine(Func<long> clock) => new(
+        GuidedCaptureRoutine.BuildJawOpenRoutine(
+            repetitions: 1, levels: [1f], holdSeconds: 1,
+            restSeconds: 0.1, transitionSeconds: 0.1, leadInSeconds: 0.1),
+        clock, 1_000);
+
+    private static void ReachFirstHold(
+        GuidedCalibrationService service,
+        GuidedCaptureRoutine routine,
+        ref long clock)
+    {
+        Assert.IsTrue(service.Tick()); // lead-in
+        clock += 200;
+        Assert.IsTrue(service.Tick()); // transition in
+        clock += 200;
+        Assert.IsTrue(service.Tick()); // hold
+        Assert.AreEqual("hold", routine.Current!.Phase);
+    }
+
+    private static string[] QualityReasons(string directory)
+    {
+        var path = Path.Combine(directory, "guided_quality_overrides.json");
+        Assert.IsTrue(File.Exists(path), $"expected quality overrides at {path}");
+        using var document = JsonDocument.Parse(File.ReadAllText(path));
+        return document.RootElement.GetProperty("attempts").EnumerateArray()
+            .Select(item => item.GetProperty("reason").GetString() ?? "")
+            .ToArray();
+    }
+
+    private static void DeleteSession(string? directory)
+    {
+        if (!string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory))
+            Directory.Delete(directory, recursive: true);
+    }
+
+    private sealed class ActionPresenter : IVrCalibrationPresenter
+    {
+        public bool IsAvailable => true;
+        public bool IsPresenting { get; private set; }
+        public bool IsHealthy { get; private set; } = true;
+        public string Status => IsPresenting ? "presenting" : "stopped";
+        public VrCalibrationAction NextAction { get; set; }
+        public bool FailNextPresent { get; set; }
+
+        public VrPresenterStartResult Begin(string sessionTitle)
+        {
+            if (IsPresenting)
+                return VrPresenterStartResult.Failure("already active");
+            IsPresenting = true;
+            IsHealthy = true;
+            return VrPresenterStartResult.Success();
+        }
+
+        public void Present(VrCalibrationFrame frame)
+        {
+            if (!FailNextPresent) return;
+            FailNextPresent = false;
+            IsHealthy = false;
+            IsPresenting = false;
+        }
+
+        public VrCalibrationAction ConsumeAction()
+        {
+            var action = NextAction;
+            NextAction = VrCalibrationAction.None;
+            return action;
+        }
+
+        public void End(string? completionMessage = null)
+        {
+            IsPresenting = false;
+            IsHealthy = false;
+        }
+        public void Dispose() => End();
     }
 }

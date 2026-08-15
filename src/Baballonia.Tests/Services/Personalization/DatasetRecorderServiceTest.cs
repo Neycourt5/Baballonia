@@ -91,6 +91,34 @@ public class DatasetRecorderServiceTest
     }
 
     [TestMethod]
+    public void RequiredRecentSourceFrame_RejectsBeforeCreatingSession()
+    {
+        var error = Assert.ThrowsExactly<InvalidOperationException>(() =>
+            _recorder.StartSession(
+                SessionType.Neutral,
+                requireRecentSourceFrame: true));
+
+        StringAssert.Contains(error.Message, "No fresh face-camera inference frame");
+        Assert.IsFalse(_recorder.IsRecording);
+        Assert.IsNull(_recorder.CurrentSessionId);
+    }
+
+    [TestMethod]
+    public async Task RequiredRecentSourceFrame_AllowsSessionAfterRawInferenceFrame()
+    {
+        PublishFrame(1);
+
+        var id = _recorder.StartSession(
+            SessionType.Speech,
+            requireRecentSourceFrame: true);
+        _createdSessions.Add(id);
+
+        Assert.IsTrue(_recorder.IsRecording);
+        var summary = await _recorder.StopSessionAsync();
+        Assert.IsNotNull(summary);
+    }
+
+    [TestMethod]
     public async Task Session_WritesFramesLabelsAndMetadata()
     {
         var id = StartSession(SessionType.Neutral);

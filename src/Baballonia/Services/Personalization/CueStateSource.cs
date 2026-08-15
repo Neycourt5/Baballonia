@@ -20,6 +20,7 @@ public sealed class CueStateSource : IReadOnlyCueStateSource
 {
     private readonly Func<long> _now;
     private readonly double _ticksPerSecond;
+    private readonly Func<bool>? _isCommandHealthy;
 
     private volatile CuePhase? _phase;
 
@@ -30,11 +31,24 @@ public sealed class CueStateSource : IReadOnlyCueStateSource
     {
     }
 
+    /// <summary>
+    /// Production constructor. Cue labels are allowed only while the avatar override reports that
+    /// the same command is alive; its one-second deadman therefore gates both halves of the loop.
+    /// </summary>
+    public CueStateSource(ExpressionOverrideService overrideService)
+        : this(Stopwatch.GetTimestamp, Stopwatch.Frequency, () => overrideService.IsCommandHealthy)
+    {
+    }
+
     /// <summary>Test seam: a deterministic clock, matching ExpressionOverrideService's.</summary>
-    public CueStateSource(Func<long> clock, double ticksPerSecond)
+    public CueStateSource(
+        Func<long> clock,
+        double ticksPerSecond,
+        Func<bool>? isCommandHealthy = null)
     {
         _now = clock;
         _ticksPerSecond = ticksPerSecond;
+        _isCommandHealthy = isCommandHealthy;
     }
 
     /// <summary>Publishes the phase now being commanded. Null means "not calibrating".</summary>
@@ -51,7 +65,7 @@ public sealed class CueStateSource : IReadOnlyCueStateSource
     public FrameLabel.CueLabel? CurrentCue()
     {
         var phase = _phase;
-        if (phase is null)
+        if (phase is null || (_isCommandHealthy is not null && !_isCommandHealthy()))
             return null;
 
         return new FrameLabel.CueLabel
@@ -62,6 +76,7 @@ public sealed class CueStateSource : IReadOnlyCueStateSource
             Target = Interpolate(phase),
             Level = phase.Level,
             Repetition = phase.RepetitionIndex,
+            Attempt = phase.AttemptIndex,
             Source = Source
         };
     }

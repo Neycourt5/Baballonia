@@ -42,11 +42,17 @@ public class PersonalModelValidationTest
             .GetField("_pipeline", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(pipelineManager, pipeline);
 
+        var configuredEnabled = enabled;
+        var configuredPath = modelPath ?? "";
         var settings = new Mock<ILocalSettingsService>();
         settings.Setup(s => s.ReadSetting<bool>(PersonalModelManager.EnabledSetting, It.IsAny<bool>(), It.IsAny<bool>()))
-            .Returns(enabled);
+            .Returns(() => configuredEnabled);
+        settings.Setup(s => s.SaveSetting(PersonalModelManager.EnabledSetting, It.IsAny<bool>(), It.IsAny<bool>()))
+            .Callback<string, bool, bool>((_, value, _) => configuredEnabled = value);
         settings.Setup(s => s.ReadSetting<string>(PersonalModelManager.PathSetting, It.IsAny<string>(), It.IsAny<bool>()))
-            .Returns(modelPath ?? "");
+            .Returns(() => configuredPath);
+        settings.Setup(s => s.SaveSetting(PersonalModelManager.PathSetting, It.IsAny<string>(), It.IsAny<bool>()))
+            .Callback<string, string, bool>((_, value, _) => configuredPath = value);
         settings.Setup(s => s.ReadSetting<float>(PersonalModelManager.BlendSetting, It.IsAny<float>(), It.IsAny<bool>()))
             .Returns(blend);
 
@@ -184,6 +190,38 @@ public class PersonalModelValidationTest
     }
 
     [TestMethod]
+    public async Task SelectModel_InvalidCandidatePreservesConfiguredAndActiveModel()
+    {
+        var validPath = AssetPath("validAdapter.onnx");
+        var incompatiblePath = AssetPath("schemaMismatchAdapter.onnx");
+        var (manager, pipeline) = BuildManager(validPath);
+        using (manager)
+        {
+            var initial = await manager.ReloadAsync();
+            Assert.IsTrue(initial.Success, initial.Message);
+
+            // SetEnabled deliberately does not reload. This supported intermediate state lets the
+            // assertion prove selection failure preserves false rather than just observing true.
+            manager.SetEnabled(false);
+            var previousCorrector = pipeline.Corrector;
+            var previousActivePath = manager.ActiveModelPath;
+
+            var result = await manager.SelectModelAsync(incompatiblePath);
+
+            Assert.IsFalse(result.Success, "The incompatible candidate must still be rejected.");
+            Assert.AreEqual(validPath, manager.ModelPath,
+                "A rejected manual candidate must not become the persisted selection.");
+            Assert.IsFalse(manager.Enabled,
+                "A rejected manual candidate must preserve the prior enabled setting.");
+            Assert.AreEqual(previousActivePath, manager.ActiveModelPath,
+                "The exact previously active artifact must remain reported as active.");
+            Assert.AreSame(previousCorrector, pipeline.Corrector,
+                "Validation must happen before the working corrector is swapped or disposed.");
+            Assert.IsTrue(manager.IsActive);
+        }
+    }
+
+    [TestMethod]
     public async Task BlendSettingIsAppliedToTheLoadedModel()
     {
         var (manager, pipeline) = BuildManager(AssetPath("validAdapter.onnx"), blend: 0.25f);
@@ -193,6 +231,24 @@ public class PersonalModelValidationTest
 
             Assert.IsNotNull(pipeline.Corrector);
             Assert.AreEqual(0.25f, pipeline.Corrector.Blend, 1e-6);
+        }
+    }
+
+    [TestMethod]
+    public async Task PersistedZeroBlendRemainsExactlyStockAfterReload()
+    {
+        var (manager, pipeline) = BuildManager(AssetPath("validAdapter.onnx"), blend: 0f);
+        using (manager)
+        {
+            Assert.AreEqual(0f, manager.Blend,
+                "an intentional 0% setting must not be mistaken for a missing setting");
+
+            var result = await manager.ReloadAsync();
+
+            Assert.IsTrue(result.Success, result.Message);
+            Assert.IsNotNull(pipeline.Corrector);
+            Assert.AreEqual(0f, pipeline.Corrector.Blend, 1e-6,
+                "restarting at 0% must remain byte-equivalent to stock behavior");
         }
     }
 }

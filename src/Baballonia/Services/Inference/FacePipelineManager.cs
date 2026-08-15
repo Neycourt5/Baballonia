@@ -64,6 +64,8 @@ public class FacePipelineManager
     /// passthrough while appearing to work, so it is refused at load instead.
     /// </remarks>
     public bool EmbeddingAvailable => _pipeline.InferenceService is IEmbeddingSource;
+    public string InferenceProvider =>
+        (_pipeline.InferenceService as DefaultInferenceRunner)?.ExecutionProvider ?? "Unknown";
 
     public DefaultInferenceRunner CreateInference()
     {

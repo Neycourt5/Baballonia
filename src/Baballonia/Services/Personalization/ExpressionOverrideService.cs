@@ -58,6 +58,30 @@ public sealed class ExpressionOverrideService : IExpressionOverrideSource
     public bool IsActive => _active;
 
     /// <summary>
+    /// True only while a published cue is still backed by a live avatar command. Dataset cue
+    /// stamping uses this same health decision as the sender deadman, so a stalled UI cannot keep
+    /// writing confident labels after the avatar has already fallen back to live tracking.
+    /// </summary>
+    public bool IsCommandHealthy
+    {
+        get
+        {
+            if (!_active || Interlocked.Read(ref _flushUntil) != 0)
+                return false;
+
+            var phase = _phase;
+            if (phase is null)
+                return false;
+
+            var now = _now();
+            return SecondsSince(Interlocked.Read(ref _lastKeepAlive), now) <=
+                       KeepAliveTimeout.TotalSeconds &&
+                   SecondsSince(phase.StartTimestamp, now) <=
+                       phase.DurationSeconds + PhaseOverrunGrace.TotalSeconds;
+        }
+    }
+
+    /// <summary>
     /// Begins overriding. Until the first <see cref="PushPhase"/> the target is neutral, so the
     /// avatar settles to a rest face rather than jumping.
     /// </summary>
