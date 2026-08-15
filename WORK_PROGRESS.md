@@ -161,8 +161,11 @@ anything about it.
 # then build src\VRCFaceTracking.Baballonia and copy its zip into bin\Baballonia-v13\VRCFT-Module\
 ```
 
-- **`bin\Baballonia-v13\Baballonia.Desktop.exe`**, ProductVersion `1.0.0+9ac3439…`
-- `bin\Baballonia-v13.zip` — SHA-256 `390DD3DC980D71038935FF85549EC9CBA807B186665B1E6AD33E4A10A4FEF09F`
+- **`bin\Baballonia-v13\Baballonia.Desktop.exe`**, ProductVersion `1.0.0+1306fe6…` — matches the
+  final commit. (Built once at `9ac3439`, then rebuilt after the docs commit touched a view, so the
+  shipped binary and its recorded revision agree. That agreement is the whole point of committing
+  before building; v12 shipped reporting the base of a dirty tree.)
+- `bin\Baballonia-v13.zip` — SHA-256 `2161E4FB9D961AD7D787EAD428A3CA3D8457B12981F00A70BCCDEB020E060379`
 - `VRCFT-Module\VRCFaceTracking.Baballonia-3.2.1-local.zip` — SHA-256
   `33F52D9E307862B4AEEA5F8D172B0A7C979CCF6C853AB8714736088A6D190440` (module unchanged from v12)
 - Verified: 4 capture DLLs in `Modules\`, `training\` present including `diagnose_guided.py`, no
