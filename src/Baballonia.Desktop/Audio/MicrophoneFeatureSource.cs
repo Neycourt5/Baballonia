@@ -8,7 +8,7 @@ using NAudio.Wave;
 namespace Baballonia.Desktop.Audio;
 
 /// <summary>
-/// Captures the default microphone and analyses it into <see cref="AudioFeatures"/>.
+/// Captures one explicitly selected WinMM microphone and analyses it into <see cref="AudioFeatures"/>.
 ///
 /// Everything here happens on NAudio's own capture thread. The inference tick only ever reads the
 /// last published <see cref="AudioFeatures"/>, which is a small immutable struct swapped under a
@@ -28,6 +28,8 @@ public sealed class MicrophoneFeatureSource : IAudioFeatureSource
     private const int WindowSamples = SampleRate / 50;
 
     private readonly ILogger _logger;
+    private readonly int _deviceNumber;
+    private readonly string _deviceName;
     private readonly AudioFeatureAnalyzer _analyzer = new(SampleRate);
     private readonly float[] _window = new float[WindowSamples];
     private readonly object _gate = new();
@@ -38,7 +40,12 @@ public sealed class MicrophoneFeatureSource : IAudioFeatureSource
     private volatile bool _running;
     private string _status = "";
 
-    public MicrophoneFeatureSource(ILogger logger) => _logger = logger;
+    public MicrophoneFeatureSource(int deviceNumber, string deviceName, ILogger logger)
+    {
+        _deviceNumber = deviceNumber;
+        _deviceName = deviceName;
+        _logger = logger;
+    }
 
     public bool IsRunning => _running;
 
@@ -67,6 +74,7 @@ public sealed class MicrophoneFeatureSource : IAudioFeatureSource
 
             _capture = new WaveInEvent
             {
+                DeviceNumber = _deviceNumber,
                 WaveFormat = new WaveFormat(SampleRate, 16, 1),
                 // Small buffers keep the added latency well under the camera's own, so the sync
                 // offset has something sensible to work with.
@@ -80,7 +88,10 @@ public sealed class MicrophoneFeatureSource : IAudioFeatureSource
 
             _running = true;
             _status = "";
-            _logger.LogInformation("Microphone capture started ({Rate} Hz mono)", SampleRate);
+            _logger.LogInformation(
+                "Microphone capture started on {Device} ({Rate} Hz mono)",
+                _deviceName,
+                SampleRate);
             return true;
         }
         catch (Exception ex)
@@ -88,7 +99,7 @@ public sealed class MicrophoneFeatureSource : IAudioFeatureSource
             // Denied permission, a device in exclusive use, a driver problem - all the same from
             // here: the enhancement is unavailable and tracking carries on.
             _logger.LogWarning(ex, "Could not start microphone capture");
-            _status = "The microphone could not be opened.";
+            _status = $"{_deviceName} could not be opened.";
             Cleanup();
             return false;
         }
@@ -119,7 +130,7 @@ public sealed class MicrophoneFeatureSource : IAudioFeatureSource
         {
             // Device unplugged mid-session, typically.
             _logger.LogWarning(e.Exception, "Microphone capture stopped unexpectedly");
-            _status = "The microphone stopped unexpectedly.";
+            _status = $"{_deviceName} stopped unexpectedly.";
         }
 
         _running = false;
