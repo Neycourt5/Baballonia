@@ -173,6 +173,33 @@ def test_transitions_between_hold_and_rest_stay_unlabelled() -> None:
         assert result.weights[row].sum() == 0.0, "transition frames must carry no supervision"
 
 
+def test_prep_countdown_frames_stay_unlabelled() -> None:
+    """The countdown before an attempt teaches nothing and must supervise nothing.
+
+    Guided capture now announces the expression and counts down before commanding it. Those frames
+    show a resting face while the headset says a smile is coming, so labelling them either way -
+    as the expression or as rest - would be wrong.
+    """
+    prep = [_cue("Smile100", "prep", 1.0)] * (3 * FPS)
+    transition = [_cue("Smile100", "transition", 1.0)] * FPS
+    hold = [_cue("Smile100", "hold", 1.0)] * (3 * FPS)
+    session = _session("Guided", prep + transition + hold)
+
+    result = lbl.build_labels([session])
+
+    for row in range(len(prep)):
+        assert result.weights[row].sum() == 0.0, "prep frames must carry no supervision"
+
+    # The hold that follows is still supervised, so this is not just "everything is zero".
+    assert result.weights[len(prep) + len(transition) + len(hold) - 1].sum() > 0.0
+
+
+def test_settle_trim_leaves_a_usable_hold() -> None:
+    """The trim has to stay well inside the hold, or guided capture records nothing usable."""
+    assert lbl.HOLD_SETTLE_TRIM_SECONDS < 3.0
+    assert 3.0 - lbl.HOLD_SETTLE_TRIM_SECONDS >= 2.0
+
+
 def test_dim_boost_scales_weights_without_touching_targets() -> None:
     session = _session("Neutral", [None] * 60)
 

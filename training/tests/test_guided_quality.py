@@ -11,6 +11,7 @@ attempt proves that exact cue is observable. Explicit headset judgments always w
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -114,8 +115,11 @@ def _settled_row(session: Session, cue: str, rep: int, attempt: int, phase: str)
             and frame.cue["rep"] == rep
             and frame.cue.get("attempt", 0) == attempt
             and frame.cue["phase"] == phase]
-    # 20 frames is beyond the 0.5 s trim at 30 fps.
-    return rows[20]
+    # Derived from the trim rather than hardcoded: picking a fixed frame index silently starts
+    # sampling *inside* the discarded window the moment the trim grows.
+    settled = math.ceil(lbl.HOLD_SETTLE_TRIM_SECONDS * FPS) + 1
+    assert settled < len(rows), f"{cue} rep {rep} {phase} is shorter than the settle trim"
+    return rows[settled]
 
 
 def test_one_missed_smile_rep_is_suppressed_without_losing_other_evidence() -> None:

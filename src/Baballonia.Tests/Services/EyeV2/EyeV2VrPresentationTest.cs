@@ -316,31 +316,41 @@ public sealed class EyeV2VrPresentationTest
         long clock = 1;
         var steps = GuidedCaptureRoutine.BuildJawOpenRoutine(
             repetitions: 2, levels: [1f], holdSeconds: 1, restSeconds: 1,
-            transitionSeconds: 1, leadInSeconds: 1);
+            transitionSeconds: 1, leadInSeconds: 1, prepSeconds: 1);
         var routine = new GuidedCaptureRoutine(steps, () => clock, 1);
 
-        // Reach the first hold.
-        routine.Tick();
-        clock += 2;
-        routine.Tick();
-        clock += 2;
-        routine.Tick();
-        Assert.AreEqual("hold", routine.Current!.Phase);
+        AdvanceToHold(routine, ref clock);
         var original = routine.CurrentAttempt!.Value;
 
         var replay = routine.RetryCurrentAttempt();
         Assert.IsNotNull(replay);
-        Assert.AreEqual("transition", routine.Current!.Phase);
+        Assert.AreEqual("prep", routine.Current!.Phase,
+            "Retry replays the whole attempt, countdown included, so the user is not thrown " +
+            "straight back into an expression they just asked to redo.");
         Assert.AreEqual(original.Attempt + 1, routine.CurrentAttempt!.Value.Attempt);
 
-        clock += 2;
-        routine.Tick();
-        Assert.AreEqual("hold", routine.Current!.Phase);
+        AdvanceToHold(routine, ref clock);
         var skipped = routine.CurrentAttempt!.Value;
         var next = routine.SkipCurrentAttempt();
         Assert.IsNotNull(next);
         Assert.AreNotEqual(skipped.Repetition, routine.CurrentAttempt!.Value.Repetition,
             "Skip must advance only past the current repetition, not end the whole routine.");
+    }
+
+    /// <summary>
+    /// Walks the routine to its next hold. Written as a search rather than a step count so that
+    /// changing the preamble - the lead-in, the countdown, the ramp - cannot quietly leave these
+    /// assertions pointing at the wrong phase.
+    /// </summary>
+    private static void AdvanceToHold(GuidedCaptureRoutine routine, ref long clock)
+    {
+        for (var step = 0; step < 32 && routine.Current?.Phase != "hold"; step++)
+        {
+            clock += 2;
+            routine.Tick();
+        }
+
+        Assert.AreEqual("hold", routine.Current!.Phase, "never reached a hold");
     }
 
     private EyeV2CalibrationStore Store() =>

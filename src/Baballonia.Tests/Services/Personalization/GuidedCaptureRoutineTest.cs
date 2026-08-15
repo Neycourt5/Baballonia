@@ -483,4 +483,82 @@ public class GuidedCaptureRoutineTest
         Assert.AreEqual(GuidedCues.Smile.Id, GuidedCues.ById("smile")!.Id);
         Assert.IsNull(GuidedCues.ById("NotACue"));
     }
+
+    // =============================================================================================
+    // Pacing
+    //
+    // The user gets a countdown with the expression named before every attempt. Previously the only
+    // warning was the ramp itself, which asked them to notice a cue, understand it and produce it
+    // inside three quarters of a second - and an expression that arrives late lands in the hold as a
+    // face that is still moving, which is a wrong label at full weight.
+    // =============================================================================================
+
+    [TestMethod]
+    public void EveryAttemptOpensWithACountdownBeforeTheAvatarMoves()
+    {
+        var steps = GuidedCaptureRoutine.BuildRoutine([GuidedCues.Smile], repetitions: 2);
+
+        var attempts = steps
+            .Where(step => !step.CueId.EndsWith("LeadIn", StringComparison.Ordinal))
+            .GroupBy(step => (step.CueId, step.Repetition));
+
+        foreach (var attempt in attempts)
+        {
+            var phases = attempt.Select(step => step.Phase).ToArray();
+            CollectionAssert.AreEqual(
+                new[] { "prep", "transition", "hold", "transition", "rest" }, phases,
+                $"{attempt.Key} did not follow prep -> ramp -> hold -> ramp -> rest");
+        }
+    }
+
+    [TestMethod]
+    public void ThePrepStepCommandsNothing()
+    {
+        // Data integrity, not cosmetics: the countdown is when the user is being *told* what to do.
+        // Commanding the expression here would move the avatar before they were ready and stamp the
+        // frames with a target they are not yet making.
+        var prep = GuidedCaptureRoutine.BuildRoutine([GuidedCues.JawOpen], repetitions: 1)
+            .Where(step => step.Phase == "prep")
+            .ToArray();
+
+        Assert.IsTrue(prep.Length > 0);
+        foreach (var step in prep)
+        {
+            Assert.IsTrue(step.From.All(v => v == 0f), "prep must start neutral");
+            Assert.IsTrue(step.To.All(v => v == 0f), "prep must stay neutral");
+        }
+    }
+
+    [TestMethod]
+    public void PrepNamesTheExpressionInWords()
+    {
+        // An avatar's smile can be subtle enough to miss entirely, and a cue the user never noticed
+        // still gets recorded as though they performed it.
+        var prep = GuidedCaptureRoutine.BuildRoutine([GuidedCues.Smile], repetitions: 1)
+            .First(step => step.Phase == "prep");
+
+        StringAssert.Contains(prep.Instruction.ToLowerInvariant(), "smile");
+    }
+
+    [TestMethod]
+    public void RampIsLongEnoughToBeFollowed()
+    {
+        Assert.IsTrue(GuidedCaptureRoutine.CueTiming.Default.TransitionSeconds >= 1.0,
+            "a ramp shorter than a second outruns ordinary reaction time");
+        Assert.IsTrue(GuidedCaptureRoutine.CueTiming.Default.PrepSeconds >= 2.0,
+            "the countdown has to be long enough to read and act on");
+    }
+
+    [TestMethod]
+    public void TrustedHoldWindowSurvivesTheSettleTrim()
+    {
+        // The trainer discards the front of every hold while the face is still arriving. If the trim
+        // ever grew past the hold, guided capture would silently record nothing usable.
+        var timing = GuidedCaptureRoutine.CueTiming.Default;
+
+        Assert.IsTrue(GuidedCaptureRoutine.HoldSettleTrimSeconds < timing.HoldSeconds,
+            "the settle trim must not consume the whole hold");
+        Assert.IsTrue(timing.HoldSeconds - GuidedCaptureRoutine.HoldSettleTrimSeconds >= 2.0,
+            "at least two seconds of each hold must remain trustworthy");
+    }
 }

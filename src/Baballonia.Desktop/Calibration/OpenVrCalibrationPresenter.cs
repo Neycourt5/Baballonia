@@ -387,6 +387,7 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         {
             VrCalibrationPhase.Hold or VrCalibrationPhase.Sampling or VrCalibrationPhase.Target
                 => new SKColor(61, 214, 140),
+            VrCalibrationPhase.Settling => new SKColor(255, 201, 71),
             VrCalibrationPhase.Relax => new SKColor(94, 190, 255),
             VrCalibrationPhase.Error => new SKColor(255, 105, 105),
             VrCalibrationPhase.Complete => new SKColor(88, 230, 150),
@@ -397,6 +398,7 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
             VrCalibrationPhase.Preparing => frame.CountdownSeconds is { } countdown
                 ? $"GET READY  {Math.Max(1, (int)Math.Ceiling(countdown))}" : "GET READY",
             VrCalibrationPhase.Sampling => "SAMPLING",
+            VrCalibrationPhase.Settling => "SETTLE",
             VrCalibrationPhase.Hold => "HOLD",
             VrCalibrationPhase.Relax => "RELAX",
             VrCalibrationPhase.Target => "LOOK AT THE DOT",

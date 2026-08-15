@@ -7,6 +7,11 @@ public enum VrCalibrationPhase
 {
     Preparing,
     Sampling,
+    /// <summary>
+    /// Moving into the expression, before the part of the hold the trainer trusts. Distinct from
+    /// <see cref="Hold"/> so the user is not told to hold still during frames that get discarded.
+    /// </summary>
+    Settling,
     Hold,
     Relax,
     Target,

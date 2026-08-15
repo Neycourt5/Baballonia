@@ -62,6 +62,14 @@ public sealed record GuidedCue(
 
     public string LeadInInstruction => $"Next: {DisplayName}. Relax your face and watch your avatar.";
 
+    /// <summary>
+    /// Shown during the countdown before an attempt. Names the expression in words as well as
+    /// showing it on the avatar: a subtle shape on someone's avatar - a small smile especially - is
+    /// easy to miss entirely, and a cue the user never noticed still gets recorded as though they
+    /// performed it.
+    /// </summary>
+    public string PrepInstruction => $"Get ready to {Action.ToLowerInvariant()}. Watch your avatar.";
+
     public string RestInstruction => "Rest. Let your face relax completely.";
 
     public string ApproachInstruction(float level) =>
@@ -76,7 +84,8 @@ public sealed record GuidedCue(
     public double EstimatedSeconds(int repetitions, GuidedCaptureRoutine.CueTiming? timing = null)
     {
         timing ??= GuidedCaptureRoutine.CueTiming.Default;
-        var perBlock = timing.TransitionSeconds * 2 + timing.HoldSeconds + timing.RestSeconds;
+        var perBlock = timing.PrepSeconds + timing.TransitionSeconds * 2 +
+                       timing.HoldSeconds + timing.RestSeconds;
         return timing.LeadInSeconds + perBlock * EffectiveLevels.Count * repetitions;
     }
 }

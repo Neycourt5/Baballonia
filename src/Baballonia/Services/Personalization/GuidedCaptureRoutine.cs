@@ -206,12 +206,31 @@ public sealed class GuidedCaptureRoutine
     // Routine construction
     // =============================================================================================
 
+    /// <summary>
+    /// How much of the front of each hold the trainer discards, because the face is still arriving.
+    /// Mirrors <c>labels.HOLD_SETTLE_TRIM_SECONDS</c> in the Python trainer; the two must be changed
+    /// together. Used here only to tell the user when the trusted part of a hold begins - nothing in
+    /// C# does the trimming.
+    /// </summary>
+    public const double HoldSettleTrimSeconds = 0.75;
+
     /// <summary>Timing shared by every routine, so passes stay comparable to each other.</summary>
+    /// <param name="HoldSeconds">
+    /// The trusted window. The labeller trims its settle-in period off the front of this, so the
+    /// usable part is shorter than the number here.
+    /// </param>
+    /// <param name="PrepSeconds">
+    /// Counted down before each attempt with the expression named on the headset. Without it the
+    /// only warning was the transition itself, which asked the user to notice a cue, understand it
+    /// and produce it inside three quarters of a second - and a cue produced late lands in the hold
+    /// window as a face that is still moving.
+    /// </param>
     public sealed record CueTiming(
         double HoldSeconds = 3.0,
         double RestSeconds = 2.0,
-        double TransitionSeconds = 0.75,
-        double LeadInSeconds = 5.0)
+        double TransitionSeconds = 1.0,
+        double LeadInSeconds = 5.0,
+        double PrepSeconds = 3.0)
     {
         public static readonly CueTiming Default = new();
     }
@@ -260,6 +279,13 @@ public sealed class GuidedCaptureRoutine
                     var id = $"{cue.Id}{(int)Math.Round(level * 100)}";
                     var target = cue.TargetAt(level);
 
+                    // Prep: the avatar stays neutral while the headset names the coming expression
+                    // and counts down. Deliberately carries no supervision - the labeller ignores
+                    // this phase entirely - because the user is being told what to do, not doing it.
+                    steps.Add(new CueStep(id, "prep", dims, neutral, neutral,
+                        timing.PrepSeconds, level, rep, cue.PrepInstruction,
+                        cue.DisplayName, repetitions));
+
                     steps.Add(new CueStep(id, "transition", dims, neutral, target,
                         timing.TransitionSeconds, level, rep, cue.ApproachInstruction(level),
                         cue.DisplayName, repetitions));
@@ -296,12 +322,13 @@ public sealed class GuidedCaptureRoutine
         IReadOnlyList<float>? levels = null,
         double holdSeconds = 3.0,
         double restSeconds = 2.0,
-        double transitionSeconds = 0.75,
-        double leadInSeconds = 5.0)
+        double transitionSeconds = 1.0,
+        double leadInSeconds = 5.0,
+        double prepSeconds = 3.0)
     {
         var cue = levels is null ? GuidedCues.JawOpen : GuidedCues.JawOpen with { Levels = levels };
 
         return BuildRoutine([cue], repetitions,
-            new CueTiming(holdSeconds, restSeconds, transitionSeconds, leadInSeconds));
+            new CueTiming(holdSeconds, restSeconds, transitionSeconds, leadInSeconds, prepSeconds));
     }
 }

@@ -515,12 +515,15 @@ public class GuidedCalibrationServiceTest
         GuidedCaptureRoutine routine,
         ref long clock)
     {
-        Assert.IsTrue(service.Tick()); // lead-in
-        clock += 200;
-        Assert.IsTrue(service.Tick()); // transition in
-        clock += 200;
-        Assert.IsTrue(service.Tick()); // hold
-        Assert.AreEqual("hold", routine.Current!.Phase);
+        // Walks to the first hold rather than counting steps, so inserting or reordering the
+        // lead-in/prep/transition preamble does not silently point these tests at the wrong phase.
+        for (var step = 0; step < 32 && routine.Current?.Phase != "hold"; step++)
+        {
+            Assert.IsTrue(service.Tick(), "the session ended before reaching a hold");
+            clock += 200;
+        }
+
+        Assert.AreEqual("hold", routine.Current!.Phase, "never reached a hold");
     }
 
     private static string[] QualityReasons(string directory)

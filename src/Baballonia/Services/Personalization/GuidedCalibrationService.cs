@@ -326,19 +326,34 @@ public sealed class GuidedCalibrationService : IDisposable
 
         var isLeadIn = step.CueId.EndsWith("LeadIn", StringComparison.Ordinal);
         var movingTowardRest = step.Phase == "transition" && step.To.Sum() < step.From.Sum();
+
+        // The front of a hold is discarded by the trainer while the face is still arriving, so the
+        // headset says "settle" rather than "hold" until the trusted window actually starts. Telling
+        // the user to hold still during frames nobody will look at is how a hold ends up with its
+        // usable part spent settling.
+        var holdElapsed = step.DurationSeconds * routine.CurrentStepProgress;
+        var settling = step.Phase == "hold" &&
+                       holdElapsed < GuidedCaptureRoutine.HoldSettleTrimSeconds;
+
         var phase = step.Phase switch
         {
+            "hold" when settling => VrCalibrationPhase.Settling,
             "hold" => VrCalibrationPhase.Hold,
             "rest" when !isLeadIn => VrCalibrationPhase.Relax,
             "transition" when movingTowardRest => VrCalibrationPhase.Relax,
             _ => VrCalibrationPhase.Preparing,
         };
 
+        var title = string.IsNullOrWhiteSpace(step.DisplayName) ? step.CueId : step.DisplayName;
+
         try
         {
             _presenter.Present(new VrCalibrationFrame(
-                string.IsNullOrWhiteSpace(step.DisplayName) ? step.CueId : step.DisplayName,
-                step.Instruction,
+                // During the countdown the expression is announced rather than commanded, so the
+                // user can read what is coming instead of having to recognise it from an avatar
+                // shape that may be subtle.
+                step.Phase == "prep" ? $"NEXT: {title}" : title,
+                settling ? "Get into position and hold still..." : step.Instruction,
                 phase,
                 routine.Progress,
                 routine.CurrentStepProgress,

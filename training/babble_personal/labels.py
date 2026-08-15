@@ -46,7 +46,9 @@ W_SPEECH_PSEUDO = 0.3
 W_MANUAL_CORRECTION = 2.0
 
 #: Frames at the start of a hold, while the user is still moving into position, are not labelled.
-HOLD_SETTLE_TRIM_SECONDS = 0.5
+#: Mirrored in C# as ``GuidedCaptureRoutine.HoldSettleTrimSeconds`` so the headset can show the user
+#: that the trusted part of the hold has not started yet; the two must be changed together.
+HOLD_SETTLE_TRIM_SECONDS = 0.75
 
 #: A repetition at or above this correlation is trusted at the normal guided-hold weight. This is
 #: the threshold the original cue-lag diagnostic already described as evidence that the commanded
