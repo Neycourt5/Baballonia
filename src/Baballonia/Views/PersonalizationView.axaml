@@ -560,7 +560,7 @@
           <TextBlock
               Opacity="0.7"
               TextWrapping="Wrap"
-              Text="Select Stock or any available trained A/B/C model, then press Use. The Running now line above always shows the active model. Stock is always available." />
+              Text="Select Stock or any available trained A/B/C model, then press Use. The Requested and Actually active lines above show what you asked for and what is really running, with the reason if they differ. Stock is always available." />
 
           <CheckBox Content="Advanced" IsChecked="{Binding ShowAdvanced}" />
 

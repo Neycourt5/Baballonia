@@ -8,21 +8,196 @@ should be able to continue without any prior conversation.
 ## Current Status
 
 ```
-Current phase: HOME evidence response implemented as the v12 release candidate.
-               True SteamVR Eye V2/Guided presentation, eye transport diagnostics,
-               history/provenance, guided quality, Grimace lab, microphone selection,
-               and data-folder UX are implemented. HOME VR validation is still pending.
-Branch: main; committed base HEAD d21b9e3 (camera/12-output eye fix).
-Source state: 66 worktree paths implement the remaining v12 changes. Git staging/commit writes
-              were blocked by the environment's approval-usage limit on 2026-08-14; rebuild after
-              those logical commits so assembly ProductVersion records their final revision.
-Build: bin/Baballonia-v12 and bin/Baballonia-v12.zip (verified candidate; v11 untouched).
-Suite: focused 301 passed / 0 failed / 5 skipped. Full 326 passed / 9 failed / 5 skipped;
-       the same 9 documented hardware/trainer-fixture failures remain, with no new failure.
-Python: 105 checks across 9 suites, all passing.
-Recordings (HOME PC): 7 sessions / 14,070 frames (Neutral 3, Speech 2, Guided 2,
-                      Correction 0).
+Current phase: v13. The v12 worktree is committed, and the four UX/correctness milestones
+               planned on 2026-08-15 are implemented: overlay stability, guided pacing,
+               headset-native eye calibration, and the guided-quality probe fix.
+               HOME VR validation is pending for all four.
+Branch: main; HEAD 9ac3439. Worktree clean - v13's ProductVersion records its real revision.
+Build: bin/Baballonia-v13 + bin/Baballonia-v13.zip. v10, v11, v12 untouched as rollbacks.
+Suite: 342 passed / 0 failed / 5 skipped excluding hardware; the 9 documented ESP32-serial and
+       BabbleTrainer-fixture failures remain, unchanged, with no new failure.
+Python: 110 checks across 9 suites, all passing.
+Recordings (HOME PC): 10 sessions / 15,129 frames (Neutral 4, Speech 2, Guided 3, Correction 1).
 ```
+
+**Read this before the older sections.** Much of what follows predates v13 and several parts
+contradict each other on the current build number, the git state and the open problem list. Where
+they disagree with this block, this block is right. Consolidating them is scheduled work, not an
+oversight.
+
+## v13 implementation record — 2026-08-15
+
+Four milestones from the 2026-08-15 plan, one commit each, on top of nine commits that finally
+landed the v12 worktree.
+
+### M0 — the v12 worktree is committed
+
+66 dirty paths became 9 commits (`70f3f53` … `2a314a9`), grouped by subsystem: VRCFT module, eye
+OSC output, the VR presenter, the Eye V2 in-headset flow, audio input selection, personalization
+services, UI, training, docs. They land as one integrated drop — the intermediate commits are not
+independently buildable — but the history now describes what was built, and `ProductVersion` for
+v13 records a real revision rather than the base of a dirty tree.
+
+### M1 — overlay flicker (`f15e698`)
+
+Root cause was the update path, not the overlay's lifetime. Every `Present` allocated a 1024×768
+bitmap, looked up a font family per drawn string (eight or more per frame), redrew the whole panel
+and pushed a full `SetOverlayRaw` upload — on the UI thread, inside the presenter lock. Guided
+capture does that 20 times a second unconditionally, including when only a progress bar had moved
+by a fraction of a pixel. Eye V2 did the same at 4 Hz and flickered less; the Grimace preview
+presents only on change and did not flicker, which is what pointed at the cadence.
+
+- Frames are quantized to the resolution actually drawn and compared **before** rasterizing, so an
+  unchanged panel costs a record comparison. Guided still presents every tick — deliberately, so a
+  dead headset is caught on the next tick rather than a refresh interval later.
+- One surface and two typefaces per session instead of per frame. This also keeps the pixel buffer
+  passed to `SetOverlayRaw` alive for as long as the overlay can read it, rather than freeing it
+  the instant the call returns.
+- A single refused upload no longer destroys the overlay. Cosmetic updates retry up to three times;
+  an update carrying a **new instruction** still fails closed on the first failure, because
+  tolerating that one would let the headset show HOLD while the recorder labelled RELAX.
+- `End(message)` no longer holds the overlay handle for two seconds, so starting the next
+  calibration inside that window is no longer refused as "another calibration is already active".
+
+### M2 — guided pacing (`a9080ed`)
+
+There was no per-attempt preparation at all: between repetitions the only warning was the 0.75 s
+ramp. Each attempt now opens with a 3 s countdown that **names** the expression on the headset
+("NEXT: Smile" / "Get ready to smile") while the avatar stays neutral, and the ramp is 1.0 s.
+Naming it matters as much as the countdown — a subtle avatar smile is easy to miss, and a cue the
+user never noticed is still recorded as though they performed it. Retry replays the countdown.
+
+The headset now distinguishes SETTLE from HOLD, because the trainer discards the front of every
+hold; telling the user to hold still during frames nobody will look at wastes the usable window.
+The trim moved 0.5 s → 0.75 s to match the slower ramp, leaving 2.25 s of trusted hold. Prep
+carries no supervision, and a test pins that along with "the trim can never grow into the hold".
+
+A full pass grows by roughly a minute and a half.
+
+### M3 — headset-native eye calibration (`f4101f3`)
+
+The gaze targets were dots drawn inside the instruction panel — a flat-screen affordance that asks
+the eye to look at a picture of a target, and that caps anchor separation at whatever fits in a
+rectangle. The target is now its own overlay placed by visual angle (~11° horizontal, ~8° vertical
+at the standard anchors, matching the extents the in-panel dot spanned so the fit stays comparable,
+and well inside eye-in-head range so it measures the eye rather than the neck). Its texture uploads
+once; only the transform moves. The panel recedes while a target is up, and if SteamVR refuses the
+second overlay the old in-panel dot still renders.
+
+Sampling no longer starts on the frame the target appears: 800 ms of acquisition passes first, so
+the saccade and settle are not folded into the fixation. **Verified discriminating** — the test runs
+the same synthetic calibration twice, once with the in-flight frames carrying a wildly wrong gaze,
+and requires identical coefficients; it fails when the delay is removed.
+
+Wording stays "calibration"/"mapping" throughout. V2-A fits a transform over the existing eye model
+and trains nothing.
+
+### M4 — the guided-quality probe (`9ac3439`)
+
+**This is why Grimace never worked.** The gate correlates one commanded dimension against the stock
+model's reading of it, and it was taking `dims[0]` — the lowest schema index, not the most important
+dimension. Grimace commands MouthLowerDown at 0.82 and MouthStretch at 0.72, but also JawOpen at
+0.16; and this user's *closed* jaw already reads ~0.77, falling as the mouth stretches. Every
+attempt correlated near −0.8, was called weak, and trained at quarter weight. The coverage census
+counts only confident labels, so nothing showed that a whole cue had been recorded and discounted.
+
+`diagnose_guided.py` on the two existing Grimace sessions (recorded in full below) shows
+MouthStretchLeft/Right tracking every attempt at **+0.94 to +0.96**. The user had been performing
+the grimace correctly the whole time.
+
+Picking the hardest-commanded dimension is not sufficient either: MouthLowerDown is commanded
+hardest and the stock model barely registers it, holding near 0.01 whether the lip moves or not. So
+a dimension must actually move in the output to qualify, and among those the probe is chosen **per
+cue** from how consistently each responded across all of that cue's attempts. Per cue, not per
+attempt, is what keeps it honest — an attempt cannot be graded against whichever dimension flatters
+it, and a missed repetition still scores badly on the dimension its siblings scored well on, which
+is the suppression condition. A test covers each of those three properties.
+
+Result on the real corpus: all six Grimace attempts move from weak (0.25×) to good (1.0×), and the
+corpus goes from 26 good / 10 weak to **34 good / 2 weak**.
+
+Also in M4: a third coverage tier for expressions shown only at reduced confidence (so a discounted
+cue is visibly different from one never attempted); `--val-sessions` plumbed through `TrainAsync` so
+B and C can be trained against a pinned split; and a per-run `SUMMARY.txt` in plain English.
+
+### diagnose_guided output — the Grimace evidence
+
+Representative attempt (`20260815_005019_guided`, rep 0), commanded vs stock, with lag:
+
+```
+dimension                   cmd  stock rest  stock hold    corr   lag s
+MouthLowerDownLeft         0.82       0.006       0.017   +0.70    0.69
+MouthLowerDownRight        0.82      -0.001       0.003   +0.51    0.69
+MouthStretchLeft           0.72       0.006       0.597   +0.94    0.26
+MouthStretchRight          0.72       0.002       0.689   +0.94    0.21
+JawOpen                    0.16       0.770       0.552   -0.78    0.00
+```
+
+JawOpen is the dimension the old gate judged on. MouthLowerDown is commanded hardest and moves by
+about one part in a hundred. MouthStretch is the expression, and it is unmistakable.
+
+**The Grimace cue vector does not need redesigning.** Retrain and re-test it in VR before changing
+anything about it.
+
+### Tests
+
+- .NET: **342 passed / 0 failed / 5 skipped** excluding hardware. The 9 ESP32-serial and
+  BabbleTrainer failures are unchanged (confirmed by running that subset alone: 9 failed / 5 passed
+  in 82 s — it does not hang; an earlier apparent hang was contention with a concurrent run).
+- Python: **110 checks / 9 suites**, all passing.
+- 16 tests added: frame quantization, cosmetic-vs-instruction failure tolerance, guided prep
+  ordering and the prep/trim data-integrity rules, gaze-target angles, the acquisition-window
+  exclusion, and the three probe-selection properties.
+- Two existing test helpers walked a fixed number of steps to reach a hold, and one derived a frame
+  index from the old 0.5 s trim. Both now derive from the thing they depend on, so a pacing change
+  cannot silently point them at the wrong phase.
+
+### Build
+
+```
+%USERPROFILE%\.dotnet\dotnet.exe publish src\Baballonia.Desktop\Baballonia.Desktop.csproj ^
+    -c Release -r win-x64 --self-contained true
+# then copy the publish directory to bin\Baballonia-v13  (-o breaks on the comma in the repo path)
+# then build src\VRCFaceTracking.Baballonia and copy its zip into bin\Baballonia-v13\VRCFT-Module\
+```
+
+- **`bin\Baballonia-v13\Baballonia.Desktop.exe`**, ProductVersion `1.0.0+9ac3439…`
+- `bin\Baballonia-v13.zip` — SHA-256 `390DD3DC980D71038935FF85549EC9CBA807B186665B1E6AD33E4A10A4FEF09F`
+- `VRCFT-Module\VRCFaceTracking.Baballonia-3.2.1-local.zip` — SHA-256
+  `33F52D9E307862B4AEEA5F8D172B0A7C979CCF6C853AB8714736088A6D190440` (module unchanged from v12)
+- Verified: 4 capture DLLs in `Modules\`, `training\` present including `diagnose_guided.py`, no
+  `__pycache__`, `openvr_api.dll` present. v10/v11/v12 untouched.
+
+Copying the module zip into the build is still a manual step — no MSBuild target does it.
+
+### HOME-PC VALIDATION REQUIRED
+
+Nothing below has been seen on hardware. In order:
+
+1. **Overlay steadiness.** Run guided capture and Eye V2 calibration in-headset. The panel must
+   hold steady through every phase change, through Retry, and from a completion message straight
+   into starting the next calibration.
+2. **Guided pacing.** Run a full pass. The countdown should give enough time to read the expression
+   and get into it; SETTLE should read as "arrive now", HOLD as "stay still". Then record a fresh
+   full-pass session — the old ones were captured under the old pacing.
+3. **Eye calibration.** The target should feel like a point in space rather than a dot on a panel.
+   Compare V2-A quality against the previous calibration; the fit is unchanged, so it should be at
+   least as good. If it is worse, the anchor angles are the thing to look at.
+4. **Grimace.** Re-run Prepare Model C (the correction and newest neutral sessions have no
+   embeddings yet), retrain, and physically re-test the grimace in the mirror. The supervision is
+   now 4× stronger than in any model trained so far.
+5. **Fair B vs C.** Pin the holdout to the newest neutral, newest speech and newest guided; train
+   both on the identical remaining corpus at seed 0; compare resting behaviour, jitter, JawOpen
+   persistence, range retention, guided response and cross-talk, then decide in the VR mirror. If
+   they tie, prefer B — it is smaller and has no embedding-runner dependency.
+
+### Not done, deliberately
+
+The model-history browser and plain-English provenance UI, audio-assist polish, and the
+documentation consolidation are the next session's work. No cue vector was redesigned, no new model
+family was added, and nothing was changed about V2-B geometry.
+
+---
 
 ### v12 HOME-response implementation record — 2026-08-14
 
