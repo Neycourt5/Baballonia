@@ -8,19 +8,118 @@ should be able to continue without any prior conversation.
 ## Current Status
 
 ```
-Current phase: PHASE 2 IMPLEMENTED (M1-M5, M7 complete and committed).
-               PHASE 3 P3-1 THROUGH P3-5 IMPLEMENTED. Eye V2-A remains the
-               unchanged selectable control; V2-B Geometry Hybrid is separate.
-               The user intentionally overrode the original P3-4 home validation
-               gate on 2026-08-14. Hardware/VRChat validation is still pending.
-Branch: main (29 commits ahead of upstream 84eca8c, not pushed)
-Build: OK (core, Desktop, tests).
-Suite: 258 passed / 9 failed / 2 skipped.  The 9 are the same pre-existing
-       hardware failures (serial board, firmware JSON, missing BabbleTrainer.exe);
-       the 2 skips need PyTorch state or real recordings.
-Python: 102 checks across 8 suites, all passing (unchanged by P3-4).
-Recordings (HOME PC): 4+ sessions (2 neutral, 2 speech + later additions), ~6,375 frames.
+Current phase: HOME evidence response implemented as the v12 release candidate.
+               True SteamVR Eye V2/Guided presentation, eye transport diagnostics,
+               history/provenance, guided quality, Grimace lab, microphone selection,
+               and data-folder UX are implemented. HOME VR validation is still pending.
+Branch: main; committed base HEAD d21b9e3 (camera/12-output eye fix).
+Source state: 66 worktree paths implement the remaining v12 changes. Git staging/commit writes
+              were blocked by the environment's approval-usage limit on 2026-08-14; rebuild after
+              those logical commits so assembly ProductVersion records their final revision.
+Build: bin/Baballonia-v12 and bin/Baballonia-v12.zip (verified candidate; v11 untouched).
+Suite: focused 301 passed / 0 failed / 5 skipped. Full 326 passed / 9 failed / 5 skipped;
+       the same 9 documented hardware/trainer-fixture failures remain, with no new failure.
+Python: 105 checks across 9 suites, all passing.
+Recordings (HOME PC): 7 sessions / 14,070 frames (Neutral 3, Speech 2, Guided 2,
+                      Correction 0).
 ```
+
+### v12 HOME-response implementation record — 2026-08-14
+
+- **Camera-start bug:** the live selected temporal eye ONNX exposes 12 named outputs, while the
+  legacy filter accepts six. The pipeline now publishes the complete named vector for diagnostics,
+  then explicitly projects `[rightY,rightX,rightLid,leftY,leftX,leftLid]` before the legacy filter.
+  This is committed as `d21b9e3`; it explains the observed initialize-then-disappear behavior.
+- **Training truth/provenance:** normal UI distinguishes discovered session/frame pairs,
+  optimization split, and held-out validation without claiming every raw row has nonzero weight.
+  Training runs freeze their train/validation inventories going forward; historical A/B/C artifacts
+  remain independently selectable newest-first. A missing/deleted old session becomes unknown with
+  its ID listed, never false “no Guided”. Exact artifact activation and manual selection are
+  transactional, and persisted 0% blend remains exactly Stock.
+- **Training-data folder:** both Recording and Training cards open the same
+  `%APPDATA%\ProjectBabble\PersonalDataset` directory. The buttons are disabled during capture,
+  preview, setup, or training, and the command has the same backend guard. UI warns that deletion
+  can change which newest session is held out and offers Refresh Counts.
+- **Guided quality:** identity is `(session,cue,rep,attempt)`. Good correlation (>=0.60) keeps full
+  hold weight; Weak keeps 0.25; automatic suppression requires correlation <=0.10 plus a Good peer
+  of that exact cue in the same session. Explicit headset retry/skip/cancel verdicts win. Only hold
+  supervision is scaled; rest, preparation, transition, speech, neutral, and correction semantics
+  are unchanged. Each run writes `guided_quality.json`.
+- **True in-headset presenter:** a process-local Windows SteamVR/OpenVR overlay, rendered with Skia,
+  is HMD-relative over VRChat and presents instruction/help, countdown, target, HOLD/RELAX,
+  intensity, repetition, progress, Retry/Skip/Cancel, completion, and error. Eye and Guided share a
+  single-owner presenter and fail closed on render/input/deadman loss. This does not claim a true
+  OpenXR/Monado/WiVRn overlay.
+- **Eye V2:** V2-A remains mapping/anchors over the selected eye model, not neural training. Its
+  complete 60-second Relax/Blink/Squint/Wide/center/left/right/up/down flow is presentable in the
+  headset with presentation-before-sampling barriers and transactional calibration rollback.
+  V2-B remains the separately selectable Geometry Hybrid using the existing replaceable classic
+  extractor and confidence fallback to V2-A; no new learned geometry model or HOME benchmark was
+  added.
+- **Eye transport/debug:** final canonical order is
+  `[LeftX,LeftY,LeftLid,RightX,RightY,RightLid,LeftWide,LeftSquint,RightWide,RightSquint]`.
+  Blink is low Lid, while Wide and Squint have independent OSC channels and independent VRCFT
+  Unified Expression routes. Advanced Eye Debug shows requested/actual model, provider/output names,
+  native named 12, projected raw six, final six/ten, exact address/value/destination/send state, and
+  installed on-disk module version/hash. UDP “sent” is explicitly local socket completion, not a
+  receiver acknowledgement.
+- **Guided presentation/safety:** the headset state is uploaded before avatar override and recorder
+  cue publication. Retry creates a new attempt, Skip/Cancel/early stop/deadman/presenter loss reject
+  only the current attempt, and teardown always neutralizes the avatar and finalizes the sidecar.
+  Neutral/Speech/Guided recording now requires a fresh valid face-inference frame before any session
+  directory is created.
+- **Grimace lab:** three schema-valid hypotheses command only JawOpen, MouthLowerDown L/R, and
+  MouthStretch L/R. Preview is VR-only and never records/publishes a cue. No Grimace routine exists
+  until the user explicitly confirms a candidate whose catalog/schema/vector fingerprint still
+  matches. This is an experiment scaffold; the correct avatar-specific vector is not claimed.
+- **Audio:** exact WinMM inputs are enumerated and selectable with live input level, voice state,
+  active/fallback name, persistence, audio-only restart, and always-on five-second reconnect. WinMM
+  cannot authoritatively identify the current Windows default endpoint, so the honest automatic
+  label is “first available input”; select the intended microphone explicitly.
+
+**v12 candidate payload:** `bin\Baballonia-v12\Baballonia.Desktop.exe` plus
+`bin\Baballonia-v12.zip`. The folder contains 397 files / 453,452,341 bytes, the four Windows
+capture modules, `training\babble_personal`, x64 `openvr_api.dll`, and
+`VRCFT-Module\VRCFaceTracking.Baballonia-3.2.1-local.zip`. Outer zip SHA-256 is
+`73C09B6EC93180C2EC3743E49073E397D0E8EC77B9EE9FD2FE03DE986D7EBA76`; module zip SHA-256 is
+`104BC068DAC0EA7D0AA261F63C9BCCA4DEBBC2A5C3BE55F7D4DF6D3EFC3B8E9D`. The candidate was built
+from the verified dirty worktree over `d21b9e3`, so its ProductVersion names that base revision;
+commit and republish before calling revision provenance final. `package-audit-v12` is a disposable
+intermediate audit publish, not a release; automatic deletion was blocked by the same approval
+limit. Existing `Baballonia-v10`, `Baballonia-v11`, and their archives were not overwritten.
+
+**HOME-PC MANUAL VALIDATION REQUIRED:** install/restart the packaged 3.2.1-local VRCFT module, then
+test v12 cameras, the SteamVR overlay over VRChat, HMD-relative target signs/readability while turning
+the head, simultaneous capture, Retry/Skip/Cancel, no stuck avatar override, full Eye V2-A plus
+Recenter, Default/V2 switching, visible gaze/lid/Wide/Squint changes end-to-end, Guided cue/label
+synchronization, Grimace A/B/C preview and explicit confirmation, microphone selection/meter and USB
+reconnect, historical B switching, and actual C identity/fallback. Do not claim those hardware or
+avatar results until exercised.
+
+Recommended HOME sequence:
+
+1. Run `bin\Baballonia-v12\Baballonia.Desktop.exe`; leave v10/v11 as rollback copies.
+2. Start both Bigeye eye cameras and the face camera, wait at least 30 seconds, then Stop/Start each
+   once to confirm that frames persist and reconnect.
+3. Install `VRCFT-Module\VRCFaceTracking.Baballonia-3.2.1-local.zip`, restart VRCFaceTracking, and
+   confirm Advanced Eye Debug reports the local 3.2.1 manifest/hash before judging avatar behavior.
+4. With SteamVR and VRChat running, establish a Default-eye gaze/lid baseline and verify the overlay
+   remains head-relative, readable, and does not hide the avatar mirror.
+5. Select V2-A and complete Relax, Blink, Squint, Wide, and all five gaze targets entirely in-headset;
+   exercise Retry and Cancel once, verify target direction while turning the head, then complete and
+   Recenter. Compare Default and V2-A on natural blink, held/asymmetric squint, wide eyes, and gaze
+   extremes while watching raw, mapped, final, and OSC diagnostics.
+6. Run a short Guided routine, then the full routine. Exercise Retry, Skip, and Cancel; verify the cue
+   is visible before avatar motion/recording, cameras stay live, invalid attempts appear in the quality
+   sidecar, and cancellation leaves no stuck expression override.
+7. Preview Grimace A/B/C without recording, choose by actual avatar result and imitability, explicitly
+   confirm one candidate, and only then run its separate Guided capture.
+8. Select the intended microphone explicitly, test level/voice state and enable/disable, then unplug
+   and reconnect it to verify automatic recovery without reopening Personalization.
+9. Switch between at least two historical B artifacts, reject an incompatible manual model without
+   losing the active one, and request C while checking the exact active artifact/fallback reason.
+10. Record the intended new full corpus and train only after the checks above; inspect split provenance
+    and `guided_quality.json`, remembering that the newest session of each repeated type is held out.
 
 **What changed on 2026-08-14 (this session).** Six milestones implemented on the work PC, each
 committed separately with its reasoning. Both toolchains turned out to be available here (.NET SDK
@@ -64,6 +163,50 @@ because each would have been silent in production:
 - **Remaining problem #2 — rare false TongueOut:** brief, rare, much less annoying. Fix naturally
   if the same architecture covers it; do not let it distract from JawOpen.
 - The old flood of calibration/crop/slider problems is greatly reduced by personalization.
+
+### NEW HOME-PC / VRCHAT EVIDENCE â€” 2026-08-14 evening (do not overwrite the earlier result)
+
+- After completing the expanded Guided face routine, the user trained a fresh **Model B** and then
+  used it in VRChat with the real headset/cameras. Subjectively it looks very good, face motion is
+  natural, resting-mouth behavior is substantially better, and the intermittent false JawOpen is
+  now much less apparent. The user is currently happy with it. This is qualitative real-avatar
+  evidence, not a fabricated numeric benchmark. Preserve **B > A > stock** and treat this newer B as
+  the known-good daily-driver baseline.
+- **Model C currently appears worse than that B subjectively**, but this is not a final verdict.
+  Requested versus actually-active model identity and fallback provenance must be unambiguous before
+  diagnosing C. C does not win merely because its architecture is attractive.
+- The expanded Guided workflow is promising, but an avatar mirror alone is ambiguous: the user
+  missed at least one subtle Smile cue. A confidently missed cue can manufacture a wrong label, so
+  explicit true in-headset instructions and per-cue/per-repetition quality handling are now higher
+  priority than collecting more unguided frames.
+- Eye V2's desktop instructions/gaze dots are not usable while wearing the headset. V2-A remains a
+  mapping/anchor calibration over the selected eye model â€” it does **not** train another neural eye
+  model â€” and its presentation must move to a reusable in-VR presenter before the serious Paper
+  comparison.
+- Wide, Squint, ordinary openness/blink, and gaze must be proven across the complete
+  Baballonia â†’ OSC â†’ Baballonia VRCFT module â†’ Unified Expressions â†’ VRChat route. Passing mapper
+  unit tests is not evidence that the installed VRCFT package is current.
+- Audio Assist cannot yet be meaningfully judged because the user cannot see or choose the active
+  microphone. The normal UI needs endpoint selection, a live level, and voiced/not-voiced state;
+  switching audio must never restart visual inference.
+
+**Actual cumulative corpus and latest-B split (verified from HOME-PC artifacts):** 7 complete
+sessions / **14,070 frames** â€” Neutral 3 / 4,718; Speech 2 / 3,212; Guided 2 / 6,140;
+Correction 0. Run `20260814_173418_image_residual_v1` discovered all seven sessions. It optimized
+on 4 sessions / **5,573 frames** (two Neutral, one Speech, and the earlier 846-frame Jaw-only Guided
+pass) and held out 3 sessions / **8,497 frames** (newest Neutral, newest Speech, and the newest
+5,294-frame expanded Guided pass). Therefore the expanded Guided pass **was included in the run but
+was validation-only; it did not contribute gradients**. The installed `personalFaceModel-b.onnx`
+is byte-identical to that run's export. This distinction must be visible in the normal UI.
+
+Current aggregation semantics are cumulative and correct: discovery loads every session directory;
+the default session-level split holds out the newest session of each type only when at least two of
+that type exist; training never optimizes on the held-out sessions. Neutral targets are strong zero;
+Speech pseudo-labels are weight 0.3; settled Guided hold/rest targets are weight 1.0 while transitions
+are masked and uncued dimensions follow co-activation exclusions; Corrections are weight 2.0 on only
+their explicitly named dimensions, with every unrelated dimension weight zero. A new recording never
+replaces old Neutral/Speech/Guided/Correction evidence. **With two or more Correction sessions, the
+newest Correction is likewise validation-only under this default split.**
 
 **Model naming (standardized):** **A** = output-only residual adapter (stock 45 → MLP). **B** =
 image-conditioned residual adapter (camera image + stock 45, own small CNN). **C** =

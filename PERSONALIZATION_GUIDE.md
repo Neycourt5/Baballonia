@@ -5,9 +5,10 @@ A practical guide to training Baballonia to recognise **your** face on **your** 
 This is not slider calibration. You record real footage of your face, a small model learns where the
 stock model gets your expressions wrong, and that correction runs live in front of VRChat.
 
-> **Status:** capture, training, runtime, quick corrections, guided jaw calibration and the optional
-> audio enhancement all work, and the whole thing is driven from one page in the app — no terminal
-> needed. See [What Doesn't Exist Yet](#13-what-doesnt-exist-yet) for the honest gaps.
+> **Status:** capture, A/B/C training, immutable model history, quick corrections, full guided face
+> routines, and microphone-selectable audio assist are available from the app. Guided instructions
+> and Eye V2 calibration use a true SteamVR headset overlay. See
+> [What Doesn't Exist Yet](#13-what-doesnt-exist-yet) for the hardware-validation gaps.
 
 ---
 
@@ -19,12 +20,13 @@ Everything below is detail. The actual workflow is:
 2. If Setup says the training tools aren't ready, press **Set Up Training Tools** and wait.
 3. Press **Record Neutral** (rest your face ~45 s), **Stop**. Do it twice.
 4. Press **Record Speech** (talk ~1 min), **Stop**. Do it twice.
-5. Press **Train My Face Model** and wait a few minutes.
-6. Use the **Stock / Personal** switch to compare.
+5. Choose Model B, press **Train Model B**, and wait a few minutes.
+6. Use **Face model selection** to switch between Stock and any exact historical A/B/C artifact.
 
-Then, once that works: press **Start jaw calibration** and copy your avatar for a minute, and press
-**My mouth was closed** whenever you catch the tracker getting it wrong. Both make the next training
-run better in ways more Neutral recordings cannot.
+Then, once that works: put on the headset, choose a Guided routine, and copy the avatar while the
+SteamVR overlay gives explicit instructions. Press **My mouth was closed** whenever you catch the
+tracker getting it wrong. Both add evidence to the next explicit training run; neither mutates the
+currently running model immediately.
 
 That's it. Nothing else in this document is required reading.
 
@@ -188,6 +190,7 @@ The **Model** dropdown picks what to train:
 |---|---|---|
 | **A — expressions only** | The stock model's 45 numbers | The cheap, honest baseline. Very good at removing a constant bias; it never sees your face. |
 | **B — expressions + camera image** | Also the camera frame | Can fix mistakes that need visual information. Slower to train, more to overfit. |
+| **C — shared visual embedding** | Stock values plus the stock network's visual features | Experimental. Prepare its feature cache first, and keep B unless C wins on your avatar. |
 
 Train both and keep whichever wins on your own held-out recordings — the results screen tells you
 which did better. In practice B has been the better one here, but that is a measurement, not a rule.
@@ -196,23 +199,16 @@ which did better. In practice B has been the better one here, but that is a meas
 
 ## 5. Installing and testing it
 
-Installation is automatic — training finishes with the model installed and active. The Setup section
-will show:
+Training and activation are reported separately. A successful export does not claim to be active
+unless the runtime loaded that exact artifact. The Face model selection card shows both
+**Requested** and **Actually active**, including any fallback reason.
 
-```
-✓ Personal model: Active
-```
+### Switching models
 
-### The A/B test
-
-Under **Compare**, switch between:
-
-```
-( ) Stock     (•) Personal
-```
-
-Do it while pulling faces, and then while actually talking to someone in VRChat. Stock is always one
-click away, and nothing you do here can break normal tracking.
+Choose Stock or any historical A/B/C artifact in **Face model selection**, then press **Use**. The
+library is newest-first and shows exact file/run provenance. A rejected or incompatible manual ONNX
+does not uninstall the working model. Do the comparison while pulling faces and while actually
+talking in VRChat; Stock is always one click away.
 
 Under **Advanced** there is a **Strength** slider (0% is exactly stock, 100% fully personalized) and
 a live table of every expression showing stock value, personal value, and the difference, sorted by
@@ -337,8 +333,9 @@ Everything stays on your machine. There is no upload, no telemetry, no cloud ser
 | Trained models | `%APPDATA%\ProjectBabble\Models\` |
 | Training runs | wherever you pointed `--out` |
 
-Each session is a self-contained folder — back it up, move it, or delete it freely. **Open dataset
-folder** on the Personalization page takes you straight there.
+Each session is a self-contained folder. **Show Training Data in Folder** on the Personalization
+page takes you straight there so a genuinely bad session can be moved, backed up, or deleted. Press
+**Refresh Counts** afterward: removing a session can change which newest session is held out.
 
 `.gitignore` is set up so face data and trained models can't be committed by accident. Datasets live
 outside the repo anyway.
@@ -381,14 +378,22 @@ Recording yourself resting teaches the model what "nothing" looks like. Nothing 
 Speech session teaches it what a *correct* open jaw looks like — which is the other half of telling
 those two apart.
 
-Guided calibration fixes that. Your avatar opens its jaw by an amount the app chose, you copy it,
-and because the app knows what it asked for, it knows what your face should have been doing.
+Guided calibration fixes that. Your avatar performs an expression vector chosen by the app, you copy
+it, and because the app knows what it asked for, it knows what your face should have been doing.
 
 1. Put your headset on with VRChat running and your avatar visible in a mirror.
-2. Press **Start jaw calibration** on the Personalization page.
-3. Copy what the avatar does. Hold each pose while it holds; relax when it relaxes.
+2. Choose a focused expression or the Full Face pass, then press **Start Guided Calibration**.
+3. Copy the avatar while the headset overlay names the expression, counts down, and shows
+   **HOLD** / **RELAX**, intensity, repetition, and overall progress.
 
-It takes about a minute. The on-screen text tells you what to do at each moment.
+The controller overlay offers Retry, Skip, and Cancel. Retry replaces only that attempt; Skip or
+Cancel writes an explicit invalid-attempt verdict so partial or missed holds cannot train at full
+confidence. The trainer's `guided_quality.json` independently marks each repetition Good, Weak, or
+Suppressed instead of throwing away the whole session.
+
+Grimace is deliberately empirical: preview candidates A/B/C on the avatar in VR, confirm the one
+that is natural and repeatable, and only then does a separate Grimace guided routine become
+available. Previewing never records training data.
 
 **If it refuses to start** and mentions an OSC prefix, clear that setting first. With a prefix set
 your avatar would not move at all, and the recording would be labelled as expressions you never
@@ -407,6 +412,11 @@ of it, which reads as flat from across a room.
 **Personalization → Audio → Enhance expressions while speaking** uses your microphone's loudness to
 make mouth movements the camera already sees a little larger while you talk.
 
+Choose the exact input in **Audio Input** (or Automatic), then watch **Input Level**, **Voice**, and
+**Selected**. The choice is persisted. A missing USB device falls back without stopping visual
+tracking and is retried by the audio service even when the Personalization page is closed. Changing
+the input restarts only microphone capture, never a face or eye pipeline.
+
 It cannot invent an expression. If the tracker says you are not smiling, no amount of shouting puts
 a smile on your avatar — audio only scales up movement that is genuinely there. The camera stays the
 only thing deciding what your face is doing.
@@ -423,10 +433,12 @@ settings (`AudioAssist_SyncOffsetMs`, default 50 ms).
 
 Being explicit so nothing surprises you:
 
-- **In-VR correction buttons.** Quick corrections are a desktop button today, so you have to peek
-  out of the headset. Driving it from an avatar toggle or a hotkey is planned.
-- **Guided calibration beyond the jaw.** Smile, frown, pucker and the rest are designed but not
-  built; the jaw routine comes first because it is the actual remaining problem.
+- **In-VR quick-correction button.** Guided Retry/Skip/Cancel are in the overlay, but the rolling
+  **My mouth was closed** correction remains a desktop button.
+- **A validated cross-runtime overlay.** The built-in presenter is a Windows SteamVR/OpenVR overlay.
+  OpenXR/Monado/WiVRn do not yet have a proven overlay-over-VRChat path.
+- **A universally correct Grimace vector.** Candidates exist so this avatar can determine it
+  empirically; nothing is trainable until one is explicitly previewed and confirmed.
 - **The review tool** for hand-fixing individual frames.
 - **Audio phoneme assist** (matching mouth shapes to speech sounds). Deliberately later — simple
   loudness-based enhancement has to prove itself first.
@@ -447,7 +459,7 @@ conflict with the buttons — the app picks up whatever model you install.
 set PY=%LOCALAPPDATA%\babble-train-venv\Scripts\python
 cd /d <repo>\training
 
-:: Train the image-conditioned model (no UI option yet)
+:: Train the image-conditioned model from the CLI (the UI can also select B)
 %PY% -m babble_personal.train --data "%APPDATA%\ProjectBabble\PersonalDataset" ^
      --model b --out "%APPDATA%\ProjectBabble\PersonalTraining"
 
@@ -478,11 +490,11 @@ Each run folder contains `metrics.txt` (the full report), `summary.json` (what t
 ```
 Setup      Personalization → Set Up Training Tools   (once)
 Record     Record Neutral ×2, Record Speech ×2
-Guided     Start jaw calibration  (~1 min, avatar visible in a mirror)
-Train      Train My Face Model
-Compare    Stock / Personal
+Guided     Choose routine → Start Guided Calibration (SteamVR + avatar mirror)
+Train      Choose A/B/C → Train Model
+Compare    Face model selection → Stock or exact historical artifact
 Fix        My mouth was closed    (right after you see it go wrong)
-Audio      Enhance expressions while speaking  (optional, off by default)
+Audio      Choose input → verify meter/voice → enable assist (optional, off by default)
 Undo       switch to Stock, or delete
            %APPDATA%\ProjectBabble\Models\personalFaceModel.onnx
 ```
