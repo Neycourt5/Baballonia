@@ -14,10 +14,15 @@ public sealed class EyeV2Manager
     private readonly ILogger<EyeV2Manager> _logger;
     private readonly Action<IEyeStateMapper?> _setMapper;
     private readonly Func<IEyeGeometryExtractor> _geometryFactory;
+    private IEyeStateMapper? _activeMapper;
 
     public EyeTrackingMode Mode { get; private set; } = EyeTrackingMode.DefaultBaballonia;
+    public EyeTrackingMode RequestedMode { get; private set; } = EyeTrackingMode.DefaultBaballonia;
     public EyeV2Calibration? Calibration { get; private set; }
+    public EyeV2Calibration? StoredCalibration { get; private set; }
     public EyeV2Diagnostics? Diagnostics { get; private set; }
+    public string? FallbackReason { get; private set; }
+    public string? RuntimeNotice { get; private set; }
     public string Status { get; private set; } = "Default Baballonia eye tracking is active.";
 
     public event Action? StateChanged;
@@ -38,6 +43,9 @@ public sealed class EyeV2Manager
         _setMapper = mapperSetter ?? pipelineManager.SetMapper;
         _geometryFactory = geometryFactory ?? (() => new ClassicEyeGeometryExtractor());
 
+        if (_store.TryLoad(out var stored, out _) && stored?.IsValid() == true)
+            StoredCalibration = stored;
+
         var requested = settings.ReadSetting(ModeSetting, EyeTrackingMode.DefaultBaballonia);
         if (requested is EyeTrackingMode.ExperimentalV2 or EyeTrackingMode.GeometryHybridV2B)
             TrySetMode(requested);
@@ -47,6 +55,9 @@ public sealed class EyeV2Manager
 
     public bool TrySetMode(EyeTrackingMode mode)
     {
+        RequestedMode = mode;
+        FallbackReason = null;
+        RuntimeNotice = null;
         if (mode == EyeTrackingMode.DefaultBaballonia)
         {
             ApplyDefault(save: true);
@@ -56,10 +67,12 @@ public sealed class EyeV2Manager
         if (!_store.TryLoad(out var calibration, out var error) || calibration == null)
         {
             _logger.LogWarning("Eye V2 requested but unavailable: {Error}. Falling back to Default.", error);
-            ApplyDefault(save: true, status: $"Eye V2 unavailable: {error} Default is active.");
+            FallbackReason = error;
+            ApplyDefault(save: true, preserveRequest: true);
             return false;
         }
 
+        StoredCalibration = calibration;
         try
         {
             ActivateMode(calibration, mode, saveMode: true);
@@ -69,8 +82,9 @@ public sealed class EyeV2Manager
         {
             // A geometry implementation/load failure has a better fallback than Default: the
             // already-validated V2-A mapper using the same personal calibration.
+            FallbackReason = "V2-B geometry runtime was unavailable.";
             ActivateMode(calibration, EyeTrackingMode.ExperimentalV2, saveMode: true,
-                status: "V2-B geometry was unavailable; V2-A is active instead.");
+                preserveRequest: true);
             return false;
         }
     }
@@ -87,52 +101,134 @@ public sealed class EyeV2Manager
         EyeV2Calibration calibration,
         EyeTrackingMode mode,
         bool saveMode,
-        string? status = null)
+        bool preserveRequest = false)
     {
         if (!calibration.IsValid())
-        {
-            ApplyDefault(save: saveMode, status: "Eye V2 calibration was invalid; Default is active.");
             throw new InvalidOperationException("Eye V2 calibration is invalid.");
-        }
 
+        IEyeStateMapper? candidate = null;
+        var previousMapper = _activeMapper;
         try
         {
-            IEyeStateMapper mapper = mode == EyeTrackingMode.GeometryHybridV2B
+            candidate = mode == EyeTrackingMode.GeometryHybridV2B
                 ? new EyeV2GeometryMapper(
                     calibration, _geometryFactory(), UpdateDiagnostics, UpdateGeometry)
                 : new EyeV2Mapper(calibration, UpdateDiagnostics);
-            _setMapper(mapper);
-            Calibration = calibration;
-            Mode = mode;
-            Status = status ?? (mode == EyeTrackingMode.GeometryHybridV2B
-                ? "Eye V2-B Geometry Hybrid is active; low-confidence frames fall back to V2-A."
-                : "Eye V2-A personal mapping is active.");
-            if (saveMode) _settings.SaveSetting(ModeSetting, Mode);
-            StateChanged?.Invoke();
+
+            // Install first, then persist the selection, but do not publish any manager state until
+            // both operations succeed. A settings failure therefore has a concrete mapper to roll
+            // back to and observers never see a half-activated calibration.
+            _setMapper(candidate);
+            if (saveMode) _settings.SaveSetting(ModeSetting, mode);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Eye V2 initialization failed; falling back to Default.");
-            ApplyDefault(save: saveMode, status: "Eye V2 initialization failed; Default is active.");
+            try
+            {
+                _setMapper(previousMapper);
+            }
+            catch (Exception rollbackError)
+            {
+                _logger.LogCritical(rollbackError,
+                    "Eye V2 mapper rollback failed after activation error");
+                throw new AggregateException(
+                    "Eye V2 activation failed and its previous mapper could not be restored.",
+                    ex, rollbackError);
+            }
+
+            (candidate as IDisposable)?.Dispose();
+            _logger.LogError(ex,
+                "Eye V2 activation failed; the previous mapper and manager state were restored.");
             throw;
         }
+
+        _activeMapper = candidate;
+        Calibration = calibration;
+        StoredCalibration = calibration;
+        Mode = mode;
+        if (!preserveRequest) RequestedMode = mode;
+        FallbackReason = null;
+        RuntimeNotice = null;
+        Status = BuildStatus();
+        (previousMapper as IDisposable)?.Dispose();
+        NotifyStateChanged();
     }
 
     public void ReportStatus(string status)
     {
-        Status = status;
-        StateChanged?.Invoke();
+        RuntimeNotice = status;
+        Status = BuildStatus();
+        NotifyStateChanged();
     }
 
-    private void ApplyDefault(bool save, string? status = null)
+    private void ApplyDefault(bool save, bool preserveRequest = false)
     {
-        _setMapper(null);
+        var previousMapper = _activeMapper;
+        try
+        {
+            _setMapper(null);
+            if (save) _settings.SaveSetting(ModeSetting, EyeTrackingMode.DefaultBaballonia);
+        }
+        catch
+        {
+            _setMapper(previousMapper);
+            throw;
+        }
+
+        _activeMapper = null;
         Mode = EyeTrackingMode.DefaultBaballonia;
         Calibration = null;
         Diagnostics = null;
-        Status = status ?? "Default Baballonia eye tracking is active.";
-        if (save) _settings.SaveSetting(ModeSetting, Mode);
-        StateChanged?.Invoke();
+        if (!preserveRequest)
+        {
+            RequestedMode = EyeTrackingMode.DefaultBaballonia;
+            FallbackReason = null;
+        }
+        Status = BuildStatus();
+        (previousMapper as IDisposable)?.Dispose();
+        NotifyStateChanged();
+    }
+
+    private void NotifyStateChanged()
+    {
+        try
+        {
+            StateChanged?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            // UI/diagnostic listeners are outside the activation transaction. Their failure must
+            // not undo an otherwise committed runtime + settings swap.
+            _logger.LogError(ex, "An Eye V2 state listener failed");
+        }
+    }
+
+    private string BuildStatus()
+    {
+        static string Name(EyeTrackingMode mode) => mode switch
+        {
+            EyeTrackingMode.ExperimentalV2 => "Eye V2-A — Personal mapping",
+            EyeTrackingMode.GeometryHybridV2B => "Eye V2-B — Geometry Hybrid",
+            _ => "Default Baballonia",
+        };
+
+        var saved = StoredCalibration;
+        var lines = new System.Collections.Generic.List<string>
+        {
+            $"Requested: {Name(RequestedMode)}",
+            $"Actually active: {Name(Mode)}",
+            saved == null
+                ? "Calibration: Not loaded"
+                : $"Calibration: Loaded — captured {saved.Capture.CreatedUtc.ToLocalTime():g}",
+            $"Gaze mapper: {(Mode == EyeTrackingMode.DefaultBaballonia ? "Inactive (legacy path)" : "Active")}",
+            $"Left eye: {(saved?.Left.IsValid() == true ? "Valid" : "Not calibrated")}",
+            $"Right eye: {(saved?.Right.IsValid() == true ? "Valid" : "Not calibrated")}",
+        };
+        if (!string.IsNullOrWhiteSpace(FallbackReason))
+            lines.Add($"Fallback: {FallbackReason}");
+        if (!string.IsNullOrWhiteSpace(RuntimeNotice))
+            lines.Add(RuntimeNotice);
+        return string.Join(Environment.NewLine, lines);
     }
 
     private void UpdateDiagnostics(EyeV2Diagnostics diagnostics)

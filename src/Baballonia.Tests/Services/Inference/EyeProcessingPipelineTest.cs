@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Baballonia.Contracts;
 using Baballonia.Services;
 using Baballonia.Services.events;
@@ -161,12 +162,13 @@ public class EyeProcessingPipelineTickTest
     public void RawEventIsPublishedBeforeTheFilteredOne()
     {
         var order = new List<string>();
+        _bus.Subscribe<EyePipelineEvents.NewRawModelOutputEvent>(_ => order.Add("modelRaw"));
         _bus.Subscribe<EyePipelineEvents.NewRawExpressionsEvent>(_ => order.Add("raw"));
         _bus.Subscribe<EyePipelineEvents.NewFilteredResultEvent>(_ => order.Add("filtered"));
 
         RunUntilInference();
 
-        CollectionAssert.AreEqual(new[] { "raw", "filtered" }, order);
+        CollectionAssert.AreEqual(new[] { "modelRaw", "raw", "filtered" }, order);
     }
 
     [TestMethod]
@@ -196,13 +198,19 @@ public class EyeProcessingPipelineTickTest
         _pipeline.InferenceService = new NamedFakeRunner(extended, names);
         _pipeline.Filter = new OneEuroFilter(new float[Utils.EyeRawExpressions]);
 
+        EyePipelineEvents.NewRawModelOutputEvent? modelRaw = null;
         float[]? raw = null;
+        _bus.Subscribe<EyePipelineEvents.NewRawModelOutputEvent>(e => modelRaw = e);
         _bus.Subscribe<EyePipelineEvents.NewRawExpressionsEvent>(e => raw = (float[])e.rawResult.Clone());
 
         var result = RunUntilInference();
 
         Assert.IsNotNull(result);
         Assert.AreEqual(Utils.EyeRawExpressions, result.Length);
+        Assert.IsNotNull(modelRaw);
+        CollectionAssert.AreEqual(names, modelRaw.outputNames.ToArray());
+        CollectionAssert.AreEqual(extended, modelRaw.rawResult.ToArray(),
+            "the pre-projection event must preserve every native model channel");
         CollectionAssert.AreEqual(
             new[] { 0.10f, 0.20f, 0.30f, 0.40f, 0.50f, 0.60f }, raw,
             "the extra per-eye expression slots must not be mistaken for the left eye");

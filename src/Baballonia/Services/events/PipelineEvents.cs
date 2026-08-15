@@ -1,5 +1,6 @@
 ﻿using OpenCvSharp;
 using System;
+using System.Collections.Generic;
 
 namespace Baballonia.Services.events;
 
@@ -37,6 +38,26 @@ public class EyePipelineEvents
     public record NewFrameEvent(Mat image);
 
     public record NewTransformedFrameEvent(Mat image);
+
+    /// <summary>
+    /// A detached snapshot of the model's complete primary output, published before compatibility
+    /// projection, filtering, or eye post-processing. This is the diagnostic tap for extended eye
+    /// models: a twelve-channel graph remains observable here even though the established runtime
+    /// ABI below intentionally stays at six gaze/lid values.
+    /// </summary>
+    /// <remarks>
+    /// <para><paramref name="outputNames"/> and <paramref name="rawResult"/> are read-only,
+    /// same-length snapshots. Metadata names are preserved exactly when the runner supplies them;
+    /// legacy unnamed six-output graphs receive stable semantic names, and any other unnamed slots
+    /// are labelled <c>output[i]</c>.</para>
+    /// <para>This event deliberately does not expose the transformed <see cref="Mat"/>. It is for
+    /// lightweight diagnostics, while <see cref="NewRawExpressionsEvent"/> remains the image-paired
+    /// calibration tap with its existing lifetime and six-value contract.</para>
+    /// </remarks>
+    public record NewRawModelOutputEvent(
+        IReadOnlyList<string> outputNames,
+        IReadOnlyList<float> rawResult,
+        long timestampTicks);
 
     /// <summary>
     /// Raw legacy eye output, published immediately after inference and before the filter and

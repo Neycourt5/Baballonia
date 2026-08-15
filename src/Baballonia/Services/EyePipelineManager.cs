@@ -7,6 +7,7 @@ using Baballonia.Services.EyeV2;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 
@@ -25,6 +26,18 @@ public class EyePipelineManager
 
     private string? _currentLeftAddress;
     private string? _currentRightAddress;
+
+    /// <summary>The exact eye model that the current runner successfully opened.</summary>
+    public string ActiveModelPath =>
+        (_pipeline.InferenceService as DefaultInferenceRunner)?.ModelPath ?? "not loaded";
+
+    /// <summary>The execution provider selected by the current eye runner.</summary>
+    public string ActiveExecutionProvider =>
+        (_pipeline.InferenceService as DefaultInferenceRunner)?.ExecutionProvider ?? "not loaded";
+
+    /// <summary>Named native output contract reported by the active eye model, when available.</summary>
+    public IReadOnlyList<string> ActiveOutputNames =>
+        (_pipeline.InferenceService as INamedInferenceOutput)?.OutputNames ?? [];
 
     public EyePipelineManager(ILogger<EyePipelineManager> logger, EyeProcessingPipeline pipeline,
         ILocalSettingsService localSettings, InferenceFactory inferenceFactory,
@@ -349,12 +362,14 @@ public class EyePipelineManager
         _pipeline.Filter = filter;
     }
 
-    /// <summary>Atomically installs, clears or hot-swaps the optional personal eye mapper.</summary>
+    /// <summary>
+    /// Atomically installs, clears or hot-swaps the optional personal eye mapper. Mapper lifetime
+    /// belongs to <see cref="EyeV2.EyeV2Manager"/> so it can restore the previous instance if the
+    /// settings half of an activation transaction fails.
+    /// </summary>
     public void SetMapper(IEyeStateMapper? mapper)
     {
         mapper?.Reset();
-        var previous = _pipeline.Mapper;
         _pipeline.Mapper = mapper;
-        (previous as IDisposable)?.Dispose();
     }
 }

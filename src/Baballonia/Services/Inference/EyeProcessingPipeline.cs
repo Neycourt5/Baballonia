@@ -81,6 +81,15 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
             if (modelResult == null)
                 return null;
 
+            // This detached snapshot is intentionally published before the compatibility
+            // projection. Diagnostics can therefore see every native output (including the
+            // current temporal model's widen/squint/brow channels) without changing the stable
+            // six-value event consumed by calibration and V2.
+            eyePipelineEventBus.Publish(new EyePipelineEvents.NewRawModelOutputEvent(
+                ResolveModelOutputNames(modelResult, InferenceService),
+                Array.AsReadOnly((float[])modelResult.Clone()),
+                timestampTicks));
+
             // Newer trained eye models may expose expression values in addition to gaze/lid. Their
             // metadata describes a 12-value right-eye-first layout, while the rest of Baballonia
             // intentionally retains the six-value legacy contract. Project by name before the
@@ -141,6 +150,36 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
     /// ones, so the model is handed four "consecutive" frames spanning a camera switch.
     /// </remarks>
     public void ResetTemporalState() => _imageCollector.Reset();
+
+    private static IReadOnlyList<string> ResolveModelOutputNames(
+        float[] modelResult,
+        IInferenceRunner runner)
+    {
+        if (runner is INamedInferenceOutput { OutputNames: { } names } &&
+            names.Count == modelResult.Length)
+        {
+            var snapshot = new string[names.Count];
+            for (var i = 0; i < snapshot.Length; i++)
+                snapshot[i] = names[i];
+
+            return Array.AsReadOnly(snapshot);
+        }
+
+        if (modelResult.Length == Utils.EyeRawExpressions)
+        {
+            return Array.AsReadOnly(new[]
+            {
+                "rightEyeY", "rightEyeX", "rightEyeLid",
+                "leftEyeY", "leftEyeX", "leftEyeLid",
+            });
+        }
+
+        var fallback = new string[modelResult.Length];
+        for (var i = 0; i < fallback.Length; i++)
+            fallback[i] = $"output[{i}]";
+
+        return Array.AsReadOnly(fallback);
+    }
 
     private static float[] ProjectLegacyEyeOutput(float[] modelResult, IInferenceRunner runner)
     {

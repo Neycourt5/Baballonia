@@ -17,6 +17,8 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) :
 {
     public Size InputSize { get; private set; }
     public int OutputSize { get; private set; }
+    public string ExecutionProvider { get; private set; } = "Uninitialized";
+    public string ModelPath { get; private set; } = "";
     public DenseTensor<float> InputTensor;
     private ILogger _logger;
     private string _inputName;
@@ -59,12 +61,16 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) :
             throw new FileNotFoundException($"{modelPath} does not exist");
 
         _logger = loggerFactory.CreateLogger(this.GetType().Name + "." + Path.GetFileName(modelPath));
+        ModelPath = Path.GetFullPath(modelPath);
 
         SessionOptions sessionOptions = SetupSessionOptions();
         if (useGpu)
             ConfigurePlatformSpecificGpu(sessionOptions, modelPath);
         else
+        {
             sessionOptions.AppendExecutionProvider_CPU();
+            ExecutionProvider = "CPU";
+        }
 
         _session = new InferenceSession(modelPath, sessionOptions);
         _inputName = _session.InputMetadata.Keys.First();
@@ -153,6 +159,7 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) :
             !OperatingSystem.IsAndroidVersionAtLeast(15)) // At most 15
         {
             sessionOptions.AppendExecutionProvider_Nnapi();
+            ExecutionProvider = "NNAPI";
             _logger.LogInformation("Initialized ExecutionProvider: nnAPI for {ModelName}", modelName);
             return;
         }
@@ -164,6 +171,7 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) :
             OperatingSystem.IsTvOS())
         {
             sessionOptions.AppendExecutionProvider_CoreML();
+            ExecutionProvider = "CoreML";
             _logger.LogInformation("Initialized ExecutionProvider: CoreML for {ModelName}", modelName);
             return;
         }
@@ -175,6 +183,7 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) :
             try
             {
                 sessionOptions.AppendExecutionProvider_DML();
+                ExecutionProvider = "DirectML";
                 _logger.LogInformation("Initialized ExecutionProvider: DirectML for {ModelName}", modelName);
                 return;
             }
@@ -190,6 +199,7 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) :
         try
         {
             sessionOptions.AppendExecutionProvider_CUDA();
+            ExecutionProvider = "CUDA";
             _logger.LogInformation("Initialized ExecutionProvider: CUDA for {ModelName}", modelName);
             return;
         }
@@ -203,6 +213,7 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) :
         try
         {
             sessionOptions.AppendExecutionProvider_MIGraphX();
+            ExecutionProvider = "MIGraphX";
             _logger.LogInformation("Initialized ExecutionProvider: MIGraphX for {ModelName}", modelName);
             return;
         }
@@ -215,6 +226,7 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) :
         try
         {
             sessionOptions.AppendExecutionProvider_OpenVINO();
+            ExecutionProvider = "OpenVINO";
             _logger.LogInformation("Initialized ExecutionProvider: OpenVINO for {ModelName}", modelName);
             return;
         }
@@ -225,6 +237,7 @@ public class DefaultInferenceRunner(ILoggerFactory loggerFactory) :
 
         _logger.LogWarning("No GPU acceleration will be applied.");
         sessionOptions.AppendExecutionProvider_CPU();
+        ExecutionProvider = "CPU";
     }
 
     /// <summary>

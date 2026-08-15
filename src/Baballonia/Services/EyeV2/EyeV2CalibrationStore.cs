@@ -88,4 +88,38 @@ public sealed class EyeV2CalibrationStore
         await File.WriteAllTextAsync(temporary, json, cancellationToken);
         File.Move(temporary, Path, overwrite: true);
     }
+
+    /// <summary>Opaque byte-for-byte snapshot used by the calibration commit transaction.</summary>
+    internal readonly record struct FileSnapshot(bool Existed, byte[] Contents);
+
+    internal async Task<FileSnapshot> CaptureSnapshotAsync(
+        CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(Path))
+            return new FileSnapshot(false, []);
+        return new FileSnapshot(true,
+            await File.ReadAllBytesAsync(Path, cancellationToken).ConfigureAwait(false));
+    }
+
+    internal async Task RestoreSnapshotAsync(FileSnapshot snapshot)
+    {
+        if (!snapshot.Existed)
+        {
+            if (File.Exists(Path)) File.Delete(Path);
+            return;
+        }
+
+        var directory = System.IO.Path.GetDirectoryName(Path);
+        if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+        var temporary = $"{Path}.rollback-{Guid.NewGuid():N}";
+        try
+        {
+            await File.WriteAllBytesAsync(temporary, snapshot.Contents).ConfigureAwait(false);
+            File.Move(temporary, Path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
+    }
 }
