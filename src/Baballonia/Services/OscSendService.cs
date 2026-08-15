@@ -19,11 +19,16 @@ public abstract class OscSendService(
     public event Action<int> OnMessagesDispatched = _ => { };
     protected readonly IOscTarget OscTarget = oscTarget;
     private Socket _sendSocket;
+    private IPEndPoint? _destination;
+
+    /// <summary>The UDP endpoint currently selected for this transport.</summary>
+    public string Destination => _destination?.ToString() ?? "unconfigured";
 
     protected void UpdateTarget(IPEndPoint endpoint)
     {
         _sendSocket?.Close();
         OscTarget.IsConnected = false;
+        _destination = endpoint;
 
         _sendSocket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
 
@@ -42,44 +47,54 @@ public abstract class OscSendService(
         }
     }
 
-    public async Task Send(OscMessage message, CancellationToken ct)
+    public virtual async Task<OscDispatchResult> Send(OscMessage message, CancellationToken ct)
     {
-        if (_sendSocket is not { Connected: true })
-        {
-            return;
-        }
+        var destination = Destination;
+        if (_sendSocket is not { Connected: true } socket)
+            return FailedDispatch(destination, 1, "OSC UDP socket is not connected.");
 
         try
         {
-            var ip = IPEndPoint.Parse(OscTarget.DestinationAddress);
-            await _sendSocket.SendToAsync(message.ToByteArray(), SocketFlags.None, ip, ct);
+            await socket.SendAsync(message.ToByteArray(), SocketFlags.None, ct);
             OnMessagesDispatched(1);
+            return SuccessfulDispatch(destination, 1);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error sending OSC message");
+            return FailedDispatch(destination, 1, ex.Message);
         }
     }
 
-    public async Task Send(OscMessage[] messages, CancellationToken ct)
+    public virtual async Task<OscDispatchResult> Send(OscMessage[] messages, CancellationToken ct)
     {
-        if (_sendSocket is not { Connected: true })
-        {
-            return;
-        }
+        var destination = Destination;
+        if (messages.Length == 0)
+            return SuccessfulDispatch(destination, 0);
+
+        if (_sendSocket is not { Connected: true } socket)
+            return FailedDispatch(destination, messages.Length, "OSC UDP socket is not connected.");
 
         try
         {
             foreach (var message in messages)
             {
-                await _sendSocket.SendAsync(message.ToByteArray(), SocketFlags.None, ct);
+                await socket.SendAsync(message.ToByteArray(), SocketFlags.None, ct);
             }
 
             OnMessagesDispatched(messages.Length);
+            return SuccessfulDispatch(destination, messages.Length);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "Error sending OSC bundle");
+            return FailedDispatch(destination, messages.Length, ex.Message);
         }
     }
+
+    private static OscDispatchResult SuccessfulDispatch(string destination, int count) =>
+        new(true, destination, DateTimeOffset.UtcNow, count, null);
+
+    private static OscDispatchResult FailedDispatch(string destination, int count, string error) =>
+        new(false, destination, DateTimeOffset.UtcNow, count, error);
 }
