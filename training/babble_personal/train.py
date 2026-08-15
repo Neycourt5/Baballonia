@@ -542,6 +542,9 @@ def main(argv: list[str] | None = None) -> int:
         coverage=evaluate.coverage_report(train_labels),
     )
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    (run_dir / "SUMMARY.txt").write_text(
+        _human_summary(summary, train_sessions, val_sessions, quality_reports),
+        encoding="utf-8")
 
     print(f"\nCheckpoint: {checkpoint_path}")
     print(f"Export with: python -m babble_personal.export --checkpoint \"{checkpoint_path}\"")
@@ -589,6 +592,73 @@ def _hard_example_block(report_sessions, report_labels, personal) -> dict | None
         "frames": total_frames,
         "per_expression": per_dim,
     }
+
+
+def _human_summary(summary: dict, train_sessions, val_sessions, quality) -> str:
+    """A plain-English record of what this run learned from, written beside the model.
+
+    ``run.json`` and ``summary.json`` already hold everything, but answering "what did this model
+    actually train on?" from them means reading two files of nested keys. Months later, comparing
+    two models is the whole game, and the answer needs to survive without the app.
+    """
+    def block(title: str, sessions) -> list[str]:
+        if not sessions:
+            return [f"{title}: none"]
+        by_type: dict[str, list] = {}
+        for session in sessions:
+            by_type.setdefault(session.session_type, []).append(session)
+        lines = [f"{title}:"]
+        for session_type, group in sorted(by_type.items()):
+            frames = sum(len(s) for s in group)
+            lines.append(f"  {session_type:<12}{len(group):>3} session(s){frames:>8} frames")
+            for session in group:
+                lines.append(f"      {session.session_id}  ({len(session)} frames)")
+        return lines
+
+    family = {"output_mlp_v1": "Model A (expressions only)",
+              "image_residual_v1": "Model B (camera image)",
+              "embedding_head_v1": "Model C (shared visual features)"}
+
+    lines = [
+        family.get(summary.get("adapter_type"), summary.get("adapter_type", "unknown")),
+        f"Trained {datetime.now():%Y-%m-%d %H:%M}",
+        f"{summary.get('parameters', 0):,} parameters",
+        "",
+    ]
+    lines += block("Learned from", train_sessions)
+    lines.append("")
+    lines += block("Held back for testing", val_sessions)
+
+    if quality:
+        counts = {"good": 0, "weak": 0, "suppressed": 0}
+        for entry in quality:
+            counts[entry["status"]] = counts.get(entry["status"], 0) + 1
+        lines += ["", "Guided attempts:",
+                  f"  {counts['good']} followed the cue, {counts['weak']} partly, "
+                  f"{counts['suppressed']} discarded"]
+
+    neutral = summary.get("neutral") or {}
+    lines += ["", "Results on the held-out recordings:"]
+    if not summary.get("validated_on_held_out_sessions"):
+        lines.append("  NOT VALIDATED - nothing was held back, so these describe data it learned "
+                     "from.")
+    if neutral:
+        lines.append(
+            f"  Expressions firing at rest: "
+            f"{neutral.get('stock_false_activation_rate', 0) * 100:.1f}% before, "
+            f"{neutral.get('personal_false_activation_rate', 0) * 100:.1f}% after")
+        lines.append(
+            f"  Twitchiness at rest:        {neutral.get('stock_jitter', 0):.4f} before, "
+            f"{neutral.get('personal_jitter', 0):.4f} after")
+    lines.append(f"  Average error: {summary.get('mean_stock_mae', 0):.4f} before, "
+                 f"{summary.get('mean_personal_mae', 0):.4f} after")
+    lines.append(f"  Verdict: {summary.get('verdict', 'unclear')}")
+    lines.append("")
+    lines.append("Note: the error and 'improved' counts above are dominated by the held-out "
+                 "neutral recording,")
+    lines.append("so they mostly describe resting behaviour rather than expression accuracy.")
+
+    return "\n".join(lines) + "\n"
 
 
 def _build_summary(

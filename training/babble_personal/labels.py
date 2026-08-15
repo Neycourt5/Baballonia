@@ -489,6 +489,93 @@ def _inline_attempt_judgment(frames: Sequence) -> dict | None:
     }
 
 
+def _commanded_peaks(dims: Sequence[int], hold_frames: Sequence) -> dict[int, float]:
+    """Largest absolute value each cued dimension is commanded to during the holds."""
+    peak: dict[int, float] = {d: 0.0 for d in dims}
+
+    for frame in hold_frames:
+        target = (frame.cue or {}).get("target")
+        if not isinstance(target, (list, tuple)):
+            continue
+        for d in dims:
+            if d < len(target):
+                try:
+                    peak[d] = max(peak[d], abs(float(target[d])))
+                except (TypeError, ValueError):
+                    continue
+
+    return peak
+
+
+def _dominant_cued_dim(dims: Sequence[int], hold_frames: Sequence) -> int:
+    """Fallback probe when no dimension shows any response: the one commanded hardest."""
+    peak = _commanded_peaks(dims, hold_frames)
+    return max(dims, key=lambda d: (peak[d], -d))
+
+
+#: A probe dimension has to actually move in the stock model's output. Correlation is
+#: scale-invariant, so a dimension drifting by half a percent in perfect lockstep scores as highly as
+#: one that swings by half its range - and on real recordings that half a percent is noise.
+GUIDED_MIN_OBSERVABLE_RANGE = 0.02
+
+
+def _select_probe_dim(
+    dims: Sequence[int],
+    attempt_correlations: Sequence[dict[int, float]],
+    attempt_ranges: Sequence[dict[int, float]],
+    hold_frames: Sequence,
+) -> int:
+    """Pick the dimension used to judge whether a cue was followed.
+
+    Whether the user performed a cue is decided by correlating one commanded dimension against the
+    stock model's reading of it, so this choice *is* the verdict. It has to be a dimension the stock
+    model can actually see move.
+
+    Two rejected alternatives explain the shape of this:
+
+    Taking the first cued entry - the lowest schema index, not the most important one - is what
+    mis-scored the Grimace cue. Grimace commands MouthLowerDown at 0.82 and MouthStretch at 0.72,
+    but also JawOpen at 0.16, and JawOpen has the lowest index. So the gate judged a barely-commanded
+    dimension on a user whose *closed* jaw the stock model already reads at ~0.77 and which falls
+    while the mouth stretches. Every attempt correlated around -0.8, was written off as weak, and
+    trained at quarter weight. Nothing failed; the expression simply never got taught.
+
+    Taking the hardest-commanded dimension is not enough either. On this user MouthLowerDown is
+    commanded hardest of all, and the stock model barely registers it - the reading stays near 0.01
+    whether the lip moves or not - while MouthStretch tracks the same expression at +0.95. So a
+    dimension only qualifies if the stock output genuinely moves on it; correlation alone would rank
+    an imperceptible but tidy signal above a large, slightly noisier one.
+
+    Among the dimensions that do move, the probe is chosen per cue from how consistently each
+    responded across *all* its attempts, and every attempt is then judged on that one dimension.
+    Choosing per cue rather than per attempt is what keeps this from being circular: an attempt
+    cannot be graded against whichever dimension happens to flatter it, and a genuinely missed
+    repetition still scores badly on the dimension its own siblings scored well on - which is
+    exactly the condition for suppressing it.
+    """
+    if not attempt_correlations:
+        return _dominant_cued_dim(dims, hold_frames)
+
+    peak = _commanded_peaks(dims, hold_frames)
+
+    def typical(values: Sequence[dict[int, float]], dim: int) -> float:
+        seen = [v[dim] for v in values if dim in v]
+        return float(np.median(seen)) if seen else 0.0
+
+    observable = [d for d in dims
+                  if typical(attempt_ranges, d) >= GUIDED_MIN_OBSERVABLE_RANGE]
+    candidates = observable or list(dims)
+
+    def responsiveness(dim: int) -> tuple[float, float, int]:
+        return typical(attempt_correlations, dim), peak.get(dim, 0.0), -dim
+
+    best = max(candidates, key=responsiveness)
+
+    # If nothing responded at all, no dimension is evidence. Fall back to the commanded shape so the
+    # attempt is still reported, and let the usual thresholds call it weak or suppressed.
+    return best if responsiveness(best)[0] > 0 else _dominant_cued_dim(dims, hold_frames)
+
+
 def guided_attempt_quality(sessions: Sequence[Session]) -> list[dict]:
     """Classify each Guided hold attempt without ever rejecting a whole session.
 
@@ -502,6 +589,7 @@ def guided_attempt_quality(sessions: Sequence[Session]) -> list[dict]:
     Returns deterministic entries ordered by session, cue, repetition, and attempt.
     """
     reports: list[dict] = []
+    pending: list[dict] = []
 
     for session in sessions:
         if not session.is_guided:
@@ -537,43 +625,83 @@ def guided_attempt_quality(sessions: Sequence[Session]) -> list[dict]:
             if not dims:
                 continue
 
-            primary = dims[0]
-
-            def command(frame) -> float:
-                target = (frame.cue or {}).get("target")
-                if not isinstance(target, (list, tuple)) or primary >= len(target):
-                    return 0.0
-                try:
-                    return float(target[primary])
-                except (TypeError, ValueError):
-                    return 0.0
-
-            commanded = np.asarray([command(f) for f in frames], dtype=np.float64)
-            observed = np.asarray([float(f.stock[primary]) for f in frames], dtype=np.float64)
             timestamps = np.asarray([f.timestamp_ticks for f in frames], dtype=np.float64)
-            lag, correlation = estimate_cue_lag_seconds(observed, commanded, timestamps)
+
+            def series(dim: int) -> tuple[np.ndarray, np.ndarray]:
+                def command(frame) -> float:
+                    target = (frame.cue or {}).get("target")
+                    if not isinstance(target, (list, tuple)) or dim >= len(target):
+                        return 0.0
+                    try:
+                        return float(target[dim])
+                    except (TypeError, ValueError):
+                        return 0.0
+
+                return (np.asarray([command(f) for f in frames], dtype=np.float64),
+                        np.asarray([float(f.stock[dim]) for f in frames], dtype=np.float64))
+
+            # Every cued dimension is measured; which one decides the verdict is settled per cue
+            # once all its attempts are known.
+            measured: dict[int, tuple[float, float]] = {}
+            observed_ranges: dict[int, float] = {}
+            for dim in dims:
+                commanded, observed = series(dim)
+                measured[dim] = estimate_cue_lag_seconds(observed, commanded, timestamps)
+                observed_ranges[dim] = float(np.ptp(observed)) if len(observed) else 0.0
 
             explicit = overrides.get((cue_id, rep, attempt)) or _inline_attempt_judgment(frames)
-            reports.append({
+            pending.append({
                 "session": session.session_id,
                 "cue": cue_id,
                 "rep": rep,
                 "attempt": attempt,
-                "dim": schema.EXPRESSION_NAMES[primary],
                 "dims": [schema.EXPRESSION_NAMES[d] for d in dims],
                 "frames": len(frames),
                 "hold_frames": len(hold_frames),
-                "lag_seconds": float(lag),
-                "correlation": float(correlation),
-                "command_range": float(np.ptp(commanded)) if len(commanded) else 0.0,
-                "observed_range": float(np.ptp(observed)) if len(observed) else 0.0,
                 "explicit_valid": None if explicit is None else bool(explicit["valid"]),
                 "override_reason": None if explicit is None else explicit["reason"],
                 "decision_source": "automatic" if explicit is None else explicit["source"],
                 "reason": "pending",
                 "status": "pending",
                 "weight_scale": 1.0,
+                "_dims": list(dims),
+                "_measured": measured,
+                "_ranges": observed_ranges,
+                "_series": series,
+                "_hold_frames": hold_frames,
             })
+
+    # Settle the probe per (session, cue) now that every attempt has been measured, then score each
+    # attempt on that one dimension. Doing it here rather than per attempt is what stops an attempt
+    # being graded against whichever dimension flatters it.
+    for key in {(e["session"], e["cue"]) for e in pending}:
+        family = [e for e in pending if (e["session"], e["cue"]) == key]
+        dims = family[0]["_dims"]
+        probe = _select_probe_dim(
+            dims,
+            [{d: c for d, (_, c) in e["_measured"].items()} for e in family],
+            [e["_ranges"] for e in family],
+            family[0]["_hold_frames"])
+
+        for entry in family:
+            lag, correlation = entry["_measured"][probe]
+            commanded, observed = entry["_series"](probe)
+            entry.update(
+                # Which dimension the verdict was measured on. Recorded because a surprising
+                # quality result is usually a surprising probe.
+                dim=schema.EXPRESSION_NAMES[probe],
+                lag_seconds=float(lag),
+                correlation=float(correlation),
+                command_range=float(np.ptp(commanded)) if len(commanded) else 0.0,
+                observed_range=float(np.ptp(observed)) if len(observed) else 0.0,
+            )
+
+    for entry in pending:
+        for internal in ("_dims", "_measured", "_ranges", "_series", "_hold_frames"):
+            entry.pop(internal, None)
+
+    reports = sorted(
+        pending, key=lambda e: (e["session"], e["cue"], e["rep"], e["attempt"]))
 
     # Decide only after all correlations are known, because suppression requires an observable peer
     # of the same exact cue and session. Sorted input/output makes the decision reproducible.

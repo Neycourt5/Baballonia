@@ -217,6 +217,130 @@ def test_explicit_attempt_overrides_win_and_are_deterministic() -> None:
     json.dumps(artifact)  # The immutable run artifact must be directly serializable.
 
 
+def _multi_dim_attempt(
+    cue_id: str,
+    commands: dict[int, float],
+    observed: dict[int, float],
+    *,
+    rep: int,
+    follows: bool,
+) -> list[tuple[dict, dict[int, float]]]:
+    """An attempt driving several dimensions at once, each with its own observed response.
+
+    Lets a session be built where the stock model answers some cued dimensions and not others -
+    the situation that decides which dimension the gate ought to be judging.
+    """
+    dims = tuple(sorted(commands))
+    phases: list[tuple[str, float]] = []
+    phases += [("prep", 0.0)] * 6
+    phases += [("transition", float(v)) for v in np.linspace(0.0, 1.0, 15)]
+    phases += [("hold", 1.0)] * 60
+    phases += [("transition", float(v)) for v in np.linspace(1.0, 0.0, 15)]
+    phases += [("rest", 0.0)] * 30
+
+    result = []
+    for phase, fraction in phases:
+        target = [0.0] * N
+        for dim, amplitude in commands.items():
+            target[dim] = amplitude * fraction
+
+        cue = {
+            "id": cue_id, "phase": phase, "dims": list(dims), "target": target,
+            "level": 1.0, "rep": rep, "attempt": 0, "source": "avatar",
+        }
+        seen = {dim: (observed.get(dim, 0.0) * fraction if follows else 0.0) for dim in dims}
+        result.append((cue, seen))
+    return result
+
+
+def _multi_dim_session(attempts, path=Path("probe-session")) -> Session:
+    frames: list[FrameRecord] = []
+    for cue, seen in (item for attempt in attempts for item in attempt):
+        stock = np.zeros(N, dtype=np.float32)
+        for dim, value in seen.items():
+            stock[dim] = value
+        frames.append(FrameRecord(
+            index=len(frames),
+            timestamp_ticks=len(frames) * FRAME_TICKS,
+            stock=stock,
+            image_path=Path(f"{len(frames):06d}.jpg"),
+            cue=cue,
+        ))
+    return Session(session_id="probe", path=path, metadata={"SessionType": "Guided"}, frames=frames)
+
+
+def test_probe_ignores_a_dimension_the_stock_model_cannot_see() -> None:
+    """The Grimace failure, in miniature.
+
+    LowerDown is commanded hardest but the stock model does not register it; Stretch is commanded
+    slightly less and tracks cleanly. Judging the attempt on the hardest-commanded dimension - or on
+    the lowest-numbered one - calls a correctly performed expression a failure.
+    """
+    lower_l = schema.INDEX_OF["MouthLowerDownLeft"]
+    stretch_l = schema.INDEX_OF["MouthStretchLeft"]
+
+    session = _multi_dim_session([
+        _multi_dim_attempt("Grimace100",
+                           commands={JAW: 0.16, lower_l: 0.82, stretch_l: 0.72},
+                           observed={JAW: 0.0, lower_l: 0.005, stretch_l: 0.65},
+                           rep=rep, follows=True)
+        for rep in range(3)
+    ])
+
+    reports = lbl.guided_attempt_quality([session])
+
+    assert len(reports) == 3
+    for entry in reports:
+        assert entry["dim"] == "MouthStretchLeft", (
+            f"judged on {entry['dim']}, which this stock model cannot see move")
+        assert entry["status"] == "good", entry["reason"]
+        assert entry["weight_scale"] == 1.0
+
+
+def test_probe_is_chosen_per_cue_not_per_attempt() -> None:
+    """A missed repetition must still be catchable.
+
+    If each attempt picked whatever dimension flattered it, nothing would ever score badly. The
+    probe is fixed across a cue's attempts, so a repetition the user did not perform still scores
+    low on the dimension its siblings scored high on - the exact condition for suppressing it.
+    """
+    stretch_l = schema.INDEX_OF["MouthStretchLeft"]
+
+    session = _multi_dim_session([
+        _multi_dim_attempt("Grimace100", {JAW: 0.16, stretch_l: 0.72},
+                           {JAW: 0.0, stretch_l: 0.65}, rep=0, follows=True),
+        _multi_dim_attempt("Grimace100", {JAW: 0.16, stretch_l: 0.72},
+                           {JAW: 0.0, stretch_l: 0.65}, rep=1, follows=True),
+        _multi_dim_attempt("Grimace100", {JAW: 0.16, stretch_l: 0.72},
+                           {JAW: 0.0, stretch_l: 0.65}, rep=2, follows=False),
+    ])
+
+    reports = lbl.guided_attempt_quality([session])
+    by_rep = {entry["rep"]: entry for entry in reports}
+
+    assert {entry["dim"] for entry in reports} == {"MouthStretchLeft"},         "every attempt of a cue must be judged on the same dimension"
+    assert by_rep[0]["status"] == "good"
+    assert by_rep[1]["status"] == "good"
+    assert by_rep[2]["status"] == "suppressed", "the missed repetition must not train"
+    assert by_rep[2]["weight_scale"] == 0.0
+
+
+def test_probe_falls_back_when_nothing_responds() -> None:
+    """No dimension responding is not evidence for any of them; report it and let it score weak."""
+    lower_l = schema.INDEX_OF["MouthLowerDownLeft"]
+
+    session = _multi_dim_session([
+        _multi_dim_attempt("Grimace100", {JAW: 0.16, lower_l: 0.82},
+                           {JAW: 0.0, lower_l: 0.0}, rep=0, follows=False),
+    ])
+
+    reports = lbl.guided_attempt_quality([session])
+
+    assert len(reports) == 1
+    assert reports[0]["dim"] == "MouthLowerDownLeft", "fall back to the commanded shape"
+    assert reports[0]["status"] in ("weak", "suppressed")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0

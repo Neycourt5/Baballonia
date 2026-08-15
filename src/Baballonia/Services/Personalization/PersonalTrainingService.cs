@@ -466,10 +466,17 @@ public sealed class PersonalTrainingService(
     /// and the honest baseline), the standard dataset location, and the trainer's own defaults for
     /// epochs, shrinkage and the session-level split.
     /// </summary>
+    /// <param name="validationSessions">
+    /// Session ids to hold out instead of letting the trainer pick. Null keeps the automatic split,
+    /// which holds out the newest recording of each type. Pinning the split is what makes two
+    /// architectures comparable: trained against different holdouts, their scores describe
+    /// different exams.
+    /// </param>
     public async Task<TrainingResult> TrainAsync(
         string modelKind = "a",
         IProgress<TrainingProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlyList<string>? validationSessions = null)
     {
         if (Interlocked.CompareExchange(ref _running, 1, 0) != 0)
             return new TrainingResult(false, "Training is already running.");
@@ -524,13 +531,22 @@ public sealed class PersonalTrainingService(
             // --- train -------------------------------------------------------------------------
             progress?.Report(new TrainingProgress(TrainingStage.PreparingData, "Preparing your recordings..."));
 
+            var trainArguments = new List<string>
+            {
+                "-m", "babble_personal.train",
+                "--data", PersonalizationPaths.DatasetRoot,
+                "--model", modelKind,
+                "--out", runsDirectory,
+            };
+
+            if (validationSessions is { Count: > 0 })
+            {
+                trainArguments.Add("--val-sessions");
+                trainArguments.AddRange(validationSessions);
+            }
+
             var training = await RunAsync(python,
-                [
-                    "-m", "babble_personal.train",
-                    "--data", PersonalizationPaths.DatasetRoot,
-                    "--model", modelKind,
-                    "--out", runsDirectory
-                ],
+                trainArguments,
                 trainingRoot, cancellationToken,
                 onLine: line => ReportStage(line, progress));
 

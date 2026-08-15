@@ -711,12 +711,24 @@ class CoverageRow:
     positive_frames: int = 0   # confidently labelled at a non-zero value
     zero_frames: int = 0       # confidently labelled at zero
     weak_frames: int = 0       # some opinion, but below the confident threshold
+    weak_positive_frames: int = 0    # shown as *on*, but only at a discounted weight
     levels: tuple[float, ...] = ()   # distinct non-zero values commanded
 
     @property
     def has_positive(self) -> bool:
         """Whether anything ever taught this expression what being *on* looks like."""
         return self.positive_frames > 0
+
+    @property
+    def only_weakly_taught(self) -> bool:
+        """Shown at a non-zero value, but every time at a reduced weight.
+
+        Distinct from untaught, and the distinction matters: an attempt the quality gate discounted
+        is evidence that the recording happened and something was wrong with it, whereas an untaught
+        expression has simply never been attempted. Collapsing the two hides a whole cue that was
+        recorded and then quietly discarded - which is exactly what happened to Grimace.
+        """
+        return self.positive_frames == 0 and self.weak_positive_frames > 0
 
     @property
     def total_frames(self) -> int:
@@ -744,8 +756,12 @@ def coverage_report(label_set, *, min_weight: float = 0.9) -> list[CoverageRow]:
         positive = confident & (targets > 1e-6)
         zero = confident & (targets <= 1e-6)
         weak = (weights > 0) & ~confident
+        weak_positive = weak & (targets > 1e-6)
 
-        commanded = np.unique(np.round(targets[positive], 3)) if positive.any() else np.array([])
+        # Levels come from whatever showed this expression as on, at either confidence, so a
+        # discounted cue still reports what it asked for.
+        shown = positive | weak_positive
+        commanded = np.unique(np.round(targets[shown], 3)) if shown.any() else np.array([])
 
         rows.append(CoverageRow(
             name=schema.EXPRESSION_NAMES[dim],
@@ -753,6 +769,7 @@ def coverage_report(label_set, *, min_weight: float = 0.9) -> list[CoverageRow]:
             positive_frames=int(positive.sum()),
             zero_frames=int(zero.sum()),
             weak_frames=int(weak.sum()),
+            weak_positive_frames=int(weak_positive.sum()),
             levels=tuple(float(v) for v in commanded),
         ))
 
@@ -762,7 +779,8 @@ def coverage_report(label_set, *, min_weight: float = 0.9) -> list[CoverageRow]:
 def format_coverage_report(rows: Sequence[CoverageRow], *, show_all: bool = False) -> str:
     """Human-readable census, leading with what is missing rather than what is present."""
     taught = [r for r in rows if r.has_positive]
-    untaught = [r for r in rows if not r.has_positive]
+    discounted = [r for r in rows if r.only_weakly_taught]
+    untaught = [r for r in rows if not r.has_positive and not r.only_weakly_taught]
 
     lines = [
         "Supervision coverage (which expressions has anything taught?)",
@@ -775,6 +793,16 @@ def format_coverage_report(rows: Sequence[CoverageRow], *, show_all: bool = Fals
             levels = ", ".join(f"{v:g}" for v in row.levels) if row.levels else "-"
             lines.append(f"  {row.name:<24}{row.positive_frames:>11}{row.zero_frames:>13}"
                          f"{levels:>18}")
+
+    if discounted:
+        lines.append("")
+        lines.append(f"  {len(discounted)} expression(s) were shown only at reduced confidence:")
+        for row in sorted(discounted, key=lambda r: -r.weak_positive_frames):
+            levels = ", ".join(f"{v:g}" for v in row.levels) if row.levels else "-"
+            lines.append(f"  {row.name:<24}{row.weak_positive_frames:>11}"
+                         f"{row.zero_frames:>13}{levels:>18}")
+        lines.append("    These were recorded, then discounted because the cue did not appear to "
+                     "be followed. Check the guided quality report before recording more.")
 
     if untaught:
         lines.append("")
