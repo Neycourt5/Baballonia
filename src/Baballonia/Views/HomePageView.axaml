@@ -121,7 +121,7 @@
                       ItemsSource="{Binding EyeTrackingModes}"
                       SelectedIndex="{Binding SelectedEyeTrackingModeIndex, Mode=TwoWay}" />
             <Button Grid.Column="3" Command="{Binding CalibrateEyesV2Command}"
-                    IsEnabled="{Binding !EyeV2Busy}" Content="Calibrate Eyes (~43 s)" />
+                    IsEnabled="{Binding !EyeV2Busy}" Content="Calibrate in VR (~60 s)" />
             <Button Grid.Column="5" Command="{Binding RecenterEyesV2Command}"
                     IsEnabled="{Binding !EyeV2Busy}" Content="Recenter Eyes (~2 s)" />
             <Button Grid.Column="7" Command="{Binding CheckEyeV2ValidityCommand}"
@@ -129,6 +129,9 @@
           </Grid>
 
           <TextBlock Text="{Binding EyeV2Status}" TextWrapping="Wrap" />
+          <TextBlock Opacity="0.72"
+                     Text="Eye V2-A maps the existing eye model to your gaze/lid anchors; it does not train a new neural model. Calibration instructions and gaze targets appear in the SteamVR headset."
+                     TextWrapping="Wrap" />
           <StackPanel IsVisible="{Binding EyeV2Busy}" Spacing="6">
             <TextBlock FontWeight="SemiBold" Text="{Binding EyeV2Instruction}" TextWrapping="Wrap" />
             <Canvas Width="320" Height="180" Background="#18000000"
@@ -153,6 +156,13 @@
               <TextBlock FontFamily="Consolas" Text="{Binding EyeV2LeftDebug}" TextWrapping="Wrap" />
               <TextBlock FontFamily="Consolas" Text="{Binding EyeV2RightDebug}" TextWrapping="Wrap" />
               <TextBlock FontFamily="Consolas" Text="{Binding EyeV2AnchorDebug}" TextWrapping="Wrap" />
+              <TextBlock Margin="0,8,0,0" FontWeight="SemiBold" Text="End-to-end eye output" />
+              <TextBlock FontFamily="Consolas" Text="{Binding EyeModelDebug}" TextWrapping="Wrap" />
+              <TextBlock FontFamily="Consolas" Text="{Binding EyeRawModelDebug}" TextWrapping="Wrap" />
+              <TextBlock FontFamily="Consolas" Text="{Binding EyeProjectedDebug}" TextWrapping="Wrap" />
+              <TextBlock FontFamily="Consolas" Text="{Binding EyeFinalDebug}" TextWrapping="Wrap" />
+              <TextBlock FontFamily="Consolas" Text="{Binding EyeOscDebug}" TextWrapping="Wrap" />
+              <TextBlock Opacity="0.75" Text="{Binding EyeModuleDebug}" TextWrapping="Wrap" />
             </StackPanel>
           </Expander>
         </StackPanel>

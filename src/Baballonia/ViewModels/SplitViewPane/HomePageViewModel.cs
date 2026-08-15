@@ -18,6 +18,7 @@ using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
@@ -406,6 +407,15 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private string _eyeV2AnchorDebug = "Calibrate Eye V2 to populate personal anchors.";
     [ObservableProperty] private WriteableBitmap? _eyeGeometryDebugBitmap;
     [ObservableProperty] private string _eyeGeometryDebug = "V2-B geometry has not produced a confident frame yet.";
+    [ObservableProperty] private string _eyeModelDebug = "Eye model has not produced a frame yet.";
+    [ObservableProperty] private string _eyeRawModelDebug = "No native eye-model output yet.";
+    [ObservableProperty] private string _eyeProjectedDebug = "No projected six-value eye output yet.";
+    [ObservableProperty] private string _eyeFinalDebug = "No final eye output yet.";
+    [ObservableProperty] private string _eyeOscDebug = "No eye OSC batch has been queued yet.";
+    [ObservableProperty] private string _eyeModuleDebug =
+        "Expected VRCFT module: Baballonia HOME Fork Local 3.2.1. Reinstall the packaged module zip after updating this build. " +
+        "Named native Widen/Squint values above are observational; V2-A's final Wide/Squint remain the calibrated lid/temporal mapping. " +
+        "Blink has no separate Baballonia OSC address: it is represented by low LeftEyeLid/RightEyeLid while Squint and Widen stay independent.";
 
     public bool IsRunningAsAdmin => Utils.HasAdmin;
 
@@ -423,6 +433,7 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     private readonly EyeV2Manager _eyeV2Manager;
     private readonly EyeV2CalibrationService _eyeV2Calibration;
     private readonly IEyePipelineEventBus _eyePipelineEventBus;
+    private readonly ParameterSenderService _parameterSender;
     private readonly IVROverlay _vrOverlay;
     private readonly IDeviceEnumerator _deviceEnumerator;
     private readonly ILocalSettingsService _localSettings;
@@ -430,6 +441,12 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     private readonly IPlatformConnector _platformConnector;
     private CancellationTokenSource? _eyeV2Cancellation;
     private bool _changingEyeMode;
+    private readonly object _eyeDebugSync = new();
+    private EyePipelineEvents.NewRawModelOutputEvent? _latestRawModelOutput;
+    private float[]? _latestProjectedEyeOutput;
+    private float[]? _latestFinalEyeOutput;
+    private EyeOscSendSnapshot? _latestEyeOscSnapshot;
+    private readonly Timer _eyeDebugTimer;
 
     public CalibrationRoutine.Routines RequestedVRCalibration = CalibrationRoutine.Map["BasicCalibration"];
 
@@ -439,6 +456,7 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         EyeV2CalibrationService eyeV2Calibration,
         IFacePipelineEventBus facePipelineEventBus,
         IEyePipelineEventBus eyePipelineEventBus,
+        ParameterSenderService parameterSender,
         IVROverlay vrOverlay,
         IDeviceEnumerator deviceEnumerator,
         ILocalSettingsService localSettings,
@@ -452,6 +470,7 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         _eyeV2Calibration = eyeV2Calibration;
         _facePipelineEventBus = facePipelineEventBus;
         _eyePipelineEventBus = eyePipelineEventBus;
+        _parameterSender = parameterSender;
         _vrOverlay = vrOverlay;
         _deviceEnumerator = deviceEnumerator;
         _localSettings = localSettings;
@@ -467,6 +486,14 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         _eyeV2Manager.StateChanged += EyeV2StateChanged;
         _eyeV2Manager.DiagnosticsChanged += EyeV2DiagnosticsChanged;
         _eyeV2Manager.GeometryChanged += EyeGeometryChanged;
+        _eyePipelineEventBus.Subscribe<EyePipelineEvents.NewRawModelOutputEvent>(EyeRawModelOutputChanged);
+        _eyePipelineEventBus.Subscribe<EyePipelineEvents.NewRawExpressionsEvent>(EyeProjectedOutputChanged);
+        _eyePipelineEventBus.Subscribe<EyePipelineEvents.NewFilteredResultEvent>(EyeFinalOutputChanged);
+        _parameterSender.EyeOscSendSnapshotChanged += EyeOscSnapshotChanged;
+        _latestEyeOscSnapshot = _parameterSender.LastEyeOscSendSnapshot;
+        EyeModuleDebug = FormatModuleIdentity(VrcftBaballoniaModuleInspector.Inspect());
+        _eyeDebugTimer = new Timer(_ => RefreshEyeOutputDebug(), null,
+            TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(250));
 
         MessagesInPerSecCount = "0";
         MessagesOutPerSecCount = "0";
@@ -575,7 +602,7 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
 
         try
         {
-            await _eyeV2Calibration.CheckValidityAsync(null, CancellationToken.None);
+            await _eyeV2Calibration.CheckValidityAsync(null, CancellationToken.None, useVrPresenter: false);
             EyeV2Status = _eyeV2Manager.Status;
         }
         catch (Exception ex)
@@ -610,6 +637,131 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         $"raw lid {eye.RawOpenness:F3}, open {eye.NormalizedOpenness:F3}, " +
         $"Squint {eye.Squint:F3}, Wide {eye.Wide:F3}, blink {(eye.Blink ? "yes" : "no")}, " +
         $"fixation jitter {eye.FixationJitter:F4}";
+
+    private void EyeRawModelOutputChanged(EyePipelineEvents.NewRawModelOutputEvent output)
+    {
+        lock (_eyeDebugSync)
+            _latestRawModelOutput = output;
+    }
+
+    private void EyeProjectedOutputChanged(EyePipelineEvents.NewRawExpressionsEvent output)
+    {
+        lock (_eyeDebugSync)
+            _latestProjectedEyeOutput = (float[])output.rawResult.Clone();
+    }
+
+    private void EyeFinalOutputChanged(EyePipelineEvents.NewFilteredResultEvent output)
+    {
+        lock (_eyeDebugSync)
+            _latestFinalEyeOutput = (float[])output.result.Clone();
+    }
+
+    private void EyeOscSnapshotChanged(EyeOscSendSnapshot snapshot)
+    {
+        lock (_eyeDebugSync)
+            _latestEyeOscSnapshot = snapshot;
+    }
+
+    private void RefreshEyeOutputDebug()
+    {
+        if (_disposed || !EyeV2AdvancedVisible) return;
+
+        EyePipelineEvents.NewRawModelOutputEvent? raw;
+        float[]? projected;
+        float[]? final;
+        EyeOscSendSnapshot? osc;
+        lock (_eyeDebugSync)
+        {
+            raw = _latestRawModelOutput;
+            projected = _latestProjectedEyeOutput;
+            final = _latestFinalEyeOutput;
+            osc = _latestEyeOscSnapshot;
+        }
+
+        var requested = _localSettings.ReadSetting<string>("EyeHome_EyeModel", "eyeModel.onnx");
+        var actualPath = _eyePipelineManager.ActiveModelPath;
+        var provider = _eyePipelineManager.ActiveExecutionProvider;
+        var outputNames = _eyePipelineManager.ActiveOutputNames;
+        var modelText =
+            $"Requested: {requested}\n" +
+            $"Actually loaded: {actualPath}\n" +
+            $"Provider: {provider}\n" +
+            $"Native outputs ({outputNames.Count}): " +
+            (outputNames.Count == 0 ? "unknown" : string.Join(", ", outputNames));
+
+        var rawText = raw == null
+            ? "No native eye-model output yet."
+            : "RAW MODEL (before six-value projection)\n" + string.Join("\n",
+                raw.outputNames.Zip(raw.rawResult,
+                    (name, value) => $"  {name,-20} {value,8:F4}"));
+
+        var projectedText = projected == null
+            ? "No projected six-value eye output yet."
+            : "PROJECTED RAW 6 (model ABI: right first)\n" +
+              FormatValues(projected,
+                  ["Right Y", "Right X", "Right Lid", "Left Y", "Left X", "Left Lid"]);
+
+        var finalNames = ParameterSenderService.EyeExpressionOrder
+            .Take(final?.Length ?? 0)
+            .Select(channel => channel.ExpressionName)
+            .ToArray();
+        var finalText = final == null
+            ? "No final eye output yet."
+            : $"FINAL CANONICAL {final.Length} ({(_eyeV2Manager.Mode == EyeTrackingMode.DefaultBaballonia ? "Default" : _eyeV2Manager.Mode.ToString())})\n" +
+              FormatValues(final, finalNames);
+
+        var oscText = FormatOscSnapshot(osc);
+
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_disposed) return;
+            EyeModelDebug = modelText;
+            EyeRawModelDebug = rawText;
+            EyeProjectedDebug = projectedText;
+            EyeFinalDebug = finalText;
+            EyeOscDebug = oscText;
+        });
+    }
+
+    private static string FormatValues(IReadOnlyList<float> values, IReadOnlyList<string> names) =>
+        string.Join("\n", values.Select((value, index) =>
+            $"  {(index < names.Count ? names[index] : $"value[{index}]") ,-20} {value,8:F4}"));
+
+    private static string FormatOscSnapshot(EyeOscSendSnapshot? snapshot)
+    {
+        if (snapshot == null) return "No eye OSC batch has been queued yet.";
+
+        var age = Math.Max(0, (DateTimeOffset.UtcNow - snapshot.UpdatedAtUtc).TotalSeconds);
+        var meaning = snapshot.TransportStatus == EyeOscTransportStatus.SentToUdpSocket
+            ? "local UDP send completed; receiver acknowledgement is unavailable"
+            : snapshot.TransportStatus == EyeOscTransportStatus.Queued
+                ? "waiting for the local UDP sender"
+                : "local UDP transport failed";
+        var header =
+            $"OUTPUT TO VRCFT — {snapshot.TransportStatus} ({meaning})\n" +
+            $"Destination: {snapshot.Destination}   age {age:F1}s";
+        if (!string.IsNullOrWhiteSpace(snapshot.Error))
+            header += $"\nError: {snapshot.Error}";
+
+        return header + "\n" + string.Join("\n", snapshot.Values.Select(value =>
+            $"  {value.Address,-24} {value.Value,8:F4}  ({value.ExpressionName})"));
+    }
+
+    private static string FormatModuleIdentity(VrcftBaballoniaModuleIdentity identity)
+    {
+        var hash = string.IsNullOrWhiteSpace(identity.Sha256)
+            ? "unavailable"
+            : identity.Sha256[..Math.Min(16, identity.Sha256.Length)] + "...";
+        return
+            "Expected package: Baballonia HOME Fork Local 3.2.1\n" +
+            $"Installed on disk: {(identity.Found ? identity.ModuleName ?? "Baballonia module" : "not found")}\n" +
+            $"Manifest version/local: {identity.Version ?? "unknown"} / {identity.IsLocal?.ToString() ?? "unknown"}\n" +
+            $"DLL product/SHA-256: {identity.ProductVersion ?? "unknown"} / {hash}\n" +
+            $"Path: {identity.Directory}\n" +
+            $"Status: {identity.Status}\n" +
+            "Named native Widen/Squint values above are observational; V2-A's final Wide/Squint remain the calibrated lid/temporal mapping. " +
+            "Blink has no separate Baballonia OSC address: low LeftEyeLid/RightEyeLid represents closure while Squint and Widen stay independent.";
+    }
 
     private void EyeGeometryChanged(EyeGeometryFrame frame)
     {
@@ -965,6 +1117,11 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         _eyeV2Manager.StateChanged -= EyeV2StateChanged;
         _eyeV2Manager.DiagnosticsChanged -= EyeV2DiagnosticsChanged;
         _eyeV2Manager.GeometryChanged -= EyeGeometryChanged;
+        _eyeDebugTimer.Dispose();
+        _parameterSender.EyeOscSendSnapshotChanged -= EyeOscSnapshotChanged;
+        _eyePipelineEventBus.Unsubscribe<EyePipelineEvents.NewRawModelOutputEvent>(EyeRawModelOutputChanged);
+        _eyePipelineEventBus.Unsubscribe<EyePipelineEvents.NewRawExpressionsEvent>(EyeProjectedOutputChanged);
+        _eyePipelineEventBus.Unsubscribe<EyePipelineEvents.NewFilteredResultEvent>(EyeFinalOutputChanged);
         FaceCamera.CamViewMode = CamViewMode.Tracking;
         LeftCamera.CamViewMode = CamViewMode.Tracking;
         RightCamera.CamViewMode = CamViewMode.Tracking;

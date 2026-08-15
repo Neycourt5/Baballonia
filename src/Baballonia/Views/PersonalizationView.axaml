@@ -85,6 +85,13 @@
                 VerticalAlignment="Center"
                 Text="{Binding SpeechCount, StringFormat='{}{0} of 2 recorded'}" />
           </Grid>
+          <Grid ColumnDefinitions="120,Auto">
+            <TextBlock Grid.Column="0" Text="Guided" VerticalAlignment="Center" />
+            <TextBlock
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                Text="{Binding GuidedCount, StringFormat='{}{0} recorded'}" />
+          </Grid>
 
           <TextBlock Opacity="0.8" Text="{Binding RecordingAdvice}" TextWrapping="Wrap" />
 
@@ -104,12 +111,14 @@
             <Button
                 Command="{Binding RecordNeutralCommand}"
                 Content="Record Neutral"
-                IsEnabled="{Binding !IsBusy}" />
+                IsEnabled="{Binding CanStartRecording}" />
             <Button
                 Command="{Binding RecordSpeechCommand}"
                 Content="Record Speech"
-                IsEnabled="{Binding !IsBusy}" />
-            <Button Command="{Binding OpenDatasetFolderCommand}" Content="Open Folder" />
+                IsEnabled="{Binding CanStartRecording}" />
+            <Button Command="{Binding OpenDatasetFolderCommand}"
+                    Content="Show Recording Folder"
+                    IsEnabled="{Binding CanOpenDatasetFolder}" />
           </StackPanel>
 
           <Button
@@ -151,6 +160,20 @@
               Text="Uses your microphone's loudness to make mouth movements the camera already sees a little larger, so speech reads more clearly across a room. It never invents an expression, only amplifies a real one, and it is ignored entirely when you are not talking. Nothing is recorded or uploaded." />
 
           <StackPanel IsVisible="{Binding AudioAssistEnabled}" Spacing="6">
+            <TextBlock FontWeight="SemiBold" Text="Audio Input" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <ComboBox
+                  ItemsSource="{Binding AudioInputLabels}"
+                  SelectedIndex="{Binding SelectedAudioInputIndex, Mode=TwoWay}"
+                  Width="380" />
+              <Button Command="{Binding RefreshAudioInputsCommand}" Content="Refresh" />
+              <Button Command="{Binding RestartAudioInputCommand}" Content="Restart audio" />
+            </StackPanel>
+            <TextBlock Text="{Binding AudioSelectedDevice}" TextWrapping="Wrap" />
+            <TextBlock Text="Input level" />
+            <ProgressBar Minimum="0" Maximum="1" Value="{Binding AudioInputLevel}" Height="14" />
+            <TextBlock FontWeight="SemiBold" Text="{Binding AudioVoiceStatus}" />
+
             <TextBlock Text="{Binding AudioStrength, StringFormat='Strength: {0:F0}%'}" />
             <Slider
                 Maximum="100"
@@ -169,7 +192,64 @@
                 IsVisible="{Binding ShowAdvanced}"
                 Opacity="0.7"
                 Text="{Binding AudioDiagnostics}" />
+            <TextBlock Opacity="0.65"
+                       Text="Changing or restarting this input touches only microphone capture. Face and eye inference keep running if audio is missing or fails."
+                       TextWrapping="Wrap" />
           </StackPanel>
+        </StackPanel>
+      </controls:ContentExample>
+
+      <!-- ======================= GRIMACE LAB ========================== -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Grimace / 😬 candidate lab" />
+
+          <TextBlock
+              Opacity="0.75"
+              Text="This is an avatar experiment, not a recording. Preview three restrained combinations of real Unified Expression dimensions in VR, choose the one that actually looks natural on this avatar, and confirm it only if you can imitate it reliably."
+              TextWrapping="Wrap" />
+
+          <TextBlock
+              FontWeight="SemiBold"
+              Text="{Binding GrimaceConfirmationStatus}"
+              TextWrapping="Wrap" />
+
+          <StackPanel IsVisible="{Binding !IsGrimacePreviewing}" Orientation="Horizontal" Spacing="8">
+            <Button
+                Command="{Binding BeginGrimacePreviewCommand}"
+                Content="Preview Candidates in VR"
+                IsEnabled="{Binding CanStartGrimacePreview}" />
+            <Button
+                Command="{Binding ClearGrimaceConfirmationCommand}"
+                Content="Clear Confirmation"
+                IsEnabled="{Binding HasConfirmedGrimace}" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsGrimacePreviewing}" Spacing="8">
+            <TextBlock
+                FontFamily="Consolas,Menlo,monospace"
+                Text="{Binding GrimaceCandidateDetails}"
+                TextWrapping="Wrap" />
+            <TextBlock
+                FontWeight="SemiBold"
+                Text="PREVIEW ONLY — the recorder is locked out and no cue label is published."
+                TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button Command="{Binding PreviousGrimaceCandidateCommand}" Content="Previous" />
+              <Button Command="{Binding NextGrimaceCandidateCommand}" Content="Next" />
+              <Button
+                  Command="{Binding ConfirmGrimaceCandidateCommand}"
+                  Content="Confirm This Candidate"
+                  IsEnabled="{Binding CanConfirmGrimace}" />
+              <Button Command="{Binding CancelGrimacePreviewCommand}" Content="Cancel" />
+            </StackPanel>
+          </StackPanel>
+
+          <TextBlock Text="{Binding GrimaceStatus}" TextWrapping="Wrap" />
+          <TextBlock
+              Opacity="0.65"
+              Text="A confirmed candidate appears as its own Guided calibration choice; candidates A/B/C never enter Full pass or Combinations automatically. Re-preview after changing avatars."
+              TextWrapping="Wrap" />
         </StackPanel>
       </controls:ContentExample>
 
@@ -213,6 +293,9 @@
                 FontWeight="SemiBold"
                 Text="{Binding GuidedInstruction}"
                 TextWrapping="Wrap" />
+            <TextBlock Opacity="0.75"
+                       Text="The avatar remains the visual demonstration; the true SteamVR overlay names the expression, intensity, repetition, HOLD and RELAX state."
+                       TextWrapping="Wrap" />
             <ProgressBar Maximum="100" Minimum="0" Value="{Binding GuidedProgress}" />
             <Button Command="{Binding StopGuidedCalibrationCommand}" Content="Stop" />
           </StackPanel>
@@ -311,6 +394,38 @@
         <StackPanel Spacing="10">
           <TextBlock FontSize="16" FontWeight="SemiBold" Text="Train" />
 
+          <Border Background="#18000000" CornerRadius="4" Padding="10">
+            <StackPanel Spacing="6">
+              <TextBlock FontWeight="SemiBold" Text="Training data" />
+              <TextBlock
+                  FontFamily="Consolas,Menlo,monospace"
+                  Text="{Binding TrainingDataSummary}"
+                  TextWrapping="Wrap" />
+              <TextBlock Text="{Binding TrainingSplitSummary}" TextWrapping="Wrap" />
+              <TextBlock
+                  Opacity="0.75"
+                  Text="{Binding GuidedCoverageSummary}"
+                  TextWrapping="Wrap" />
+              <TextBlock
+                  Opacity="0.65"
+                  Text="All older recordings and corrections remain cumulative. Validation sessions are discovered and scored, but never used to update the model."
+                  TextWrapping="Wrap" />
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button
+                    Command="{Binding OpenDatasetFolderCommand}"
+                    Content="Show Training Data in Folder"
+                    IsEnabled="{Binding CanOpenDatasetFolder}" />
+                <Button
+                    Command="{Binding RefreshSetupCommand}"
+                    Content="Refresh Counts" />
+              </StackPanel>
+              <TextBlock
+                  Opacity="0.65"
+                  Text="You can move or delete a genuinely bad session folder there. Refresh Counts afterward; removing a session can change which newest session is held out."
+                  TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
           <StackPanel IsVisible="{Binding !IsBusy}" Spacing="6">
             <StackPanel Orientation="Horizontal" Spacing="12">
               <TextBlock VerticalAlignment="Center" Text="Train next" Width="70" />
@@ -362,6 +477,14 @@
                 IsVisible="{Binding ResultDetail, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                 Text="{Binding ResultDetail}"
                 TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button Command="{Binding UseLastCreatedModelCommand}"
+                      Content="Use This Model"
+                      IsEnabled="{Binding CanUseLastCreatedModel}" />
+              <Button Command="{Binding OpenLastRunFolderCommand}"
+                      Content="Open Run Folder"
+                      IsEnabled="{Binding CanOpenLastRunFolder}" />
+            </StackPanel>
           </StackPanel>
 
           <StackPanel Orientation="Horizontal" Spacing="12">
@@ -395,6 +518,18 @@
               Text="{Binding ActiveModelName}"
               TextWrapping="Wrap" />
 
+          <TextBlock
+              Foreground="#D8A94C"
+              IsVisible="{Binding ModelActionStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Text="{Binding ModelActionStatus}"
+              TextWrapping="Wrap" />
+
+          <TextBlock
+              FontFamily="Consolas,Menlo,monospace"
+              Opacity="0.78"
+              Text="{Binding ActiveModelProvenance}"
+              TextWrapping="Wrap" />
+
           <TextBlock Opacity="0.7" Text="Model to use" />
 
           <StackPanel Orientation="Horizontal" Spacing="12">
@@ -406,6 +541,20 @@
                 Command="{Binding UseSelectedModelCommand}"
                 Content="{Binding UseSelectedModelButtonText}"
                 IsEnabled="{Binding CanUseSelectedModel}" />
+          </StackPanel>
+
+          <Border Background="#18000000" CornerRadius="4" Padding="10">
+            <TextBlock FontFamily="Consolas,Menlo,monospace"
+                       Text="{Binding SelectedModelProvenance}"
+                       TextWrapping="Wrap" />
+          </Border>
+
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Command="{Binding RefreshModelLibraryCommand}" Content="Refresh library" />
+            <Button Command="{Binding OpenSelectedModelFolderCommand}"
+                    Content="Open model/run folder"
+                    IsEnabled="{Binding CanOpenSelectedModelFolder}" />
+            <Button Click="BrowsePersonalModel" Content="Browse compatible ONNX..." />
           </StackPanel>
 
           <TextBlock

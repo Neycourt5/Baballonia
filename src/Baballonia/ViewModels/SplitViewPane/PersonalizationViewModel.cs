@@ -42,6 +42,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     private readonly HardExampleService? _hardExamples;
     private readonly GuidedCalibrationService? _guided;
     private readonly AudioAssistService? _audio;
+    private readonly GrimacePreviewService? _grimace;
 
     /// <summary>
     /// Ticks the cue engine while a guided session runs. Faster than the status timer because it
@@ -49,6 +50,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     /// timer would land visibly late.
     /// </summary>
     private readonly DispatcherTimer _guidedTimer;
+    private readonly DispatcherTimer _grimaceTimer;
 
     private readonly Action<FacePipelineEvents.NewTransformedFrameEvent> _frameHandler;
     private readonly Action<FacePipelineEvents.NewRawExpressionsEvent> _rawHandler;
@@ -57,12 +59,13 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
     private WriteableBitmap? _backingBitmap;
     private CancellationTokenSource? _workCancellation;
+    private bool _lastObservedModelActive;
+    private bool _lastRecorderFrameReady;
 
     // Latest values, written on the processing tick and drained by the timer. Binding at the tick
     // rate would swamp the UI; a few times a second is plenty to watch values move.
-    private readonly float[] _latestStock = new float[PersonalizationSchema.ExpressionCount];
-    private readonly float[] _latestPersonal = new float[PersonalizationSchema.ExpressionCount];
-    private volatile bool _hasCorrectedValues;
+    private readonly ExpressionComparisonBuffer _comparisonValues =
+        new(PersonalizationSchema.ExpressionCount);
     private volatile bool _cameraSeenRecently;
     private DateTime _lastFrameUtc = DateTime.MinValue;
 
@@ -81,8 +84,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     // ---- recordings ---------------------------------------------------------------------------
     [ObservableProperty] private int _neutralCount;
     [ObservableProperty] private int _speechCount;
+    [ObservableProperty] private int _guidedCount;
     [ObservableProperty] private string _recordingAdvice = "";
     [ObservableProperty] private bool _isRecording;
+    [ObservableProperty] private bool _canStartRecording;
+    [ObservableProperty] private bool _canOpenDatasetFolder;
     [ObservableProperty] private string _recordingStatus = "";
     [ObservableProperty] private string _notes = "";
 
@@ -101,6 +107,24 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private double _audioStrength = 50;
     [ObservableProperty] private string _audioStatus = "";
     [ObservableProperty] private string _audioDiagnostics = "";
+    public ObservableCollection<string> AudioInputLabels { get; } = [];
+    private IReadOnlyList<AudioInputDevice> _audioInputDevices = [];
+    private bool _changingAudioInput;
+    [ObservableProperty] private int _selectedAudioInputIndex;
+    [ObservableProperty] private double _audioInputLevel;
+    [ObservableProperty] private string _audioVoiceStatus = "Voice: Not detected";
+    [ObservableProperty] private string _audioSelectedDevice = "Selected: unavailable";
+
+    partial void OnSelectedAudioInputIndexChanged(int value)
+    {
+        if (_changingAudioInput || _audio is null) return;
+        var id = value <= 0 || value > _audioInputDevices.Count
+            ? null
+            : _audioInputDevices[value - 1].Id;
+        _audio.SelectInputDevice(id);
+        AudioStatus = _audio.StatusMessage;
+        UpdateAudioDiagnostics();
+    }
 
     // ---- guided calibration -------------------------------------------------------------------
 
@@ -114,7 +138,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     /// What a guided session will cover. The full pass is the useful default; single expressions
     /// exist so a specific weakness can be topped up without sitting through everything again.
     /// </summary>
-    public IReadOnlyList<GuidedRoutineChoice> GuidedRoutines { get; } = GuidedRoutineChoice.All;
+    public ObservableCollection<GuidedRoutineChoice> GuidedRoutines { get; } =
+        new(GuidedRoutineChoice.All);
 
     [ObservableProperty] private int _selectedGuidedRoutineIndex;
     [ObservableProperty] private string _guidedRoutineDescription = "";
@@ -134,6 +159,20 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         GuidedRoutineDescription = $"{choice.Description} Takes {length}.";
     }
+
+    // ---- Grimace candidate lab ---------------------------------------------------------------
+
+    [ObservableProperty] private bool _isGrimacePreviewing;
+    [ObservableProperty] private bool _canStartGrimacePreview;
+    [ObservableProperty] private bool _canConfirmGrimace;
+    [ObservableProperty] private bool _hasConfirmedGrimace;
+    [ObservableProperty] private string _grimaceStatus =
+        "Preview the candidate poses on your avatar before enabling Grimace training.";
+    [ObservableProperty] private string _grimaceCandidateDetails =
+        "No candidate is active. Nothing is being recorded.";
+    [ObservableProperty] private string _grimaceConfirmationStatus =
+        "Grimace is not trainable until you preview and explicitly confirm one candidate.";
+    private string? _appliedGrimaceCandidateId;
 
     // ---- quick correction ---------------------------------------------------------------------
 
@@ -174,6 +213,9 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private string _modelCStatus = "";
     [ObservableProperty] private bool _canPrepareModelC;
     [ObservableProperty] private string _trainButtonText = "Train Model A";
+    [ObservableProperty] private string _trainingDataSummary = "No training data discovered.";
+    [ObservableProperty] private string _trainingSplitSummary = "";
+    [ObservableProperty] private string _guidedCoverageSummary = "";
 
     /// <summary>The trainer's --model flag for the current selection.</summary>
     private string SelectedModelKind => TrainingModelChoice.KindForIndex(SelectedModelIndex);
@@ -189,6 +231,10 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [ObservableProperty] private string? _remedyAction;
     [ObservableProperty] private bool _showDetails;
     [ObservableProperty] private string _detailLog = "";
+    [ObservableProperty] private bool _canOpenLastRunFolder;
+    [ObservableProperty] private bool _canUseLastCreatedModel;
+    private string? _lastRunDirectory;
+    private string? _lastCreatedModelPath;
 
     // ---- comparison ---------------------------------------------------------------------------
 
@@ -198,6 +244,10 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     /// without retraining the two would disagree. This is the authoritative one.
     /// </summary>
     [ObservableProperty] private string _activeModelName = "";
+    [ObservableProperty] private string _activeModelProvenance = "";
+    [ObservableProperty] private string _modelActionStatus = "";
+    [ObservableProperty] private string _selectedModelProvenance = "";
+    [ObservableProperty] private bool _canOpenSelectedModelFolder;
 
     [ObservableProperty] private bool _personalModelEnabled;
     [ObservableProperty] private bool _canUseStock;
@@ -244,7 +294,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         ILogger<PersonalizationViewModel> logger,
         HardExampleService? hardExamples = null,
         GuidedCalibrationService? guided = null,
-        AudioAssistService? audio = null)
+        AudioAssistService? audio = null,
+        GrimacePreviewService? grimace = null)
     {
         _recorder = recorder;
         _modelManager = modelManager;
@@ -256,6 +307,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         _hardExamples = hardExamples;
         _guided = guided;
         _audio = audio;
+        _grimace = grimace;
 
         _quickCorrectionEnabled = hardExamples?.Enabled ?? false;
 
@@ -264,10 +316,13 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             _audioAssistEnabled = audio.Enabled;
             _audioStrength = audio.Strength * 100.0;
             _audioStatus = audio.StatusMessage;
+            RefreshAudioInputs();
         }
 
         _guidedTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
         _guidedTimer.Tick += (_, _) => OnGuidedTick();
+        _grimaceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        _grimaceTimer.Tick += (_, _) => OnGrimaceTick();
 
         foreach (var (name, index) in PersonalizationSchema.ExpressionNames.Select((n, i) => (n, i)))
             Comparison.Add(new ExpressionComparisonRow(index, name));
@@ -284,6 +339,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         _useEmbeddingRunner = _settings.ReadSetting<bool>(PersonalModelManager.EmbeddingRunnerSetting);
 
         UpdateGuidedRoutineDescription();
+        RefreshGrimaceState();
 
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _statusTimer.Tick += (_, _) => OnTick();
@@ -321,6 +377,9 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         CanUseStock = _modelManager.Enabled || _modelManager.IsActive;
         CanUsePersonal = !_modelManager.IsActive && System.IO.File.Exists(_modelManager.ModelPath);
         RefreshComparisonModels();
+        UpdateActiveModelStatus();
+        _lastObservedModelActive = _modelManager.IsActive;
+        _lastRecorderFrameReady = _recorder.HasRecentSourceFrame;
 
         // Offer setup only when it can actually succeed: scripts located and Python available.
         CanSetUpTools = !setup.TrainingTools.Ready
@@ -329,16 +388,23 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         NeutralCount = setup.DatasetStatus.NeutralSessions;
         SpeechCount = setup.DatasetStatus.SpeechSessions;
+        GuidedCount = setup.DatasetStatus.GuidedSessions;
         RecordingAdvice = setup.DatasetStatus.NextRecommendation
                           ?? "You have enough recordings to train a good model.";
 
+        UpdateTrainingDataSummary(PersonalizationEnvironment.InspectTrainingInventory());
+
         SavedCorrectionCount = HardExampleService.CountSaved();
-        CanDeleteSavedCorrections = _hardExamples != null && SavedCorrectionCount > 0;
+        var captureOrPreviewActive = _recorder.IsRecording || IsRecording || IsGuidedRunning ||
+                                     (_grimace?.IsPreviewing ?? false);
+        CanDeleteSavedCorrections = _hardExamples != null && SavedCorrectionCount > 0 &&
+                                    !IsBusy && !captureOrPreviewActive;
         if (SavedCorrectionCount == 0) ShowDeleteCorrectionsConfirmation = false;
 
         // Nothing to save unless capture is enabled and frames are arriving, so the button and
         // status say which prerequisite is missing rather than failing after the press.
-        CanFlagCorrection = _hardExamples != null && QuickCorrectionEnabled && _cameraSeenRecently;
+        CanFlagCorrection = _hardExamples != null && QuickCorrectionEnabled && _cameraSeenRecently &&
+                            !IsBusy && !captureOrPreviewActive;
         QuickCorrectionAvailability = _hardExamples == null
             ? "Quick correction is unavailable in this build."
             : !QuickCorrectionEnabled
@@ -347,7 +413,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
                     ? "Start the face camera on the Home page to use quick corrections."
                     : "";
 
-        CanStartGuided = _guided != null && _cameraSeenRecently && !IsGuidedRunning && !IsRecording;
+        CanStartRecording = !IsBusy && !captureOrPreviewActive && _recorder.HasRecentSourceFrame;
+        CanOpenDatasetFolder = !IsBusy && !captureOrPreviewActive;
+        CanStartGuided = _guided != null && _cameraSeenRecently && !IsBusy &&
+                         !captureOrPreviewActive;
+        RefreshGrimaceState();
 
         var choice = TrainingModelChoice.ForIndex(SelectedModelIndex);
         ModelChoiceDescription = choice.Description;
@@ -360,7 +430,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             var readiness = _trainingService.InspectModelCReadiness();
             modelCReady = readiness.Ready;
             ModelCStatus = readiness.Message;
-            CanPrepareModelC = setup.CanTrain && !IsBusy && !readiness.Ready;
+            CanPrepareModelC = setup.CanTrain && !IsBusy && !captureOrPreviewActive &&
+                               !readiness.Ready;
         }
         else
         {
@@ -368,8 +439,56 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             CanPrepareModelC = false;
         }
 
-        CanTrain = !IsBusy && TrainingModelChoice.TrainingUnavailableReason(
+        CanTrain = !IsBusy && !captureOrPreviewActive && TrainingModelChoice.TrainingUnavailableReason(
             choice.Kind, setup.CanTrain, modelCReady) == null;
+    }
+
+    private void UpdateTrainingDataSummary(TrainingDatasetInventory inventory)
+    {
+        if (inventory.Discovered.Count == 0)
+        {
+            TrainingDataSummary = "No usable recording sessions were discovered.";
+            TrainingSplitSummary = "";
+            GuidedCoverageSummary = "";
+            return;
+        }
+
+        string Row(SessionType type, string label)
+        {
+            var row = inventory.ByType.First(x => x.Type == type);
+            return $"{label,-12} {row.DiscoveredSessions,2} sessions  {row.DiscoveredFrames,6:N0} frames";
+        }
+
+        TrainingDataSummary = string.Join(Environment.NewLine,
+            Row(SessionType.Neutral, "Neutral"),
+            Row(SessionType.Speech, "Speech"),
+            Row(SessionType.Guided, "Guided"),
+            Row(SessionType.Correction, "Corrections"));
+
+        TrainingSplitSummary =
+            $"Optimization split: {inventory.Training.Count} sessions / " +
+            $"{inventory.TrainingFrames:N0} matched image-label frame pairs. " +
+            $"Held out for validation: {inventory.HeldOut.Count} sessions / " +
+            $"{inventory.HeldOutFrames:N0} frame pairs. Some transition, preparation, or " +
+            "quality-suppressed rows intentionally receive zero training weight.";
+
+        var coverage = inventory.GuidedTrainingExpressions.Count == 0
+            ? "none"
+            : string.Join(", ", inventory.GuidedTrainingExpressions);
+        var latest = inventory.LatestGuidedSessionId == null
+            ? "No Guided session recorded yet."
+            : inventory.LatestGuidedIsTraining
+                ? $"Newest Guided ({inventory.LatestGuidedSessionId}) is assigned to the " +
+                  "optimization split; per-attempt quality still controls its effective weight."
+                : $"Newest Guided ({inventory.LatestGuidedSessionId}) is held out for validation, not optimization.";
+        var corrections = inventory.CorrectionCounts.Count == 0
+            ? "No saved corrections in the discovered corpus."
+            : "Corrections present across the discovered corpus (only named dimensions are labelled): " +
+              string.Join(", ", inventory.CorrectionCounts.Select(x => $"{x.Key} x{x.Value}")) + ".";
+
+        GuidedCoverageSummary =
+            $"Raw Guided hold dimensions present in optimization-split recordings: {coverage}. " +
+            $"The trainer's per-attempt quality report decides their actual weight. {latest} {corrections}";
     }
 
     [RelayCommand]
@@ -387,19 +506,43 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [RelayCommand]
     private void StartRecording()
     {
-        if (_recorder.IsRecording)
+        if (IsBusy)
+        {
+            RecordingStatus = "Wait for training/setup to finish before starting a recording.";
             return;
+        }
+        if (_recorder.IsRecording || IsGuidedRunning || (_grimace?.IsPreviewing ?? false))
+        {
+            RecordingStatus = "Another recording or avatar preview is already active.";
+            return;
+        }
+        if (!_recorder.HasRecentSourceFrame)
+        {
+            RecordingStatus = "No fresh face-camera inference frame is available. Start the face " +
+                              "camera, wait for tracking to move, then try again.";
+            CanStartRecording = false;
+            return;
+        }
 
         try
         {
             var type = Enum.Parse<SessionType>(SelectedSessionType);
             _recorder.StartSession(type, camera: null,
-                notes: string.IsNullOrWhiteSpace(Notes) ? null : Notes);
+                notes: string.IsNullOrWhiteSpace(Notes) ? null : Notes,
+                requireRecentSourceFrame: true);
 
             IsRecording = true;
             RecordingStatus = type == SessionType.Neutral
                 ? "Recording. Let your face rest - breathe normally for about 45 seconds."
                 : "Recording. Talk naturally for a minute or so.";
+            RefreshGrimaceState();
+            CanStartRecording = false;
+            CanOpenDatasetFolder = false;
+            CanStartGuided = false;
+            CanTrain = false;
+            CanPrepareModelC = false;
+            CanDeleteSavedCorrections = false;
+            CanFlagCorrection = false;
         }
         catch (Exception ex)
         {
@@ -451,6 +594,14 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     [RelayCommand]
     private void OpenDatasetFolder()
     {
+        if (IsBusy || _recorder.IsRecording || IsRecording || IsGuidedRunning ||
+            (_grimace?.IsPreviewing ?? false))
+        {
+            RecordingStatus = "Finish the active recording, calibration, preview, or training " +
+                              "operation before opening the dataset for file management.";
+            return;
+        }
+
         System.IO.Directory.CreateDirectory(PersonalizationPaths.DatasetRoot);
         Utils.OpenUrl(PersonalizationPaths.DatasetRoot);
     }
@@ -522,20 +673,59 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             _audio.Strength = (float)(value / 100.0);
     }
 
+    [RelayCommand]
+    private void RefreshAudioInputs()
+    {
+        if (_audio is null) return;
+        _audioInputDevices = _audio.GetInputDevices();
+
+        _changingAudioInput = true;
+        AudioInputLabels.Clear();
+        AudioInputLabels.Add("Automatic (first available input)");
+        foreach (var device in _audioInputDevices)
+            AudioInputLabels.Add(device.IsDefault
+                ? $"{device.DisplayName} (current Windows default)"
+                : device.DisplayName);
+
+        var preferred = _audio.PreferredDeviceId;
+        SelectedAudioInputIndex = string.IsNullOrWhiteSpace(preferred)
+            ? 0
+            : Math.Max(0, _audioInputDevices.ToList().FindIndex(device =>
+                string.Equals(device.Id, preferred, StringComparison.Ordinal)) + 1);
+        _changingAudioInput = false;
+        UpdateAudioDiagnostics();
+    }
+
+    [RelayCommand]
+    private void RestartAudioInput()
+    {
+        if (_audio is null) return;
+        _audio.RestartAudioCapture();
+        RefreshAudioInputs();
+    }
+
     /// <summary>Live audio readout, drained on the status timer like the expression table.</summary>
     private void UpdateAudioDiagnostics()
     {
-        if (_audio is null || !AudioAssistEnabled || !ShowAdvanced)
+        if (_audio is null)
             return;
 
         var features = _audio.Features;
         var gain = _audio.CurrentGain;
+        AudioInputLevel = AudioAssistEnabled ? _audio.InputLevel : 0;
+        AudioVoiceStatus = _audio.IsVoiceDetected ? "Voice: Detected" : "Voice: Not detected";
+        AudioSelectedDevice = _audio.ActiveDevice is { } device
+            ? $"Selected: {device.DisplayName}" +
+              (_audio.IsUsingDeviceFallback ? " (temporary fallback)" : "")
+            : "Selected: no active microphone";
+        AudioStatus = _audio.StatusMessage;
 
-        AudioDiagnostics =
-            $"{(features.IsVoiced ? "speaking" : "quiet")}   " +
-            $"energy {features.SpeechEnergy:F2}   " +
-            $"pitch {(features.PitchHz > 0 ? $"{features.PitchHz:F0} Hz" : "-")}   " +
-            $"boost x{gain:F2}";
+        AudioDiagnostics = ShowAdvanced
+            ? $"{(features.IsVoiced ? "speaking" : "quiet")}   " +
+              $"energy {features.SpeechEnergy:F2}   " +
+              $"pitch {(features.PitchHz > 0 ? $"{features.PitchHz:F0} Hz" : "-")}   " +
+              $"boost x{gain:F2}"
+            : "";
     }
 
     // =============================================================================================
@@ -559,13 +749,23 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             GuidedStatus = "Guided calibration is unavailable in this build.";
             return;
         }
+        if (IsBusy)
+        {
+            GuidedStatus = "Wait for training/setup to finish before starting guided calibration.";
+            return;
+        }
+        if (_recorder.IsRecording || IsRecording || (_grimace?.IsPreviewing ?? false))
+        {
+            GuidedStatus = "Stop the current recording or candidate preview first.";
+            return;
+        }
 
         var choice = SelectedGuidedRoutine;
         var routine = new GuidedCaptureRoutine(choice.Build());
         var result = _guided.Start(routine, notes: $"Guided calibration: {choice.DisplayName}");
 
         GuidedStatus = result.Started
-            ? "Watch your avatar and copy what it does."
+            ? "Follow the explicit headset cue and copy your avatar. Retry/Skip/Cancel are available in VR."
             : result.Message;
 
         if (!result.Started)
@@ -574,6 +774,13 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         IsGuidedRunning = true;
         GuidedProgress = 0;
         _guidedTimer.Start();
+        RefreshGrimaceState();
+        CanStartRecording = false;
+        CanOpenDatasetFolder = false;
+        CanTrain = false;
+        CanPrepareModelC = false;
+        CanDeleteSavedCorrections = false;
+        CanFlagCorrection = false;
     }
 
     [RelayCommand]
@@ -611,6 +818,158 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     }
 
     // =============================================================================================
+    // Grimace candidate preview
+    // =============================================================================================
+
+    [RelayCommand]
+    private void BeginGrimacePreview()
+    {
+        if (_grimace is null)
+        {
+            GrimaceStatus = "The Grimace candidate preview is unavailable in this build.";
+            return;
+        }
+
+        if (IsBusy)
+        {
+            GrimaceStatus = "Wait for the current training/setup operation to finish first.";
+            return;
+        }
+
+        var result = _grimace.BeginPreview();
+        if (result.Success)
+            _grimaceTimer.Start();
+        RefreshGrimaceState();
+        RefreshSetup();
+        GrimaceStatus = result.Message;
+    }
+
+    [RelayCommand]
+    private void PreviousGrimaceCandidate()
+    {
+        if (_grimace is null) return;
+        var result = _grimace.ShowPreviousCandidate();
+        RefreshGrimaceState();
+        GrimaceStatus = result.Message;
+    }
+
+    [RelayCommand]
+    private void NextGrimaceCandidate()
+    {
+        if (_grimace is null) return;
+        var result = _grimace.ShowNextCandidate();
+        RefreshGrimaceState();
+        GrimaceStatus = result.Message;
+    }
+
+    [RelayCommand]
+    private void ConfirmGrimaceCandidate()
+    {
+        if (_grimace is null) return;
+        var result = _grimace.ConfirmCurrentCandidate();
+        if (!_grimace.IsPreviewing)
+            _grimaceTimer.Stop();
+        RefreshGrimaceState();
+        RefreshSetup();
+        GrimaceStatus = result.Message;
+    }
+
+    [RelayCommand]
+    private void CancelGrimacePreview()
+    {
+        if (_grimace is null) return;
+        _grimace.CancelPreview();
+        _grimaceTimer.Stop();
+        RefreshGrimaceState();
+        RefreshSetup();
+    }
+
+    [RelayCommand]
+    private void ClearGrimaceConfirmation()
+    {
+        if (_grimace is null) return;
+        _grimace.ClearConfirmation();
+        RefreshGrimaceState();
+        RefreshSetup();
+    }
+
+    private void OnGrimaceTick()
+    {
+        if (_grimace is null)
+        {
+            _grimaceTimer.Stop();
+            return;
+        }
+
+        var previousIndex = _grimace.CurrentCandidateIndex;
+        var stillPreviewing = _grimace.Tick();
+        if (!stillPreviewing)
+            _grimaceTimer.Stop();
+
+        // Avoid rebinding the picker/status fifty times per second. Only controller actions or a
+        // cancelled preview change observable state; the tick otherwise just feeds the deadman.
+        if (!stillPreviewing || previousIndex != _grimace.CurrentCandidateIndex)
+        {
+            RefreshGrimaceState();
+            RefreshSetup();
+        }
+    }
+
+    private void RefreshGrimaceState()
+    {
+        var confirmedChoice = _grimace?.ConfirmedRoutineChoice;
+        var confirmedCandidateId = _grimace?.ConfirmedCandidate?.Id;
+        if (!string.Equals(
+                confirmedCandidateId, _appliedGrimaceCandidateId, StringComparison.Ordinal))
+        {
+            for (var i = GuidedRoutines.Count - 1; i >= 0; i--)
+            {
+                if (string.Equals(GuidedRoutines[i].Id, "grimace-confirmed", StringComparison.Ordinal))
+                    GuidedRoutines.RemoveAt(i);
+            }
+            if (confirmedChoice != null)
+                GuidedRoutines.Add(confirmedChoice);
+            _appliedGrimaceCandidateId = confirmedCandidateId;
+        }
+
+        if (GuidedRoutines.Count > 0 && SelectedGuidedRoutineIndex >= GuidedRoutines.Count)
+            SelectedGuidedRoutineIndex = GuidedRoutines.Count - 1;
+        UpdateGuidedRoutineDescription();
+
+        if (_grimace is null)
+        {
+            IsGrimacePreviewing = false;
+            CanStartGrimacePreview = false;
+            CanConfirmGrimace = false;
+            HasConfirmedGrimace = false;
+            GrimaceConfirmationStatus = "The Grimace candidate lab is unavailable in this build.";
+            return;
+        }
+
+        IsGrimacePreviewing = _grimace.IsPreviewing;
+        CanStartGrimacePreview = !IsBusy && !IsRecording && !IsGuidedRunning &&
+                                 !_grimace.IsPreviewing;
+        CanConfirmGrimace = _grimace.IsPreviewing && _grimace.CurrentCandidate != null;
+        GrimaceStatus = _grimace.Status;
+
+        var current = _grimace.CurrentCandidate;
+        GrimaceCandidateDetails = current == null
+            ? "No candidate is active. Nothing is being recorded."
+            : $"{current.DisplayName}\n{current.Description}\n" +
+              "Exact non-zero components: " + string.Join(", ", current.Components
+                  .OrderBy(component => component.Key)
+                  .Select(component =>
+                      $"{PersonalizationSchema.ExpressionNames[component.Key]}={component.Value:P0}"));
+
+        var confirmed = _grimace.ConfirmedCandidate;
+        HasConfirmedGrimace = confirmed != null;
+        GrimaceConfirmationStatus = confirmed == null
+            ? "Not confirmed: no Grimace candidate can enter a guided recording or become a label."
+            : $"Confirmed: {confirmed.DisplayName}. Only this exact schema/fingerprint is available " +
+              "as the separate Grimace guided routine.";
+    }
+
+    // =============================================================================================
     // Quick correction
     // =============================================================================================
 
@@ -645,6 +1004,13 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             CorrectionStatus = "Quick correction is unavailable in this build.";
             return;
         }
+        if (IsBusy || _recorder.IsRecording || IsGuidedRunning ||
+            (_grimace?.IsPreviewing ?? false))
+        {
+            CorrectionStatus =
+                "Wait for the current training, recording, calibration, or preview to finish.";
+            return;
+        }
 
         var result = await _hardExamples.FlagAsync(CorrectionKind.MouthClosed, SelectedCorrectionWindow);
         CorrectionStatus = result.Message;
@@ -671,6 +1037,13 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         ShowDeleteCorrectionsConfirmation = false;
         if (_hardExamples is null) return;
+        if (IsBusy || _recorder.IsRecording || IsGuidedRunning ||
+            (_grimace?.IsPreviewing ?? false))
+        {
+            CorrectionStatus =
+                "Stop training, recording, calibration, or preview before deleting correction data.";
+            return;
+        }
 
         CanDeleteSavedCorrections = false;
         var result = await _hardExamples.DeleteSavedCorrectionsAsync();
@@ -733,12 +1106,28 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         if (IsBusy)
             return;
+        if (_recorder.IsRecording || IsRecording || IsGuidedRunning ||
+            (_grimace?.IsPreviewing ?? false))
+        {
+            ResultHeadline = "Finish the active capture first.";
+            ResultDetail = "Training/setup cannot read the dataset while a recording, guided " +
+                           "calibration, or Grimace preview is active.";
+            HasResult = true;
+            return;
+        }
 
         _workCancellation?.Dispose();
         _workCancellation = new CancellationTokenSource();
 
         IsBusy = true;
         CanTrain = false;
+        CanPrepareModelC = false;
+        CanStartRecording = false;
+        CanOpenDatasetFolder = false;
+        CanStartGuided = false;
+        CanStartGrimacePreview = false;
+        CanDeleteSavedCorrections = false;
+        CanFlagCorrection = false;
         HasResult = false;
         RemedyAction = null;
         BusyMessage = initialMessage;
@@ -778,13 +1167,32 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         HasResult = true;
         RemedyAction = result.Remedy;
+        _lastRunDirectory = result.RunDirectory;
+        _lastCreatedModelPath = result.ExportedModelPath;
+        CanOpenLastRunFolder = !string.IsNullOrWhiteSpace(_lastRunDirectory) &&
+                               System.IO.Directory.Exists(_lastRunDirectory);
+        CanUseLastCreatedModel = !string.IsNullOrWhiteSpace(_lastCreatedModelPath) &&
+                                 System.IO.File.Exists(_lastCreatedModelPath);
 
         if (!result.Success)
         {
-            ResultHeadline = result.Message;
-            ResultDetail = result.Remedy == "Show Details"
-                ? "Open Details below for the exact error."
-                : "";
+            ResultHeadline = result.TrainingSucceeded
+                ? "Training succeeded, but activation did not."
+                : result.Message;
+            var failureLines = new List<string>();
+            if (result.TrainingSucceeded)
+            {
+                failureLines.Add(result.Message);
+                if (result.ExportedModelPath != null)
+                    failureLines.Add($"Created: {result.ExportedModelPath}");
+                failureLines.Add($"Still actually active: " +
+                                 (_modelManager.IsActive
+                                     ? $"{_modelManager.LoadedMetadata?.DisplayName} — {_modelManager.ActiveModelPath}"
+                                     : "Default Baballonia (Stock)"));
+            }
+            if (result.Remedy == "Show Details")
+                failureLines.Add("Open Details below for the exact error.");
+            ResultDetail = string.Join(Environment.NewLine + Environment.NewLine, failureLines);
             return;
         }
 
@@ -798,10 +1206,25 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         var lines = new List<string>();
 
+        if (result.ExportedModelPath != null)
+            lines.Add($"Created: {System.IO.Path.GetFileName(result.ExportedModelPath)}\n" +
+                      $"Immutable artifact: {result.ExportedModelPath}");
+        lines.Add($"Installed as active: {(result.ActivationSucceeded ? "Yes" : "No")}");
+
         // Which architecture actually produced this result. Without it the dropdown is the only
         // hint, and that shows the *next* run's choice rather than what was just trained.
         if (!string.IsNullOrEmpty(summary.AdapterType))
             lines.Add($"Trained: {TrainingModelChoice.DisplayName(summary.AdapterType)}.");
+
+        if (result.Run is { } run)
+        {
+            lines.Add($"Run: {run.RunId}\n" +
+                      $"Training corpus: {run.TrainSessionCount} sessions / {FormatFrameCount(run.TrainFrameCount)} frames " +
+                      $"(Guided {FormatEvidenceState(run.GuidedInTraining, "included", "not included")}, " +
+                      $"Corrections {FormatEvidenceState(run.CorrectionInTraining, "included", "not included")}).\n" +
+                      $"Held out: {run.HeldOutSessionCount} sessions / {FormatFrameCount(run.HeldOutFrameCount)} frames." +
+                      FormatMissingSessions(run));
+        }
 
         if (summary.NeutralStockFalseActivation is { } stockNeutral &&
             summary.NeutralPersonalFalseActivation is { } personalNeutral)
@@ -902,8 +1325,12 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     private void RefreshComparisonModels()
     {
         _comparisonModels = _modelManager.DiscoverAvailableModels();
+        var activePath = _modelManager.IsActive ? _modelManager.ActiveModelPath : null;
         var labels = new[] { "Default Baballonia (Stock)" }
-            .Concat(_comparisonModels.Select(model => model.Label))
+            .Concat(_comparisonModels.Select(model => model.Label +
+                (string.Equals(model.Path, activePath, StringComparison.OrdinalIgnoreCase)
+                    ? " — Current"
+                    : "")))
             .ToArray();
 
         if (!ComparisonModelLabels.SequenceEqual(labels))
@@ -912,12 +1339,10 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             foreach (var label in labels) ComparisonModelLabels.Add(label);
         }
 
-        var activeKind = _modelManager.IsActive
-            ? TrainingModelChoice.ForAdapterType(_modelManager.LoadedMetadata?.AdapterType)?.Kind
-            : null;
-        _selectedComparisonModelIndex = activeKind == null
+        _selectedComparisonModelIndex = activePath == null
             ? 0
-            : Math.Max(0, _comparisonModels.ToList().FindIndex(model => model.Kind == activeKind) + 1);
+            : Math.Max(0, _comparisonModels.ToList().FindIndex(model =>
+                string.Equals(model.Path, activePath, StringComparison.OrdinalIgnoreCase)) + 1);
         OnPropertyChanged(nameof(SelectedComparisonModelIndex));
         UpdateComparisonSelection();
     }
@@ -929,13 +1354,159 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         {
             UseSelectedModelButtonText = "Use Stock";
             CanUseSelectedModel = _modelManager.IsActive || _modelManager.Enabled;
+            SelectedModelProvenance = "Default Baballonia face inference. No personal adapter is applied.";
+            CanOpenSelectedModelFolder = false;
             return;
         }
 
         var model = _comparisonModels[index - 1];
         UseSelectedModelButtonText = $"Use Model {model.Kind.ToUpperInvariant()}";
         CanUseSelectedModel = !_modelManager.IsActive ||
-            !string.Equals(_modelManager.ModelPath, model.Path, StringComparison.OrdinalIgnoreCase);
+            !string.Equals(_modelManager.ActiveModelPath, model.Path, StringComparison.OrdinalIgnoreCase);
+        SelectedModelProvenance = DescribeModel(model);
+        CanOpenSelectedModelFolder = true;
+    }
+
+    private void UpdateActiveModelStatus()
+    {
+        var requestedPath = _modelManager.Enabled ? _modelManager.RequestedModelPath : null;
+        var loadedPath = _modelManager.ActiveModelPath;
+        var activePath = _modelManager.IsActive ? loadedPath : null;
+        var requested = requestedPath == null ? null : _comparisonModels.FirstOrDefault(model =>
+            string.Equals(model.Path, requestedPath, StringComparison.OrdinalIgnoreCase));
+        var active = activePath == null ? null : _comparisonModels.FirstOrDefault(model =>
+            string.Equals(model.Path, activePath, StringComparison.OrdinalIgnoreCase));
+
+        var requestedName = !_modelManager.Enabled
+            ? "Default Baballonia (Stock)"
+            : requested != null
+                ? $"Model {requested.Kind.ToUpperInvariant()} — {System.IO.Path.GetFileName(requested.Path)}"
+                : System.IO.Path.GetFileName(_modelManager.RequestedModelPath);
+        var activeMetadata = _modelManager.LoadedMetadata;
+        var activeName = _modelManager.IsActive && activeMetadata != null
+            ? $"{activeMetadata.DisplayName} — {System.IO.Path.GetFileName(activePath)}"
+            : "Default Baballonia (Stock)";
+
+        ActiveModelName = $"Requested: {requestedName}{Environment.NewLine}Actually active: {activeName}";
+        var details = new List<string>();
+        if (active != null) details.Add(DescribeModel(active));
+        else if (_modelManager.IsActive && activeMetadata != null)
+        {
+            details.Add($"Adapter: {activeMetadata.AdapterType}");
+            details.Add($"Exact file: {activePath}");
+            details.Add($"Trained: {activeMetadata.TrainedUtc ?? "unknown"}");
+        }
+        if (!string.IsNullOrWhiteSpace(_modelManager.FallbackReason))
+            details.Add($"FALLBACK: {_modelManager.FallbackReason}");
+        if (!_modelManager.IsActive && !string.IsNullOrWhiteSpace(loadedPath))
+            details.Add($"RUNTIME FAILURE: {System.IO.Path.GetFileName(loadedPath)} stopped; " +
+                        "Stock is actually active. Reload it or choose another model.");
+        details.Add($"Stock perception provider: {_modelManager.StockInferenceProvider}");
+        details.Add($"Personal adapter provider: {(_modelManager.IsActive ? "CPU" : "inactive")}");
+        details.Add($"Embedding runner: {(_modelManager.EmbeddingRunnerAvailable ? "active" : "inactive")}");
+        details.Add($"Blend strength: {_modelManager.Blend:P0}");
+        ActiveModelProvenance = string.Join(Environment.NewLine, details);
+    }
+
+    private static string DescribeModel(AvailablePersonalModel model)
+    {
+        var metadata = model.Metadata;
+        var lines = new List<string>
+        {
+            $"Family: Model {model.Kind.ToUpperInvariant()}",
+            $"Adapter: {metadata.AdapterType}",
+            $"File: {System.IO.Path.GetFileName(model.Path)}",
+            $"Exact path: {model.Path}",
+            $"Trained: {metadata.TrainedUtc ?? "unknown"}",
+            $"Requires embedding: {(metadata.RequiresEmbedding ? "yes" : "no")}",
+            $"Derived stock MD5: {metadata.BaseModelMd5 ?? "not recorded"}",
+        };
+
+        if (model.TrainingRun is { } run)
+        {
+            lines.Add($"Run: {run.RunId}");
+            lines.Add($"Optimization: {run.TrainSessionCount} sessions / {FormatFrameCount(run.TrainFrameCount)} frames");
+            lines.Add($"Held out: {run.HeldOutSessionCount} sessions / {FormatFrameCount(run.HeldOutFrameCount)} frames");
+            lines.Add($"Guided used to learn: {FormatEvidenceState(run.GuidedInTraining)}; " +
+                      $"Corrections used to learn: {FormatEvidenceState(run.CorrectionInTraining)}");
+            var missing = FormatMissingSessions(run).Trim();
+            if (missing.Length > 0) lines.Add(missing);
+            lines.Add($"Validation verdict: {run.Verdict}; improved {run.ExpressionsImproved}, " +
+                      $"regressed {run.ExpressionsRegressed}");
+        }
+        else
+        {
+            lines.Add($"Artifact source: {model.Source}");
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static string FormatFrameCount(int? count) =>
+        count is { } known ? known.ToString("N0") : "unknown";
+
+    private static string FormatEvidenceState(
+        bool? state,
+        string yes = "yes",
+        string no = "no") =>
+        state switch
+        {
+            true => yes,
+            false => no,
+            null => "unknown (source session is missing)",
+        };
+
+    private static string FormatMissingSessions(PersonalTrainingRun run)
+    {
+        var parts = new List<string>();
+        if (run.Train.MissingSessionIds.Count > 0)
+            parts.Add("Training recordings no longer on disk: " +
+                      string.Join(", ", run.Train.MissingSessionIds));
+        if (run.HeldOut.MissingSessionIds.Count > 0)
+            parts.Add("Held-out recordings no longer on disk: " +
+                      string.Join(", ", run.HeldOut.MissingSessionIds));
+        return parts.Count == 0
+            ? ""
+            : Environment.NewLine + string.Join(Environment.NewLine, parts) + ".";
+    }
+
+    [RelayCommand]
+    private void RefreshModelLibrary() => RefreshSetup();
+
+    [RelayCommand]
+    private void OpenSelectedModelFolder()
+    {
+        var index = Math.Clamp(SelectedComparisonModelIndex, 0, _comparisonModels.Count);
+        if (index == 0) return;
+        var directory = System.IO.Path.GetDirectoryName(_comparisonModels[index - 1].Path);
+        if (!string.IsNullOrWhiteSpace(directory)) Utils.OpenUrl(directory);
+    }
+
+    [RelayCommand]
+    private void OpenLastRunFolder()
+    {
+        if (!string.IsNullOrWhiteSpace(_lastRunDirectory)) Utils.OpenUrl(_lastRunDirectory);
+    }
+
+    [RelayCommand]
+    private async Task UseLastCreatedModelAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_lastCreatedModelPath)) return;
+        var result = await _modelManager.SelectModelAsync(_lastCreatedModelPath);
+        RefreshSetup();
+        ModelActionStatus = result.Success
+            ? result.Message
+            : $"Could not activate the new artifact; the previous model is still in use. {result.Message}";
+    }
+
+    public async Task SelectManualModelAsync(string path)
+    {
+        var result = await _modelManager.SelectModelAsync(path);
+        RefreshSetup();
+        ModelActionStatus = result.Success
+            ? result.Message
+            : $"Could not use {System.IO.Path.GetFileName(path)}; the previous model is still in use. " +
+              result.Message;
     }
 
     [RelayCommand]
@@ -955,8 +1526,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             var derived = EmbeddingModelStore.TryGetValid(stock);
             if (!derived.Valid)
             {
-                ActiveModelName = "Model C is trained, but its shared-feature runner is not ready. " +
-                                  "Select C under Train and use Prepare Model C first.";
+                ModelActionStatus = "Model C is trained, but its shared-feature runner is not ready. " +
+                                    "Select C under Train and use Prepare Model C first.";
                 return;
             }
 
@@ -964,38 +1535,47 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         }
 
         var result = await _modelManager.SelectModelAsync(model.Path);
-        if (!result.Success)
-            ActiveModelName = $"Could not use Model {model.Kind.ToUpperInvariant()}: {result.Message}";
         _personalModelEnabled = _modelManager.Enabled;
         OnPropertyChanged(nameof(PersonalModelEnabled));
         RefreshSetup();
+        ModelActionStatus = result.Success
+            ? result.Message
+            : $"Could not use Model {model.Kind.ToUpperInvariant()}; the previous model is still in use. " +
+              result.Message;
     }
 
     [RelayCommand]
     private async Task UseStockAsync()
     {
         _modelManager.SetEnabled(false);
-        await _modelManager.ReloadAsync();
+        var result = await _modelManager.ReloadAsync();
         _personalModelEnabled = false;
         OnPropertyChanged(nameof(PersonalModelEnabled));
         RefreshSetup();
+        ModelActionStatus = result.Message;
     }
 
     [RelayCommand]
     private async Task UsePersonalAsync()
     {
         _modelManager.SetEnabled(true);
-        await _modelManager.ReloadAsync();
-        _personalModelEnabled = true;
+        var result = await _modelManager.ReloadAsync();
+        _personalModelEnabled = _modelManager.Enabled;
         OnPropertyChanged(nameof(PersonalModelEnabled));
         RefreshSetup();
+        ModelActionStatus = result.Success
+            ? result.Message
+            : $"Could not activate the requested personal model. {result.Message}";
     }
 
     [RelayCommand]
     private async Task ReloadModelAsync()
     {
-        await _modelManager.ReloadAsync();
+        var result = await _modelManager.ReloadAsync();
         RefreshSetup();
+        ModelActionStatus = result.Success
+            ? result.Message
+            : $"Reload failed; Stock is actually active. {result.Message}";
     }
 
     partial void OnPersonalModelEnabledChanged(bool value)
@@ -1008,6 +1588,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         // Live evaluation control: apply immediately so A/B comparison is instant.
         _modelManager.Blend = (float)(value / 100.0);
+        UpdateActiveModelStatus();
     }
 
     // =============================================================================================
@@ -1016,20 +1597,12 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
     private void OnRawExpressions(FacePipelineEvents.NewRawExpressionsEvent e)
     {
-        if (_hasCorrectedValues)
-            return;
-
-        var count = Math.Min(e.rawResult.Length, _latestStock.Length);
-        Array.Copy(e.rawResult, _latestStock, count);
-        Array.Copy(e.rawResult, _latestPersonal, count);
+        _comparisonValues.AcceptRaw(e.rawResult, _modelManager.IsActive);
     }
 
     private void OnCorrectedExpressions(FacePipelineEvents.NewCorrectedExpressionsEvent e)
     {
-        _hasCorrectedValues = true;
-        var count = Math.Min(e.rawResult.Length, _latestStock.Length);
-        Array.Copy(e.rawResult, _latestStock, count);
-        Array.Copy(e.correctedResult, _latestPersonal, Math.Min(e.correctedResult.Length, count));
+        _comparisonValues.AcceptCorrected(e.rawResult, e.correctedResult);
     }
 
     private void OnTick()
@@ -1037,8 +1610,19 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         if (_recorder.IsRecording)
             RecordingStatus = $"Recording... {_recorder.FramesWritten} frames captured.";
 
-        for (var i = 0; i < Comparison.Count; i++)
-            Comparison[i].Update(_latestStock[i], _latestPersonal[i]);
+        // A corrector can fail inside the inference thread after loading successfully. Poll the
+        // manager's effective state so the picker drops its Current badge and the status switches
+        // to Stock without requiring a page navigation or manual refresh.
+        var modelActive = _modelManager.IsActive;
+        if (modelActive != _lastObservedModelActive)
+        {
+            _lastObservedModelActive = modelActive;
+            RefreshComparisonModels();
+            UpdateActiveModelStatus();
+        }
+
+        for (var i = 0; i < Comparison.Count && i < _comparisonValues.Count; i++)
+            Comparison[i].Update(_comparisonValues.StockAt(i), _comparisonValues.PersonalAt(i));
 
         if (SortByDelta)
             SortComparisonByDelta();
@@ -1047,9 +1631,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         // The camera is "running" if a frame arrived recently; there is no event when it stops.
         var seen = (DateTime.UtcNow - _lastFrameUtc).TotalSeconds < 2;
-        if (seen != _cameraSeenRecently)
+        var recorderFrameReady = _recorder.HasRecentSourceFrame;
+        if (seen != _cameraSeenRecently || recorderFrameReady != _lastRecorderFrameReady)
         {
             _cameraSeenRecently = seen;
+            _lastRecorderFrameReady = recorderFrameReady;
             RefreshSetup();
         }
     }
@@ -1118,6 +1704,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         _statusTimer.Stop();
         _guidedTimer.Stop();
+        _grimaceTimer.Stop();
         _faceEventBus.Unsubscribe(_frameHandler);
         _faceEventBus.Unsubscribe(_rawHandler);
         _faceEventBus.Unsubscribe(_correctedHandler);
@@ -1128,6 +1715,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         // Navigating away mid-calibration must hand the avatar back to live tracking rather than
         // leaving it frozen in whatever expression was being commanded.
         _guided?.Dispose();
+        _grimace?.Dispose();
 
         if (_recorder.IsRecording)
             _recorder.StopSessionAsync().GetAwaiter().GetResult();
