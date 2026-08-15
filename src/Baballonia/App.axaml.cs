@@ -11,6 +11,7 @@ using Baballonia.Services;
 using Baballonia.Services.Inference;
 using Baballonia.Services.Inference.Platforms;
 using Baballonia.Services.EyeV2;
+using Baballonia.Services.Calibration;
 using Baballonia.Services.Personalization;
 using Baballonia.Services.Personalization.Audio;
 using Baballonia.ViewModels;
@@ -113,6 +114,7 @@ public partial class App : Application
             services.AddSingleton<EyeProcessingPipeline>();
             services.AddSingleton<EyePipelineManager>();
             services.AddSingleton<IEyePipelineEventBus, EyePipelineEventBus>();
+            services.TryAddSingleton<IVrCalibrationPresenter, NullVrCalibrationPresenter>();
             services.AddSingleton<EyeV2CalibrationStore>();
             services.AddSingleton<EyeV2Manager>();
             services.AddSingleton<EyeV2CalibrationService>();
@@ -130,7 +132,9 @@ public partial class App : Application
             services.AddSingleton<IReadOnlyCueStateSource>(sp => sp.GetRequiredService<CueStateSource>());
             services.AddSingleton<GuidedCalibrationService>();
 
+            services.AddSingleton<TrainingCaptureGate>();
             services.AddSingleton<DatasetRecorderService>();
+            services.AddSingleton<GrimacePreviewService>();
             services.AddSingleton<PersonalModelManager>();
             services.AddSingleton<PersonalizationEnvironment>();
             services.AddSingleton<PersonalTrainingService>();
@@ -146,15 +150,18 @@ public partial class App : Application
                     HardExampleService.EnabledSetting, true)));
             services.AddSingleton<HardExampleService>();
 
-            // Optional audio expression assist. The default source reports silence, which makes the
-            // enhancer an exact passthrough; platforms with a capture backend replace this factory
-            // in their own registration. TryAdd so that replacement wins.
-            services.TryAddSingleton<Func<IAudioFeatureSource>>(_ => () => new NullAudioFeatureSource());
+            // Optional audio expression assist. Platform backends replace both halves: a catalog
+            // for the selector and a source factory that opens only the selected input. Empty/null
+            // defaults preserve exact visual-only behaviour everywhere else.
+            services.TryAddSingleton<IAudioInputDeviceCatalog, NullAudioInputDeviceCatalog>();
+            services.TryAddSingleton<IAudioFeatureSourceFactory, NullAudioFeatureSourceFactory>();
             services.AddSingleton(sp => new AudioAssistService(
-                sp.GetRequiredService<Func<IAudioFeatureSource>>(),
+                sp.GetRequiredService<IAudioInputDeviceCatalog>(),
+                sp.GetRequiredService<IAudioFeatureSourceFactory>(),
                 sp.GetRequiredService<ILocalSettingsService>(),
                 enhancer => sp.GetRequiredService<FaceProcessingPipeline>().Enhancer = enhancer,
                 sp.GetRequiredService<ILogger<AudioAssistService>>()));
+            services.AddHostedService<AudioAssistStartupService>();
 
             // Core Services
             services.AddTransient<IIdentityService, IdentityService>();

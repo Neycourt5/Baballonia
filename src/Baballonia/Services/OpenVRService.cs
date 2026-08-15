@@ -9,18 +9,84 @@ public class OpenVRService(ILogger<OpenVRService> logger)
 {
     //app key needed for vrmanifest
     private const string ApplicationKey = "projectbabble.Baballonia";
+    private readonly object _initializationLock = new();
     private bool _isAutoStartReady;
+    private bool _isInitialized;
+    private string _runtimeStatus = "SteamVR has not been checked yet.";
+
+    public string RuntimeStatus => _runtimeStatus;
+
+    /// <summary>
+    /// Initializes the one process-wide OpenVR background context and returns its overlay API.
+    /// Calibration presenters use this instead of launching or mirroring another desktop window.
+    /// </summary>
+    public CVROverlay? TryGetOverlay(out string status)
+    {
+        lock (_initializationLock)
+        {
+            if (!_isInitialized)
+            {
+                try
+                {
+                    if (!OpenVR.IsRuntimeInstalled())
+                    {
+                        status = _runtimeStatus = "SteamVR/OpenVR is not installed.";
+                        return null;
+                    }
+
+                    if (!OpenVR.IsHmdPresent())
+                    {
+                        status = _runtimeStatus = "SteamVR cannot see a connected headset.";
+                        return null;
+                    }
+
+                    var error = EVRInitError.None;
+                    OpenVR.Init(ref error, EVRApplicationType.VRApplication_Background);
+                    if (error != EVRInitError.None)
+                    {
+                        status = _runtimeStatus = $"OpenVR initialization failed: {error}.";
+                        return null;
+                    }
+
+                    _isInitialized = true;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Could not initialize the OpenVR runtime");
+                    status = _runtimeStatus = $"OpenVR is unavailable: {ex.Message}";
+                    return null;
+                }
+            }
+
+            try
+            {
+                var overlay = OpenVR.Overlay;
+                if (overlay == null)
+                {
+                    status = _runtimeStatus = "SteamVR initialized without an overlay interface.";
+                    return null;
+                }
+
+                status = _runtimeStatus = "SteamVR headset overlay ready.";
+                return overlay;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not acquire the OpenVR overlay interface");
+                status = _runtimeStatus = $"OpenVR overlay unavailable: {ex.Message}";
+                return null;
+            }
+        }
+    }
 
     //AutoStart function
     public bool AutoStart()
     {
-        // Checking if SteamVR is open in the background
-        EVRInitError error = EVRInitError.None;
-        OpenVR.Init(ref error, EVRApplicationType.VRApplication_Background);
-
-        if (error != EVRInitError.None)
+        // The process owns one OpenVR context. Reusing it also avoids disrupting an active
+        // calibration overlay when the Settings page checks autostart.
+        if (TryGetOverlay(out var runtimeStatus) == null)
         {
-            logger.LogWarning("Failed to Enable SteamVR AutoStart: {0}", error);
+            logger.LogWarning("Failed to Enable SteamVR AutoStart: {Status}", runtimeStatus);
             _isAutoStartReady = false;
             return _isAutoStartReady;
         }

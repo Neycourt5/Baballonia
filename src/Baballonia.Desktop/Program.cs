@@ -52,14 +52,18 @@ sealed class Program
             collection.AddSingleton<ITrainerService, TrainerService>();
             collection.AddSingleton<EyeCaptureStepFactory>();
             collection.AddSingleton<EyeCalibration>();
+            collection.AddSingleton<Baballonia.Services.Calibration.IVrCalibrationPresenter,
+                OpenVrCalibrationPresenter>();
 
 #if WINDOWS
             // Microphone capture for the optional audio expression assist. Registered here because
             // capture is platform-specific; every other platform keeps the core's null source, which
             // reports silence and leaves the enhancer as an exact passthrough.
-            collection.AddSingleton<Func<IAudioFeatureSource>>(sp => () =>
-                new MicrophoneFeatureSource(
-                    sp.GetRequiredService<ILoggerFactory>().CreateLogger<MicrophoneFeatureSource>()));
+            collection.AddSingleton<NAudioInputBackend>();
+            collection.AddSingleton<IAudioInputDeviceCatalog>(sp =>
+                sp.GetRequiredService<NAudioInputBackend>());
+            collection.AddSingleton<IAudioFeatureSourceFactory>(sp =>
+                sp.GetRequiredService<NAudioInputBackend>());
 #endif
         });
 
