@@ -23,6 +23,7 @@ is moving.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -46,6 +47,23 @@ W_MANUAL_CORRECTION = 2.0
 
 #: Frames at the start of a hold, while the user is still moving into position, are not labelled.
 HOLD_SETTLE_TRIM_SECONDS = 0.5
+
+#: A repetition at or above this correlation is trusted at the normal guided-hold weight. This is
+#: the threshold the original cue-lag diagnostic already described as evidence that the commanded
+#: value follows the face.
+GUIDED_GOOD_CORRELATION = 0.60
+
+#: Attempts below the good threshold still carry useful evidence, but at a deliberately smaller
+#: weight. A stock-model miss can make a real expression look weak, so weak is not the same as bad.
+GUIDED_WEAK_WEIGHT_SCALE = 0.25
+
+#: Automatic suppression is reserved for an almost completely unrelated response, and only when a
+#: sibling attempt proves the stock model can see this exact cue in this exact session.
+GUIDED_SUPPRESS_CORRELATION = 0.10
+
+#: Optional, immutable annotation emitted by the headset workflow when the user explicitly skips,
+#: retries, accepts, or rejects an attempt. Explicit judgment outranks the automatic diagnostic.
+GUIDED_QUALITY_OVERRIDES_FILE = "guided_quality_overrides.json"
 
 #: .NET DateTime ticks are 100 ns.
 TICKS_PER_SECOND = 10_000_000
@@ -151,8 +169,9 @@ def estimate_cue_lag_seconds(
     animator smoothing adds more. Both show up as one roughly constant delay, which we recover by
     correlating the commanded signal against the stock model's reading of the user's face.
 
-    Returns ``(lag_seconds, correlation)``. A low correlation means the cue was not followed, and
-    the caller should drop that repetition rather than train on it.
+    Returns ``(lag_seconds, correlation)``. A low correlation means the cue may not have been
+    followed, but it can also mean the stock model failed to see a real expression. The quality
+    gate below therefore suppresses only extremely weak attempts with a proven observable peer.
     """
     if len(stock) < 8 or len(cue_signal) < 8:
         return 0.0, 0.0
@@ -182,6 +201,19 @@ def estimate_cue_lag_seconds(
     return best_lag / fps, best_corr
 
 
+def _attempt_key(session: Session, frame) -> tuple[str, str, int, int] | None:
+    """Stable identity of one user attempt, with an old-recording-compatible attempt default."""
+    cue = frame.cue
+    if cue is None:
+        return None
+    return (
+        session.session_id,
+        str(cue.get("id", "")),
+        int(cue.get("rep", 0) or 0),
+        int(cue.get("attempt", 0) or 0),
+    )
+
+
 def _segment_key(session: Session, frame) -> tuple | None:
     """Identity of the contiguous cue segment a frame belongs to, or None outside a cue.
 
@@ -203,6 +235,7 @@ def _segment_key(session: Session, frame) -> tuple | None:
         session.session_id,
         str(cue.get("id", "")),
         int(cue.get("rep", 0) or 0),
+        int(cue.get("attempt", 0) or 0),
         str(cue.get("phase", "")).lower(),
         level,
     )
@@ -214,6 +247,7 @@ def build_labels(
     use_speech_pseudo_labels: bool = True,
     hold_settle_trim: float = HOLD_SETTLE_TRIM_SECONDS,
     dim_boost: dict[int, float] | None = None,
+    guided_quality: Sequence[dict] | None = None,
 ) -> LabelSet:
     """Build targets and weights for every frame in ``sessions``.
 
@@ -226,6 +260,20 @@ def build_labels(
     n_dims = schema.EXPRESSION_COUNT
     frames = list(iter_frames(sessions))
     n = len(frames)
+
+    # Quality is opt-in at this low-level API so callers that are inspecting raw label semantics do
+    # not get a hidden stock-model dependency. The training entry point always computes one global
+    # report across train+validation sessions and passes it to both splits.
+    guided_scales: dict[tuple[str, str, int, int], float] = {}
+    if guided_quality is not None:
+        for entry in guided_quality:
+            key = (
+                str(entry.get("session", "")),
+                str(entry.get("cue", "")),
+                int(entry.get("rep", 0) or 0),
+                int(entry.get("attempt", 0) or 0),
+            )
+            guided_scales[key] = float(entry.get("weight_scale", 1.0))
 
     targets = np.zeros((n, n_dims), dtype=np.float32)
     weights = np.zeros((n, n_dims), dtype=np.float32)
@@ -306,10 +354,14 @@ def build_labels(
                 weights[row, :] = W_GUIDED_REST
                 continue
 
+            attempt_key = _attempt_key(session, frame)
+            quality_scale = guided_scales.get(attempt_key, 1.0) if attempt_key else 1.0
+
             for dim in cued_dims:
                 is_tongue = dim in schema.TONGUE_DIMS
                 targets[row, dim] = commanded[dim]
-                weights[row, dim] = W_GUIDED_HOLD_TONGUE if is_tongue else W_GUIDED_HOLD
+                base_weight = W_GUIDED_HOLD_TONGUE if is_tongue else W_GUIDED_HOLD
+                weights[row, dim] = base_weight * quality_scale
 
             # "Keep the rest of your face relaxed", minus expressions that legitimately come along
             # for the ride with this cue.
@@ -320,7 +372,7 @@ def build_labels(
             for dim in range(n_dims):
                 if dim not in excluded:
                     targets[row, dim] = 0.0
-                    weights[row, dim] = W_UNCUED_DIM
+                    weights[row, dim] = W_UNCUED_DIM * quality_scale
 
     if dim_boost:
         for dim, factor in dim_boost.items():
@@ -364,20 +416,88 @@ def parse_dim_boost(text: str | None) -> dict[int, float]:
     return boosts
 
 
-def cue_lag_report(sessions: Sequence[Session]) -> list[dict]:
-    """Per-cue check that the user actually followed the avatar.
+def _read_guided_quality_overrides(session: Session) -> dict[tuple[str, int, int], dict]:
+    """Read explicit headset judgments for a session.
 
-    This is the experiment the whole guided-capture design rests on, and it costs one recording to
-    run. If the stock model's reading of the cued expression does not track the commanded signal
-    after lag correction, then the commanded vector is not describing the user's face, and every
-    label built from it is fiction - a model trained on it would learn confidently wrong things and
-    every metric would look fine, because the metrics are built from the same bad labels.
+    The file is deliberately separate from ``session.json`` and ``labels.jsonl``: recordings remain
+    append-only while a retry/skip decision can be written atomically when the guided run stops.
+    Conflicting duplicate entries are rejected instead of letting file order silently choose which
+    supervision wins.
+    """
+    path = session.path / GUIDED_QUALITY_OVERRIDES_FILE
+    if not path.exists():
+        return {}
 
-    Correlation around 0.6 or better means the labels are real. Much lower means either the cue was
-    not understood, the avatar was not rendering it, or the intensity was unreproducible - all of
-    which are fixable, but only if noticed.
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read guided quality overrides from {path}: {exc}") from exc
 
-    Returns one entry per (session, cue id, repetition), each with the estimated lag and correlation.
+    attempts = payload.get("attempts", []) if isinstance(payload, dict) else None
+    if not isinstance(attempts, list):
+        raise ValueError(f"{path}: 'attempts' must be a JSON array")
+
+    result: dict[tuple[str, int, int], dict] = {}
+    for index, item in enumerate(attempts):
+        if not isinstance(item, dict) or not isinstance(item.get("valid"), bool):
+            raise ValueError(f"{path}: attempts[{index}] must be an object with boolean 'valid'")
+
+        key = (
+            str(item.get("cue", "")),
+            int(item.get("rep", 0) or 0),
+            int(item.get("attempt", 0) or 0),
+        )
+        value = {
+            "valid": bool(item["valid"]),
+            "reason": str(item.get("reason", "explicit-headset-judgment")),
+            "source": GUIDED_QUALITY_OVERRIDES_FILE,
+        }
+        previous = result.get(key)
+        if previous is not None and previous["valid"] != value["valid"]:
+            raise ValueError(f"{path}: conflicting valid values for cue={key[0]!r}, "
+                             f"rep={key[1]}, attempt={key[2]}")
+        result[key] = value
+
+    return result
+
+
+def _inline_attempt_judgment(frames: Sequence) -> dict | None:
+    """Read an optional boolean stamped directly into cue rows by future recorders.
+
+    The sidecar is the current contract, but accepting these unambiguous field names keeps old
+    trainer builds compatible with a recorder that later chooses to stamp the decision per frame.
+    An explicit false wins if a partially written attempt contains both values.
+    """
+    values: list[bool] = []
+    for frame in frames:
+        cue = frame.cue or {}
+        for name in ("valid", "quality_valid", "attempt_valid"):
+            value = cue.get(name)
+            if isinstance(value, bool):
+                values.append(value)
+                break
+
+    if not values:
+        return None
+    valid = all(values)
+    return {
+        "valid": valid,
+        "reason": "cue-metadata-valid" if valid else "cue-metadata-invalid",
+        "source": "cue-metadata",
+    }
+
+
+def guided_attempt_quality(sessions: Sequence[Session]) -> list[dict]:
+    """Classify each Guided hold attempt without ever rejecting a whole session.
+
+    Automatic suppression has two conditions: correlation is nearly absent *and* another attempt
+    of the exact cue in the same session reaches the established 0.60 observability threshold. This
+    catches a genuinely missed repetition (for example one missed Smile50 among successful Smile50
+    repetitions) without declaring a whole expression unusable merely because the stock model is
+    blind to it. Less decisive attempts remain in the corpus at one quarter weight.
+
+    Explicit ``valid``/``invalid`` judgments from the headset sidecar or cue metadata always win.
+    Returns deterministic entries ordered by session, cue, repetition, and attempt.
     """
     reports: list[dict] = []
 
@@ -385,69 +505,187 @@ def cue_lag_report(sessions: Sequence[Session]) -> list[dict]:
         if not session.is_guided:
             continue
 
-        # Group frames by cue repetition: lag is a property of one attempt, not of a whole session.
-        groups: dict[tuple[str, int], list] = {}
+        overrides = _read_guided_quality_overrides(session)
+
+        # Lag is a property of one attempt, not of a session or cue family. ``attempt`` defaults to
+        # zero so recordings made before retry support keep their original grouping.
+        groups: dict[tuple[str, int, int], list] = {}
         for frame in session.frames:
             cue = frame.cue
             if not cue:
                 continue
-            key = (str(cue.get("id", "")), int(cue.get("rep", 0) or 0))
+            key = (
+                str(cue.get("id", "")),
+                int(cue.get("rep", 0) or 0),
+                int(cue.get("attempt", 0) or 0),
+            )
             groups.setdefault(key, []).append(frame)
 
-        for (cue_id, rep), frames in sorted(groups.items()):
-            if len(frames) < 8:
+        for (cue_id, rep, attempt), frames in sorted(groups.items()):
+            hold_frames = [f for f in frames
+                           if str((f.cue or {}).get("phase", "")).lower() == "hold"]
+            # Lead-ins and rest-only groups provide known-neutral evidence, not an expression
+            # attempt. Their rest semantics stay unchanged and should not pollute Good/Weak counts.
+            if not hold_frames:
                 continue
 
-            dims = [int(d) for d in (frames[0].cue or {}).get("dims", [])]
+            exemplar = next((f for f in hold_frames if (f.cue or {}).get("dims")), hold_frames[0])
+            dims = [int(d) for d in (exemplar.cue or {}).get("dims", [])]
+            dims = [d for d in dims if 0 <= d < schema.EXPRESSION_COUNT]
             if not dims:
                 continue
 
             primary = dims[0]
-            commanded = np.asarray(
-                [float((f.cue or {}).get("target", [0.0] * schema.EXPRESSION_COUNT)[primary])
-                 for f in frames], dtype=np.float64)
+
+            def command(frame) -> float:
+                target = (frame.cue or {}).get("target")
+                if not isinstance(target, (list, tuple)) or primary >= len(target):
+                    return 0.0
+                try:
+                    return float(target[primary])
+                except (TypeError, ValueError):
+                    return 0.0
+
+            commanded = np.asarray([command(f) for f in frames], dtype=np.float64)
             observed = np.asarray([float(f.stock[primary]) for f in frames], dtype=np.float64)
             timestamps = np.asarray([f.timestamp_ticks for f in frames], dtype=np.float64)
-
             lag, correlation = estimate_cue_lag_seconds(observed, commanded, timestamps)
 
+            explicit = overrides.get((cue_id, rep, attempt)) or _inline_attempt_judgment(frames)
             reports.append({
                 "session": session.session_id,
                 "cue": cue_id,
                 "rep": rep,
+                "attempt": attempt,
                 "dim": schema.EXPRESSION_NAMES[primary],
+                "dims": [schema.EXPRESSION_NAMES[d] for d in dims],
                 "frames": len(frames),
-                "lag_seconds": lag,
-                "correlation": correlation,
+                "hold_frames": len(hold_frames),
+                "lag_seconds": float(lag),
+                "correlation": float(correlation),
+                "command_range": float(np.ptp(commanded)) if len(commanded) else 0.0,
+                "observed_range": float(np.ptp(observed)) if len(observed) else 0.0,
+                "explicit_valid": None if explicit is None else bool(explicit["valid"]),
+                "override_reason": None if explicit is None else explicit["reason"],
+                "decision_source": "automatic" if explicit is None else explicit["source"],
+                "reason": "pending",
+                "status": "pending",
+                "weight_scale": 1.0,
             })
+
+    # Decide only after all correlations are known, because suppression requires an observable peer
+    # of the same exact cue and session. Sorted input/output makes the decision reproducible.
+    for entry in reports:
+        explicit = entry["explicit_valid"]
+        if explicit is True:
+            entry.update(status="good", weight_scale=1.0, reason="explicit-valid")
+            continue
+        if explicit is False:
+            entry.update(status="suppressed", weight_scale=0.0, reason="explicit-invalid")
+            continue
+
+        correlation = float(entry["correlation"])
+        if correlation >= GUIDED_GOOD_CORRELATION:
+            entry.update(status="good", weight_scale=1.0,
+                         reason="correlation-at-or-above-good-threshold")
+            continue
+
+        observable_peer = any(
+            other is not entry
+            and other["session"] == entry["session"]
+            and other["cue"] == entry["cue"]
+            and float(other["correlation"]) >= GUIDED_GOOD_CORRELATION
+            for other in reports
+        )
+        if correlation <= GUIDED_SUPPRESS_CORRELATION and observable_peer:
+            entry.update(status="suppressed", weight_scale=0.0,
+                         reason="extremely-weak-with-observable-peer")
+        else:
+            reason = ("extremely-weak-but-no-observable-peer" if
+                      correlation <= GUIDED_SUPPRESS_CORRELATION else
+                      "below-good-threshold")
+            entry.update(status="weak", weight_scale=GUIDED_WEAK_WEIGHT_SCALE, reason=reason)
 
     return reports
 
 
-def format_cue_lag_report(reports: Sequence[dict], *, threshold: float = 0.6) -> str:
-    """Human-readable lag table, flagging repetitions the user probably did not follow."""
+def cue_lag_report(sessions: Sequence[Session]) -> list[dict]:
+    """Backward-compatible name for the now-actionable per-attempt quality report."""
+    return guided_attempt_quality(sessions)
+
+
+def guided_quality_artifact(
+    reports: Sequence[dict],
+    *,
+    train_session_ids: Sequence[str] = (),
+    val_session_ids: Sequence[str] = (),
+) -> dict:
+    """Build the JSON-serializable artifact written beside every immutable training run."""
+    train_ids, val_ids = set(train_session_ids), set(val_session_ids)
+    attempts = []
+    for report in reports:
+        entry = dict(report)
+        session_id = str(entry.get("session", ""))
+        entry["split"] = ("train" if session_id in train_ids else
+                          "validation" if session_id in val_ids else "unassigned")
+        attempts.append(entry)
+
+    counts = {status: sum(1 for r in attempts if r.get("status") == status)
+              for status in ("good", "weak", "suppressed")}
+    return {
+        "format_version": 1,
+        "policy": {
+            "good_correlation": GUIDED_GOOD_CORRELATION,
+            "suppress_correlation": GUIDED_SUPPRESS_CORRELATION,
+            "weak_weight_scale": GUIDED_WEAK_WEIGHT_SCALE,
+            "automatic_suppression_requires_same_session_same_cue_good_peer": True,
+            "explicit_validity_precedence": True,
+            "hold_only_gating": True,
+        },
+        "summary": counts,
+        "attempts": attempts,
+    }
+
+
+def format_cue_lag_report(
+    reports: Sequence[dict],
+    *,
+    threshold: float = GUIDED_GOOD_CORRELATION,
+) -> str:
+    """Human-readable Good/Weak/suppressed table for the pre-training console log."""
     if not reports:
         return ""
 
-    lines = ["Cue tracking (did the face follow the avatar?)",
-             f"  {'cue':<18}{'rep':>5}{'frames':>8}{'lag s':>9}{'corr':>8}"]
-
-    weak = 0
+    statuses = []
     for entry in reports:
-        flag = ""
-        if entry["correlation"] < threshold:
-            flag = "  <-- weak"
-            weak += 1
-        lines.append(f"  {entry['cue']:<18}{entry['rep']:>5}{entry['frames']:>8}"
-                     f"{entry['lag_seconds']:>9.2f}{entry['correlation']:>8.2f}{flag}")
+        fallback = "good" if float(entry["correlation"]) >= threshold else "weak"
+        statuses.append(str(entry.get("status", fallback)).lower())
+    counts = {status: statuses.count(status) for status in ("good", "weak", "suppressed")}
+
+    lines = [
+        (f"Guided attempt quality: Good {counts['good']} / Weak {counts['weak']} / "
+         f"suppressed {counts['suppressed']}"),
+        "Cue tracking (did the face follow the avatar?)",
+        f"  {'cue':<18}{'rep':>5}{'try':>5}{'frames':>8}{'lag s':>9}{'corr':>8}"
+        f"{'weight':>9}  quality",
+    ]
+
+    for entry, status in zip(reports, statuses):
+        weight_scale = float(entry.get("weight_scale", 1.0 if status == "good" else
+                                       GUIDED_WEAK_WEIGHT_SCALE))
+        label = {"good": "Good", "weak": "Weak", "suppressed": "suppressed"}.get(status, status)
+        flag = "  <-- weak" if status == "weak" else \
+               "  <-- SUPPRESSED" if status == "suppressed" else ""
+        lines.append(f"  {entry['cue']:<18}{entry['rep']:>5}{entry.get('attempt', 0):>5}"
+                     f"{entry['frames']:>8}{entry['lag_seconds']:>9.2f}"
+                     f"{entry['correlation']:>8.2f}{weight_scale:>9.2f}  {label}{flag}")
 
     mean = float(np.mean([e["correlation"] for e in reports]))
-    lines.append(f"  mean correlation {mean:.2f} over {len(reports)} repetitions")
-
-    if weak:
-        lines.append(f"  {weak} repetition(s) below {threshold}: the commanded value may not "
-                     "describe what the face was doing. Check the avatar renders the cue, and that "
-                     "the intensity is reproducible.")
+    lines.append(f"  mean correlation {mean:.2f} over {len(reports)} attempts")
+    if counts["weak"] or counts["suppressed"]:
+        lines.append("  Weak attempts keep 25% hold weight. Automatic suppression requires an "
+                     "extremely weak response plus a Good peer of the same cue; explicit headset "
+                     "valid/invalid judgments take precedence.")
 
     return "\n".join(lines)
 

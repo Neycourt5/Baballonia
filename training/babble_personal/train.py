@@ -306,16 +306,25 @@ def main(argv: list[str] | None = None) -> int:
     dim_boost = lbl.parse_dim_boost(args.dim_boost)
     fp_dims = lbl.parse_dims(args.fp_dims) if args.fp_penalty > 0 else ()
 
+    # One global decision pass keeps a repetition's classification identical whether its session
+    # lands in training or validation. The gate acts on individual Guided holds only; it never
+    # removes a session and never changes rest, transition, speech, neutral, or correction labels.
+    quality_reports = lbl.guided_attempt_quality(sessions)
+    quality_artifact = lbl.guided_quality_artifact(
+        quality_reports,
+        train_session_ids=[s.session_id for s in train_sessions],
+        val_session_ids=[s.session_id for s in val_sessions],
+    )
+
     train_labels = lbl.build_labels(train_sessions, use_speech_pseudo_labels=use_pseudo,
-                                    dim_boost=dim_boost)
+                                    dim_boost=dim_boost, guided_quality=quality_reports)
     print(f"\nTraining labels:\n{train_labels.describe()}")
 
-    # Printed before training, because a weak correlation means the guided labels are fiction and
-    # nothing downstream would reveal it - the metrics are built from the same labels.
-    lag_reports = lbl.cue_lag_report(sessions)
-    if lag_reports:
+    # Printed before training: weak attempts are now visibly downweighted, and only an extremely
+    # weak attempt with a proven observable peer is automatically suppressed.
+    if quality_reports:
         print()
-        print(lbl.format_cue_lag_report(lag_reports))
+        print(lbl.format_cue_lag_report(quality_reports))
 
     if dim_boost:
         described = ", ".join(f"{schema.EXPRESSION_NAMES[d]}x{w:g}" for d, w in dim_boost.items())
@@ -380,7 +389,7 @@ def main(argv: list[str] | None = None) -> int:
     val_loader = None
     if val_sessions:
         val_labels = lbl.build_labels(val_sessions, use_speech_pseudo_labels=use_pseudo,
-                                      dim_boost=dim_boost)
+                                      dim_boost=dim_boost, guided_quality=quality_reports)
         val_data = _Batch(val_sessions, val_labels, need_images, need_embeddings)
         val_loader = val_data.loader(args.batch_size, shuffle=False)
 
@@ -390,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = Path(args.out) / f"{datetime.now():%Y%m%d_%H%M%S}_{model.adapter_type}"
     run_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = run_dir / "model.pt"
+    (run_dir / "guided_quality.json").write_text(
+        json.dumps(quality_artifact, indent=2), encoding="utf-8")
 
     best_score = float("inf")
     best_epoch = -1
@@ -492,8 +503,28 @@ def main(argv: list[str] | None = None) -> int:
         "schema_sha256": schema.SCHEMA_SHA256,
         "train_sessions": [s.session_id for s in train_sessions],
         "val_sessions": [s.session_id for s in val_sessions],
+        # Freeze the evidence identity used by this run. The recordings directory is user-owned and
+        # may later be cleaned up; history must not rewrite "Guided was included" to "no" merely
+        # because that source session no longer exists on disk.
+        "train_inventory": [
+            {
+                "session_id": s.session_id,
+                "session_type": s.session_type,
+                "frame_count": len(s.frames),
+            }
+            for s in train_sessions
+        ],
+        "val_inventory": [
+            {
+                "session_id": s.session_id,
+                "session_type": s.session_type,
+                "frame_count": len(s.frames),
+            }
+            for s in val_sessions
+        ],
         "best_epoch": best_epoch + 1,
         "best_score": best_score,
+        "guided_quality": quality_artifact["summary"],
         "args": {k: str(v) for k, v in vars(args).items()},
     }, indent=2), encoding="utf-8")
 

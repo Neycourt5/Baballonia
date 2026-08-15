@@ -316,6 +316,11 @@ def test_summary_json_contract() -> None:
         ]) == 0
 
         summary = json.loads(next(out.rglob("summary.json")).read_text(encoding="utf-8"))
+        run = json.loads(next(out.rglob("run.json")).read_text(encoding="utf-8"))
+        quality = json.loads(next(out.rglob("guided_quality.json")).read_text(encoding="utf-8"))
+        assert quality["format_version"] == 1
+        assert set(quality["summary"]) == {"good", "weak", "suppressed"}
+        assert quality["policy"]["hold_only_gating"] is True
 
         for key in (
             "summary_version", "adapter_type", "parameters", "checkpoint", "schema_sha256",
@@ -331,6 +336,15 @@ def test_summary_json_contract() -> None:
         assert "neutral" in summary, "neutral stats drive the headline result"
         assert summary["neutral"]["personal_false_activation_rate"] <= \
                summary["neutral"]["stock_false_activation_rate"] + 1e-9
+
+        assert {item["session_id"] for item in run["train_inventory"]} == \
+               set(run["train_sessions"])
+        assert {item["session_id"] for item in run["val_inventory"]} == \
+               set(run["val_sessions"])
+        assert all(item["session_type"] in ("Neutral", "Guided")
+                   for item in run["train_inventory"] + run["val_inventory"])
+        assert all(item["frame_count"] > 0
+                   for item in run["train_inventory"] + run["val_inventory"])
 
         # Single-session corpus: nothing can be held out, so no claim may be made.
         solo = root / "solo"
