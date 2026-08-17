@@ -445,3 +445,6 @@ faceModelWithEmbedding.onnx
 
 # Manual label corrections produced by the review tool
 corrections*.jsonl
+
+# Local reference copy of upstream, not part of the build
+/Baballonia-main/

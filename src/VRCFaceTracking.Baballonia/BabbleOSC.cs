@@ -33,7 +33,7 @@ public class BabbleOsc
             return;
         }
         _resolvedHost = host ?? DefaultHost;
-        _resolvedPort = port ?? DefaultPort;
+        _resolvedPort = port ?? TimeoutMs;
 
         iLogger.LogInformation($"Started BabbleEyeOSC with Host: {_resolvedHost} and Port {_resolvedPort}");
         ConfigureReceiver();
@@ -73,23 +73,48 @@ public class BabbleOsc
                     }
                     if (oscMessage.Value is float value)
                     {
-                        if (EyeExpressionRouter.TryApply(oscMessage.Address, value, EyeExpressions))
-                            continue;
-
-                        if (string.Equals(oscMessage.Address, "/LeftEyeBrow", StringComparison.OrdinalIgnoreCase))
+                        switch (oscMessage.Address)
                         {
-                            EyeExpressions[(int)ExpressionMapping.EyeLeftLower] = value;
-                        }
-                        else if (string.Equals(
-                                     oscMessage.Address,
-                                     "/RightEyeBrow",
-                                     StringComparison.OrdinalIgnoreCase))
-                        {
-                            EyeExpressions[(int)ExpressionMapping.EyeRightLower] = value;
-                        }
-                        else if (BabbleExpressions.BabbleExpressionMap.ContainsKey2(oscMessage.Address))
-                        {
-                            BabbleExpressions.BabbleExpressionMap.SetByKey2(oscMessage.Address, value);
+                            case "/LeftEyeX":
+                                EyeExpressions[(int)ExpressionMapping.EyeLeftX] = value;
+                                break;
+                            case "/LeftEyeY":
+                                EyeExpressions[(int)ExpressionMapping.EyeLeftY] = value;
+                                break;
+                            case "/LeftEyeLid":
+                                EyeExpressions[(int)ExpressionMapping.EyeLeftLid] = value;
+                                break;
+                            case "/LeftEyeWiden":
+                                EyeExpressions[(int)ExpressionMapping.EyeLeftWiden] = value;
+                                break;
+                            // case "/LeftEyeLower":
+                            //     EyeExpressions[(int)ExpressionMapping.EyeLeftLower] = value;
+                            //     break;
+                            case "/LeftEyeBrow":
+                                EyeExpressions[(int)ExpressionMapping.EyeLeftSquint] = value;
+                                break;
+                            case "/RightEyeX":
+                                EyeExpressions[(int)ExpressionMapping.EyeRightX] = value;
+                                break;
+                            case "/RightEyeY":
+                                EyeExpressions[(int)ExpressionMapping.EyeRightY] = value;
+                                break;
+                            case "/RightEyeLid":
+                                EyeExpressions[(int)ExpressionMapping.EyeRightLid] = value;
+                                break;
+                            case "/RightEyeWiden":
+                                EyeExpressions[(int)ExpressionMapping.EyeRightWiden] = value;
+                                break;
+                            // case "/RightEyeLower":
+                            //     EyeExpressions[(int)ExpressionMapping.EyeRightLower] = value;
+                            //     break;
+                            case "/RightEyeBrow":
+                                EyeExpressions[(int)ExpressionMapping.EyeRightSquint] = value;
+                                break;
+                            default:
+                                if (BabbleExpressions.BabbleExpressionMap.ContainsKey2(oscMessage.Address))
+                                    BabbleExpressions.BabbleExpressionMap.SetByKey2(oscMessage.Address, value);
+                                break;
                         }
                     }
                 }

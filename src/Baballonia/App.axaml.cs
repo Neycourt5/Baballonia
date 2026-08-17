@@ -10,7 +10,6 @@ using Baballonia.Models;
 using Baballonia.Services;
 using Baballonia.Services.Inference;
 using Baballonia.Services.Inference.Platforms;
-using Baballonia.Services.EyeV2;
 using Baballonia.Services.Calibration;
 using Baballonia.Services.Personalization;
 using Baballonia.Services.Personalization.Audio;
@@ -115,9 +114,6 @@ public partial class App : Application
             services.AddSingleton<EyePipelineManager>();
             services.AddSingleton<IEyePipelineEventBus, EyePipelineEventBus>();
             services.TryAddSingleton<IVrCalibrationPresenter, NullVrCalibrationPresenter>();
-            services.AddSingleton<EyeV2CalibrationStore>();
-            services.AddSingleton<EyeV2Manager>();
-            services.AddSingleton<EyeV2CalibrationService>();
             services.AddSingleton<SingleCameraSourceFactory>();
             services.AddSingleton<FirmwareSessionFactory>();
 

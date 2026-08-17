@@ -3,7 +3,6 @@ using Baballonia.Services.Inference;
 using Baballonia.Services.Inference.Filters;
 using Baballonia.Services.Inference.Models;
 using Baballonia.Services.Inference.VideoSources;
-using Baballonia.Services.EyeV2;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using System;
@@ -360,16 +359,5 @@ public class EyePipelineManager
     public void SetFilter(IFilter? filter)
     {
         _pipeline.Filter = filter;
-    }
-
-    /// <summary>
-    /// Atomically installs, clears or hot-swaps the optional personal eye mapper. Mapper lifetime
-    /// belongs to <see cref="EyeV2.EyeV2Manager"/> so it can restore the previous instance if the
-    /// settings half of an activation transaction fails.
-    /// </summary>
-    public void SetMapper(IEyeStateMapper? mapper)
-    {
-        mapper?.Reset();
-        _pipeline.Mapper = mapper;
     }
 }

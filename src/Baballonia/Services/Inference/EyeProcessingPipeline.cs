@@ -1,7 +1,6 @@
 ﻿using Baballonia.Contracts;
 using Baballonia.Services.events;
 using Baballonia.Services.Inference.Enums;
-using Baballonia.Services.EyeV2;
 using OpenCvSharp;
 using System;
 using System.Collections.Generic;
@@ -19,7 +18,6 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
     /// Optional V2 stage. Null is intentionally the exact pre-V2 path; no copy, allocation or
     /// alternate postprocessing occurs in that case.
     /// </summary>
-    public volatile IEyeStateMapper? Mapper;
 
     /// <summary>
     /// Runs one eye inference tick.
@@ -54,19 +52,6 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
             eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
 
             var timestampTicks = DateTime.UtcNow.Ticks;
-            var frameMapper = Mapper;
-            if (frameMapper is IEyeFrameAwareMapper frameAware)
-            {
-                try
-                {
-                    frameAware.ObserveFrame(transformed, timestampTicks);
-                }
-                catch
-                {
-                    // An experimental frame consumer may never take down stock eye tracking.
-                    Mapper = null;
-                }
-            }
 
             collected = _imageCollector.Apply(transformed);
             if (collected == null)
@@ -109,26 +94,7 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
                 inferenceResult = Filter.Filter(inferenceResult);
             }
 
-            var mapper = Mapper;
-            var filteredRawForMapper = mapper == null ? null : (float[])inferenceResult.Clone();
             ProcessExpressions(ref inferenceResult);
-
-            if (mapper != null && filteredRawForMapper != null)
-            {
-                try
-                {
-                    // The stage is after stock postprocessing exactly as designed. It also receives
-                    // the same tick's filtered raw values because per-eye Y/lid information has
-                    // already been fused by ProcessExpressions and cannot be reconstructed later.
-                    inferenceResult = mapper.Map(inferenceResult, filteredRawForMapper, timestampTicks);
-                }
-                catch
-                {
-                    // A bad experimental mapper must never take down eye tracking. Clear it and
-                    // return the already-computed stock state on this same tick.
-                    Mapper = null;
-                }
-            }
 
             eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
 
@@ -279,7 +245,6 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
         TryDisposeObject(ImageConverter);
         TryDisposeObject(InferenceService);
         TryDisposeObject(Filter);
-        TryDisposeObject(Mapper);
         TryDisposeObject(_fastCorruptionDetector);
         TryDisposeObject(_imageCollector);
     }

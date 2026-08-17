@@ -52,8 +52,6 @@
     <ItemGroup>
         <Compile Include="..\VRCFaceTracking.Baballonia\ExpressionMapping.cs"
                  Link="ModuleContract\ExpressionMapping.cs" />
-        <Compile Include="..\VRCFaceTracking.Baballonia\EyeExpressionRouter.cs"
-                 Link="ModuleContract\EyeExpressionRouter.cs" />
         <None Include="..\VRCFaceTracking.Baballonia\BabbleConfig.json"
               Link="ModulePackage\BabbleConfig.json"
               CopyToOutputDirectory="PreserveNewest" />

@@ -1,7 +1,6 @@
 ﻿using Baballonia.Contracts;
 using Baballonia.Helpers;
 using Baballonia.Services.Personalization;
-using Baballonia.Services.EyeV2;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using OscCore;
@@ -40,31 +39,19 @@ public class ParameterSenderService : BackgroundService
     private readonly ConcurrentQueue<OscMessage> _dfrQueue = new();
     private readonly object _vrcftQueueGate = new();
     private readonly object _dfrQueueGate = new();
-    private EyeOscSendSnapshot? _lastEyeOscSendSnapshot;
 
-    // Positional protocol ABI. Keep this explicit: Dictionary.ElementAt made correctness depend on
-    // an implementation-specific enumeration order and obscured which V2 slot drove each address.
-    public static IReadOnlyList<EyeOscParameter> EyeExpressionOrder { get; } = Array.AsReadOnly(new[]
+    // Stock eye output: the six legacy channels, in the order the receiving module expects.
+    // Widen/Squint/Brow were an experiment that is no longer part of the build; the code lives
+    // under experimental/eye-v2 if it is ever picked back up.
+    private readonly Dictionary<string, string> _eyeExpressionMap = new()
     {
-        new EyeOscParameter("LeftEyeX", "/LeftEyeX", true),
-        new EyeOscParameter("LeftEyeY", "/LeftEyeY", true),
-        new EyeOscParameter("LeftEyeLid", "/LeftEyeLid", false),
-        new EyeOscParameter("RightEyeX", "/RightEyeX", true),
-        new EyeOscParameter("RightEyeY", "/RightEyeY", true),
-        new EyeOscParameter("RightEyeLid", "/RightEyeLid", false),
-        // V2 appends these after the exact legacy six-value prefix.
-        new EyeOscParameter("LeftEyeWiden", "/LeftEyeWiden", false),
-        new EyeOscParameter("LeftEyeSquint", "/LeftEyeSquint", false),
-        new EyeOscParameter("RightEyeWiden", "/RightEyeWiden", false),
-        new EyeOscParameter("RightEyeSquint", "/RightEyeSquint", false),
-    });
-
-    /// <summary>The newest final eye batch and its local UDP transport state.</summary>
-    public EyeOscSendSnapshot? LastEyeOscSendSnapshot =>
-        Volatile.Read(ref _lastEyeOscSendSnapshot);
-
-    /// <summary>Raised for queued and transport-completion snapshots.</summary>
-    public event Action<EyeOscSendSnapshot>? EyeOscSendSnapshotChanged;
+        { "LeftEyeX", "/LeftEyeX" },
+        { "LeftEyeY", "/LeftEyeY" },
+        { "LeftEyeLid", "/LeftEyeLid" },
+        { "RightEyeX", "/RightEyeX" },
+        { "RightEyeY", "/RightEyeY" },
+        { "RightEyeLid", "/RightEyeLid" },
+    };
 
     public readonly Dictionary<string, string> FaceExpressionMap = new()
     {
@@ -138,7 +125,7 @@ public class ParameterSenderService : BackgroundService
     {
         _logger.LogDebug("Starting Parameter Sender Service...");
         _logger.LogDebug("OSC parameter mapping initialized with {EyeCount} eye expressions and {FaceCount} face expressions",
-            EyeExpressionOrder.Count, FaceExpressionMap.Count);
+            _eyeExpressionMap.Count, FaceExpressionMap.Count);
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -176,51 +163,22 @@ public class ParameterSenderService : BackgroundService
     private void ProcessEyeExpressionData(float[] expressions)
     {
         if (expressions is null) return;
-        if (expressions.Length < EyeStateLayout.LegacyCount) return;
-
-        var eyeV2 = expressions.Length >= EyeStateLayout.V2Count;
-        var channelCount = eyeV2 ? EyeStateLayout.V2Count : EyeStateLayout.LegacyCount;
-        var prefix = _prefix;
-        var values = new EyeOscValue[channelCount];
-        EyeOscSendSnapshot queuedSnapshot;
+        if (expressions.Length == 0) return;
 
         lock (_vrcftQueueGate)
         {
-            for (var i = 0; i < channelCount; i++)
+            for (var i = 0; i < Math.Min(expressions.Length, _eyeExpressionMap.Count); i++)
             {
                 var weight = expressions[i];
-                var channel = EyeExpressionOrder[i];
-                float sent;
-                if (eyeV2)
-                {
-                    // V2 is already in canonical units and owns separate personal calibration.
-                    // Never pass it through Default's CalibrationParams or the two modes cease to
-                    // be independent. Gaze is signed; lid/wide/squint are unit weights.
-                    sent = Math.Clamp(weight, channel.IsSigned ? -1f : 0f, 1f);
-                }
-                else
-                {
-                    var settings = _calibrationService.GetExpressionSettings(channel.ExpressionName);
-                    sent = weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max);
-                }
+                var eyeElement = _eyeExpressionMap.ElementAt(i);
+                var settings = _calibrationService.GetExpressionSettings(eyeElement.Key);
 
-                var address = prefix + channel.Address;
-                _vrcftQueue.Enqueue(new OscMessage(address, sent));
-                values[i] = new EyeOscValue(channel.ExpressionName, address, sent);
+                _vrcftQueue.Enqueue(new OscMessage(_prefix + eyeElement.Value,
+                    weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max)));
             }
 
             if (_sendNativeVrcEyeTracking)
                 ProcessNativeVrcEyeTracking(expressions, _vrcftQueue);
-
-            var now = DateTimeOffset.UtcNow;
-            queuedSnapshot = new EyeOscSendSnapshot(
-                Array.AsReadOnly(values),
-                _vrcftModuleSendService?.Destination ?? "unconfigured",
-                now,
-                now,
-                EyeOscTransportStatus.Queued,
-                null);
-            Volatile.Write(ref _lastEyeOscSendSnapshot, queuedSnapshot);
         }
 
         if (_useDfr)
@@ -228,8 +186,6 @@ public class ParameterSenderService : BackgroundService
             lock (_dfrQueueGate)
                 ProcessNativeVrcEyeTracking(expressions, _dfrQueue);
         }
-
-        NotifyEyeOscSnapshotChanged(queuedSnapshot);
     }
 
     private void ProcessNativeVrcEyeTracking(float[] expressions, ConcurrentQueue<OscMessage> queue)
@@ -241,16 +197,10 @@ public class ParameterSenderService : BackgroundService
         var rightEyeY = expressions[4];
         var rightEyeLid = expressions[5];
 
-        var eyeV2 = expressions.Length >= EyeStateLayout.V2Count;
-        var weightedLeftEyeLid = leftEyeLid;
-        var weightedRightEyeLid = rightEyeLid;
-        if (!eyeV2)
-        {
-            var leftEyeLidSettings = _calibrationService.GetExpressionSettings("LeftEyeLid");
-            var rightEyeLidSettings = _calibrationService.GetExpressionSettings("RightEyeLid");
-            weightedLeftEyeLid = leftEyeLid.Remap(leftEyeLidSettings.Lower, leftEyeLidSettings.Upper, leftEyeLidSettings.Min, leftEyeLidSettings.Max);
-            weightedRightEyeLid = rightEyeLid.Remap(rightEyeLidSettings.Lower, rightEyeLidSettings.Upper, rightEyeLidSettings.Min, rightEyeLidSettings.Max);
-        }
+        var leftEyeLidSettings = _calibrationService.GetExpressionSettings("LeftEyeLid");
+        var rightEyeLidSettings = _calibrationService.GetExpressionSettings("RightEyeLid");
+        var weightedLeftEyeLid = leftEyeLid.Remap(leftEyeLidSettings.Lower, leftEyeLidSettings.Upper, leftEyeLidSettings.Min, leftEyeLidSettings.Max);
+        var weightedRightEyeLid = rightEyeLid.Remap(rightEyeLidSettings.Lower, rightEyeLidSettings.Upper, rightEyeLidSettings.Min, rightEyeLidSettings.Max);
         var averageLid = (weightedLeftEyeLid + weightedRightEyeLid) / 2f;
         queue.Enqueue(new OscMessage("/tracking/eye/EyesClosedAmount", 1f - Math.Clamp(averageLid, 0f, 1f)));
 
@@ -314,32 +264,15 @@ public class ParameterSenderService : BackgroundService
     private async Task SendAndClearQueue(CancellationToken cancellationToken)
     {
         OscMessage[] vrcftMessages;
-        EyeOscSendSnapshot? eyeSnapshotAtDispatch;
         lock (_vrcftQueueGate)
         {
             vrcftMessages = _vrcftQueue.ToArray();
             _vrcftQueue.Clear();
-            eyeSnapshotAtDispatch = Volatile.Read(ref _lastEyeOscSendSnapshot);
         }
 
         if (vrcftMessages.Length > 0)
         {
-            OscDispatchResult result;
-            try
-            {
-                result = await _vrcftModuleSendService.Send(vrcftMessages, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                result = new OscDispatchResult(
-                    false,
-                    _vrcftModuleSendService?.Destination ?? "unconfigured",
-                    DateTimeOffset.UtcNow,
-                    vrcftMessages.Length,
-                    ex.Message);
-            }
-
-            CompleteEyeOscSnapshot(eyeSnapshotAtDispatch, result);
+            await _vrcftModuleSendService.Send(vrcftMessages, cancellationToken);
         }
 
         OscMessage[] dfrMessages;
@@ -353,47 +286,4 @@ public class ParameterSenderService : BackgroundService
             await _dfrSendService.Send(dfrMessages, cancellationToken);
     }
 
-    private void CompleteEyeOscSnapshot(
-        EyeOscSendSnapshot? queuedSnapshot,
-        OscDispatchResult result)
-    {
-        if (queuedSnapshot is not { TransportStatus: EyeOscTransportStatus.Queued })
-            return;
-
-        var updated = queuedSnapshot with
-        {
-            Destination = result.Destination,
-            UpdatedAtUtc = result.CompletedAtUtc,
-            TransportStatus = result.SentToUdpSocket
-                ? EyeOscTransportStatus.SentToUdpSocket
-                : EyeOscTransportStatus.TransportError,
-            Error = result.Error,
-        };
-
-        var previous = Interlocked.CompareExchange(
-            ref _lastEyeOscSendSnapshot,
-            updated,
-            queuedSnapshot);
-        if (ReferenceEquals(previous, queuedSnapshot))
-            NotifyEyeOscSnapshotChanged(updated);
-    }
-
-    private void NotifyEyeOscSnapshotChanged(EyeOscSendSnapshot snapshot)
-    {
-        var handlers = EyeOscSendSnapshotChanged;
-        if (handlers == null)
-            return;
-
-        foreach (Action<EyeOscSendSnapshot> handler in handlers.GetInvocationList())
-        {
-            try
-            {
-                handler(snapshot);
-            }
-            catch (Exception ex)
-            {
-                _logger?.LogWarning(ex, "Eye OSC diagnostic subscriber failed");
-            }
-        }
-    }
 }

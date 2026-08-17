@@ -493,6 +493,48 @@ public class GuidedCaptureRoutineTest
     // face that is still moving, which is a wrong label at full weight.
     // =============================================================================================
 
+    /// <summary>
+    /// Walks the routine to its next hold. A search rather than a step count, so changing the
+    /// preamble cannot quietly leave these assertions pointing at the wrong phase.
+    /// </summary>
+    private static void AdvanceToHold(GuidedCaptureRoutine routine, ref long clock)
+    {
+        for (var step = 0; step < 32 && routine.Current?.Phase != "hold"; step++)
+        {
+            clock += 2;
+            routine.Tick();
+        }
+
+        Assert.AreEqual("hold", routine.Current!.Phase, "never reached a hold");
+    }
+
+    [TestMethod]
+    public void GuidedRetryAndSkip_AreAttemptScoped()
+    {
+        long clock = 1;
+        var steps = GuidedCaptureRoutine.BuildJawOpenRoutine(
+            repetitions: 2, levels: [1f], holdSeconds: 1, restSeconds: 1,
+            transitionSeconds: 1, leadInSeconds: 1, prepSeconds: 1);
+        var routine = new GuidedCaptureRoutine(steps, () => clock, 1);
+
+        AdvanceToHold(routine, ref clock);
+        var original = routine.CurrentAttempt!.Value;
+
+        var replay = routine.RetryCurrentAttempt();
+        Assert.IsNotNull(replay);
+        Assert.AreEqual("prep", routine.Current!.Phase,
+            "Retry replays the whole attempt, countdown included, so the user is not thrown " +
+            "straight back into an expression they just asked to redo.");
+        Assert.AreEqual(original.Attempt + 1, routine.CurrentAttempt!.Value.Attempt);
+
+        AdvanceToHold(routine, ref clock);
+        var skipped = routine.CurrentAttempt!.Value;
+        var next = routine.SkipCurrentAttempt();
+        Assert.IsNotNull(next);
+        Assert.AreNotEqual(skipped.Repetition, routine.CurrentAttempt!.Value.Repetition,
+            "Skip must advance only past the current repetition, not end the whole routine.");
+    }
+
     [TestMethod]
     public void EveryAttemptOpensWithACountdownBeforeTheAvatarMoves()
     {

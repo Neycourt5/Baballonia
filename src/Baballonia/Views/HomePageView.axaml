@@ -105,69 +105,6 @@
         </SplitButton>
       </Grid>
 
-      <!-- Eye V2 is deliberately separate from the legacy trainer/calibration split button above.
-           Switching this mode never changes EyeHome_EyeModel or CalibrationParams. -->
-      <Border
-          BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}"
-          BorderThickness="1"
-          CornerRadius="8"
-          Margin="0,0,0,16"
-          Padding="14">
-        <StackPanel Spacing="10">
-          <Grid ColumnDefinitions="Auto,220,12,Auto,8,Auto,8,Auto">
-            <TextBlock Grid.Column="0" Margin="0,0,12,0" VerticalAlignment="Center"
-                       FontWeight="SemiBold" Text="Eye Tracking Mode" />
-            <ComboBox Grid.Column="1"
-                      ItemsSource="{Binding EyeTrackingModes}"
-                      SelectedIndex="{Binding SelectedEyeTrackingModeIndex, Mode=TwoWay}" />
-            <Button Grid.Column="3" Command="{Binding CalibrateEyesV2Command}"
-                    IsEnabled="{Binding !EyeV2Busy}" Content="Calibrate in VR (~60 s)" />
-            <Button Grid.Column="5" Command="{Binding RecenterEyesV2Command}"
-                    IsEnabled="{Binding !EyeV2Busy}" Content="Recenter Eyes (~2 s)" />
-            <Button Grid.Column="7" Command="{Binding CheckEyeV2ValidityCommand}"
-                    IsEnabled="{Binding !EyeV2Busy}" Content="Check headset position" />
-          </Grid>
-
-          <TextBlock Text="{Binding EyeV2Status}" TextWrapping="Wrap" />
-          <TextBlock Opacity="0.72"
-                     Text="Eye V2-A maps the existing eye model to your gaze/lid anchors; it does not train a new neural model. Calibration instructions and gaze targets appear in the SteamVR headset."
-                     TextWrapping="Wrap" />
-          <StackPanel IsVisible="{Binding EyeV2Busy}" Spacing="6">
-            <TextBlock FontWeight="SemiBold" Text="{Binding EyeV2Instruction}" TextWrapping="Wrap" />
-            <Canvas Width="320" Height="180" Background="#18000000"
-                    IsVisible="{Binding EyeV2TargetVisible}" HorizontalAlignment="Center">
-              <Ellipse Width="16" Height="16" Fill="#FF4B9CFF"
-                       Canvas.Left="{Binding EyeV2TargetCanvasX}"
-                       Canvas.Top="{Binding EyeV2TargetCanvasY}" />
-            </Canvas>
-            <ProgressBar Minimum="0" Maximum="1" Value="{Binding EyeV2Progress}" />
-            <Button HorizontalAlignment="Left" Command="{Binding CancelEyeV2OperationCommand}"
-                    Content="Cancel" />
-          </StackPanel>
-
-          <Expander Header="Advanced Eye V2 debug" IsVisible="{Binding EyeV2AdvancedVisible}">
-            <StackPanel Margin="0,8,0,0" Spacing="5">
-              <TextBlock Text="V2-A remains the calibrated mapping baseline. V2-B adds direct pupil and eyelid geometry; low-confidence geometry falls back to V2-A automatically."
-                         TextWrapping="Wrap" />
-              <Border Background="#FF101010" CornerRadius="4" Padding="4">
-                <Image Source="{Binding EyeGeometryDebugBitmap}" Height="192" Stretch="Uniform" />
-              </Border>
-              <TextBlock FontFamily="Consolas" Text="{Binding EyeGeometryDebug}" TextWrapping="Wrap" />
-              <TextBlock FontFamily="Consolas" Text="{Binding EyeV2LeftDebug}" TextWrapping="Wrap" />
-              <TextBlock FontFamily="Consolas" Text="{Binding EyeV2RightDebug}" TextWrapping="Wrap" />
-              <TextBlock FontFamily="Consolas" Text="{Binding EyeV2AnchorDebug}" TextWrapping="Wrap" />
-              <TextBlock Margin="0,8,0,0" FontWeight="SemiBold" Text="End-to-end eye output" />
-              <TextBlock FontFamily="Consolas" Text="{Binding EyeModelDebug}" TextWrapping="Wrap" />
-              <TextBlock FontFamily="Consolas" Text="{Binding EyeRawModelDebug}" TextWrapping="Wrap" />
-              <TextBlock FontFamily="Consolas" Text="{Binding EyeProjectedDebug}" TextWrapping="Wrap" />
-              <TextBlock FontFamily="Consolas" Text="{Binding EyeFinalDebug}" TextWrapping="Wrap" />
-              <TextBlock FontFamily="Consolas" Text="{Binding EyeOscDebug}" TextWrapping="Wrap" />
-              <TextBlock Opacity="0.75" Text="{Binding EyeModuleDebug}" TextWrapping="Wrap" />
-            </StackPanel>
-          </Expander>
-        </StackPanel>
-      </Border>
-
       <!-- Admin Warning Banner -->
       <Border
           Background="Orange"

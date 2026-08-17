@@ -10,7 +10,6 @@ using Baballonia.Contracts;
 using Baballonia.Services;
 using Baballonia.Services.Calibration;
 using Baballonia.Services.Personalization;
-using Baballonia.Services.EyeV2;
 using JetBrains.Annotations;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -185,119 +184,6 @@ public class ParameterSenderOverrideTest
             "Only eye addresses should be present.");
     }
 
-    [TestMethod]
-    public void EyeV2Vector_SendsNamedWideAndSquintWithoutDefaultCalibrationRemap()
-    {
-        var v2 = new float[EyeStateLayout.V2Count];
-        v2[EyeStateLayout.LeftX] = -0.4f;
-        v2[EyeStateLayout.LeftY] = 0.3f;
-        v2[EyeStateLayout.LeftLid] = 0.8f;
-        v2[EyeStateLayout.RightX] = 0.2f;
-        v2[EyeStateLayout.RightY] = -0.1f;
-        v2[EyeStateLayout.RightLid] = 0.7f;
-        v2[EyeStateLayout.LeftWide] = 0.6f;
-        v2[EyeStateLayout.LeftSquint] = 0.5f;
-        v2[EyeStateLayout.RightWide] = 0.4f;
-        v2[EyeStateLayout.RightSquint] = 0.3f;
-
-        Invoke("ProcessEyeExpressionData", v2);
-
-        var expectedAddresses = new[]
-        {
-            "/LeftEyeX", "/LeftEyeY", "/LeftEyeLid",
-            "/RightEyeX", "/RightEyeY", "/RightEyeLid",
-            "/LeftEyeWiden", "/LeftEyeSquint", "/RightEyeWiden", "/RightEyeSquint",
-        };
-        var expectedValues = new[] { -0.4f, 0.3f, 0.8f, 0.2f, -0.1f, 0.7f, 0.6f, 0.5f, 0.4f, 0.3f };
-
-        var queued = Queue.ToArray();
-        Assert.AreEqual(EyeStateLayout.V2Count, queued.Length);
-        CollectionAssert.AreEqual(expectedAddresses, queued.Select(message => message.Address).ToArray());
-        CollectionAssert.AreEqual(expectedValues, queued.Select(message => (float)message[0]).ToArray());
-
-        var snapshot = _service.LastEyeOscSendSnapshot;
-        Assert.IsNotNull(snapshot);
-        Assert.AreEqual(EyeOscTransportStatus.Queued, snapshot.TransportStatus);
-        CollectionAssert.AreEqual(expectedAddresses, snapshot.Values.Select(value => value.Address).ToArray());
-        CollectionAssert.AreEqual(expectedValues, snapshot.Values.Select(value => value.Value).ToArray());
-        Assert.IsNull(snapshot.Error);
-        _calibration.Verify(c => c.GetExpressionSettings(It.IsAny<string>()), Times.Never,
-            "V2 must not read Default Baballonia calibration state.");
-    }
-
-    [TestMethod]
-    public void LegacyEyeVector_PreservesPrefixAndSixChannelSnapshotContract()
-    {
-        SetPrefix("/legacy");
-
-        Invoke("ProcessEyeExpressionData", new[] { 0.2f, 0.4f, 0.6f, 0.8f, 1f, 0.5f });
-
-        var expectedAddresses = new[]
-        {
-            "/legacy/LeftEyeX", "/legacy/LeftEyeY", "/legacy/LeftEyeLid",
-            "/legacy/RightEyeX", "/legacy/RightEyeY", "/legacy/RightEyeLid",
-        };
-        CollectionAssert.AreEqual(expectedAddresses, Queue.Select(message => message.Address).ToArray());
-
-        var snapshot = _service.LastEyeOscSendSnapshot;
-        Assert.IsNotNull(snapshot);
-        Assert.AreEqual(EyeStateLayout.LegacyCount, snapshot.Values.Count);
-        CollectionAssert.AreEqual(expectedAddresses, snapshot.Values.Select(value => value.Address).ToArray());
-    }
-
-    [TestMethod]
-    public async Task EyeSnapshot_ReportsLocalUdpSendWithoutClaimingReceiverAcknowledgement()
-    {
-        var sender = new StubVrcftModuleSendService
-        {
-            NextResult = new OscDispatchResult(
-                true,
-                "127.0.0.1:8888",
-                DateTimeOffset.UtcNow,
-                EyeStateLayout.V2Count,
-                null),
-        };
-        _service = CreateService(sender);
-        var states = new List<EyeOscTransportStatus>();
-        _service.EyeOscSendSnapshotChanged += snapshot => states.Add(snapshot.TransportStatus);
-
-        Invoke("ProcessEyeExpressionData", Enumerable.Repeat(0.25f, EyeStateLayout.V2Count).ToArray());
-        await InvokeAsync("SendAndClearQueue", CancellationToken.None);
-
-        var snapshot = _service.LastEyeOscSendSnapshot;
-        Assert.IsNotNull(snapshot);
-        Assert.AreEqual(EyeOscTransportStatus.SentToUdpSocket, snapshot.TransportStatus);
-        Assert.AreEqual("127.0.0.1:8888", snapshot.Destination);
-        Assert.IsNull(snapshot.Error);
-        Assert.IsTrue(snapshot.UpdatedAtUtc >= snapshot.QueuedAtUtc);
-        CollectionAssert.AreEqual(
-            new[] { EyeOscTransportStatus.Queued, EyeOscTransportStatus.SentToUdpSocket },
-            states);
-    }
-
-    [TestMethod]
-    public async Task EyeSnapshot_ReportsTransportFailureAndExactError()
-    {
-        var sender = new StubVrcftModuleSendService
-        {
-            NextResult = new OscDispatchResult(
-                false,
-                "127.0.0.1:8888",
-                DateTimeOffset.UtcNow,
-                EyeStateLayout.LegacyCount,
-                "synthetic UDP failure"),
-        };
-        _service = CreateService(sender);
-
-        Invoke("ProcessEyeExpressionData", Enumerable.Repeat(0.25f, EyeStateLayout.LegacyCount).ToArray());
-        await InvokeAsync("SendAndClearQueue", CancellationToken.None);
-
-        var snapshot = _service.LastEyeOscSendSnapshot;
-        Assert.IsNotNull(snapshot);
-        Assert.AreEqual(EyeOscTransportStatus.TransportError, snapshot.TransportStatus);
-        Assert.AreEqual("synthetic UDP failure", snapshot.Error);
-        Assert.IsTrue(snapshot.UpdatedAtUtc >= snapshot.QueuedAtUtc);
-    }
 
     [TestMethod]
     public void LegacySixEyeVector_StillUsesDefaultCalibrationPath()
@@ -339,31 +225,4 @@ public class ParameterSenderOverrideTest
         Assert.AreEqual(N, Queue.Count, "Live face tracking must resume on the next frame.");
     }
 
-    private sealed class StubVrcftModuleSendService : VrcftModuleSendService
-    {
-        public OscDispatchResult NextResult { get; set; } = null!;
-
-        public StubVrcftModuleSendService()
-            : base(NullLogger<OscSendService>.Instance, CreateTarget())
-        {
-        }
-
-        public override Task<OscDispatchResult> Send(
-            OscMessage[] messages,
-            CancellationToken ct) =>
-            Task.FromResult(NextResult with
-            {
-                CompletedAtUtc = DateTimeOffset.UtcNow,
-                MessageCount = messages.Length,
-            });
-
-        private static IOscTarget CreateTarget()
-        {
-            var target = new Mock<IOscTarget>();
-            target.SetupProperty(value => value.DestinationAddress, "127.0.0.1");
-            target.SetupProperty(value => value.OutPort, 8888);
-            target.SetupProperty(value => value.IsConnected, false);
-            return target.Object;
-        }
-    }
 }
