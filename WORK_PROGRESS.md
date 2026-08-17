@@ -8,14 +8,15 @@ should be able to continue without any prior conversation.
 ## Current Status
 
 ```
-Current phase: v13. The v12 worktree is committed, and the four UX/correctness milestones
-               planned on 2026-08-15 are implemented: overlay stability, guided pacing,
-               headset-native eye calibration, and the guided-quality probe fix.
-               HOME VR validation is pending for all four.
-Branch: main; HEAD 9ac3439. Worktree clean - v13's ProductVersion records its real revision.
-Build: bin/Baballonia-v13 + bin/Baballonia-v13.zip. v10, v11, v12 untouched as rollbacks.
-Suite: 342 passed / 0 failed / 5 skipped excluding hardware; the 9 documented ESP32-serial and
-       BabbleTrainer-fixture failures remain, unchanged, with no new failure.
+Current phase: v14. Eye tracking is back to stock behaviour; the personal eye-tracking work
+               is filed under experimental/eye-v2 and no longer compiles into the app.
+               Personalization (face) is untouched and remains the active line of work.
+               v13's four milestones still await HOME VR validation.
+Branch: main; HEAD cce52b6. Worktree clean.
+Build: bin/Baballonia-v14 + bin/Baballonia-v14.zip. v10-v13 untouched as rollbacks.
+Suite: 298 passed / 0 failed / 5 skipped excluding hardware; the 9 documented ESP32-serial and
+       BabbleTrainer-fixture failures remain unchanged. 264 of those passes are the
+       personalization, guided and calibration suites.
 Python: 110 checks across 9 suites, all passing.
 Recordings (HOME PC): 10 sessions / 15,129 frames (Neutral 4, Speech 2, Guided 3, Correction 1).
 ```
@@ -24,6 +25,50 @@ Recordings (HOME PC): 10 sessions / 15,129 frames (Neutral 4, Speech 2, Guided 3
 contradict each other on the current build number, the git state and the open problem list. Where
 they disagree with this block, this block is right. Consolidating them is scheduled work, not an
 oversight.
+
+## v14 — eye tracking returned to stock
+
+Eye tracking now behaves exactly as upstream Baballonia does. The personal eye work is preserved
+under `experimental/eye-v2/`, which nothing compiles; see the README there for what is in it and
+how to bring it back.
+
+**Out of the build:** the V2-A personal gaze mapper and V2-B geometry hybrid, their calibration
+flow and on-disk store, the Home page mode selector and Advanced eye debug panel, the eye OSC send
+snapshots and VRCFT module inspector, and the four extra Widen/Squint OSC channels. The app sends
+the six legacy eye addresses again through the stock calibration remap, and the module's eye
+handling is upstream's. `HomePageView.axaml` and `HomePageViewModel.cs` were restored from upstream
+verbatim - every line this fork had added to them was eye V2.
+
+**Deliberately kept, because stock eye tracking depends on it:** the twelve-to-six projection in
+`EyeProcessingPipeline`. The installed eye model
+(`tuned_temporal_eye_tracking_20260628_171622.onnx`) emits **twelve** named outputs while the rest
+of Baballonia speaks the six-value legacy contract, and the projection maps one onto the other *by
+output name*. Reverting it would not restore stock behaviour, it would break this model: taking the
+first six values positionally reads the wrong ones. The raw eye pipeline events also stay, as
+passive taps with no subscribers.
+
+**Personalization untouched.** It shares the in-headset presenter with guided face capture, so the
+presenter stays; only the gaze-target overlay, which nothing but eye calibration could ever show,
+came out of it. One guided retry/skip test had been living in an eye test file and was moved into
+the guided suite rather than filed away.
+
+`EyeV2_Mode` remains in settings, unread. It was already 0 (Default), so no behaviour the user was
+relying on changed.
+
+### Build
+
+- **`bin\Baballonia-v14\Baballonia.Desktop.exe`**, ProductVersion `1.0.0+cce52b6...`
+- `bin\Baballonia-v14.zip` - SHA-256
+  `977992975E3ECA9FE630A3BDCCD54BB66C4C7047625ACC961815F818EA1A824F`
+- `VRCFT-Module\VRCFaceTracking.Baballonia-3.2.1-local.zip` - SHA-256
+  `EDCED9C019C5608EDC2EC47931B0EDAA68C24D302ACC981DAF9B2CE73C072075` (rebuilt: its eye routing is
+  upstream's again, so this differs from the v12/v13 package)
+- Verified: 4 capture DLLs, `training\` present, no `__pycache__`. v10-v13 untouched.
+
+The installed VRCFT module should be reinstalled from this build so its eye routing matches. The
+six stock channels behave identically either way, so this is tidiness rather than a fix.
+
+---
 
 ## v13 implementation record — 2026-08-15
 
