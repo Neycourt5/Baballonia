@@ -1,0 +1,633 @@
+<UserControl
+    x:Class="Baballonia.Views.PersonalizationView"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="clr-namespace:Baballonia.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:splitViewPane="clr-namespace:Baballonia.ViewModels.SplitViewPane"
+    d:DesignHeight="900"
+    d:DesignWidth="800"
+    x:DataType="splitViewPane:PersonalizationViewModel"
+    mc:Ignorable="d">
+  <!--
+    Strings are intentionally literal rather than RESX entries. This is a fork-local feature and
+    Assets/Resources.resx is Crowdin-managed upstream, so adding keys would conflict on every rebase
+    while the feature is still moving.
+  -->
+  <ScrollViewer>
+    <StackPanel Margin="24" Spacing="12">
+
+      <TextBlock Classes="Header" Text="Personalize My Face" />
+      <TextBlock
+          MaxWidth="640"
+          HorizontalAlignment="Left"
+          Opacity="0.8"
+          TextWrapping="Wrap"
+          Text="Teach Baballonia what your face looks like on your camera. Record a few short sessions, press Train, and compare the result against the stock tracker. Everything stays on this computer." />
+
+      <!-- ============================ SETUP ============================ -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Grid.Column="0" FontSize="16" FontWeight="SemiBold" Text="Setup" />
+            <Button Grid.Column="1" Command="{Binding RefreshSetupCommand}" Content="Refresh" />
+          </Grid>
+
+          <!-- Two glyphs per row rather than a value converter: same result, no extra plumbing. -->
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBlock FontWeight="Bold" Foreground="#4CAF50" IsVisible="{Binding CameraReady}" Text="&#x2713;" />
+            <TextBlock FontWeight="Bold" IsVisible="{Binding !CameraReady}" Opacity="0.5" Text="&#x2022;" />
+            <TextBlock Text="{Binding CameraStatus}" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBlock FontWeight="Bold" Foreground="#4CAF50" IsVisible="{Binding ToolsReady}" Text="&#x2713;" />
+            <TextBlock FontWeight="Bold" IsVisible="{Binding !ToolsReady}" Opacity="0.5" Text="&#x2022;" />
+            <TextBlock Text="{Binding ToolsStatus}" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBlock FontWeight="Bold" Foreground="#4CAF50" IsVisible="{Binding ModelReady}" Text="&#x2713;" />
+            <TextBlock FontWeight="Bold" IsVisible="{Binding !ModelReady}" Opacity="0.5" Text="&#x2022;" />
+            <TextBlock Text="{Binding ModelStatus}" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <Button
+              Command="{Binding SetUpToolsCommand}"
+              Content="Set Up Training Tools"
+              IsEnabled="{Binding !IsBusy}"
+              IsVisible="{Binding CanSetUpTools}" />
+          <TextBlock
+              IsVisible="{Binding CanSetUpTools}"
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="This downloads the training software (about 200 MB) once. It is installed outside Baballonia and never uploads anything." />
+        </StackPanel>
+      </controls:ContentExample>
+
+      <!-- ========================== RECORDINGS ========================= -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Recordings" />
+
+          <Grid ColumnDefinitions="120,Auto">
+            <TextBlock Grid.Column="0" Text="Neutral" VerticalAlignment="Center" />
+            <TextBlock
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                Text="{Binding NeutralCount, StringFormat='{}{0} of 2 recorded'}" />
+          </Grid>
+          <Grid ColumnDefinitions="120,Auto">
+            <TextBlock Grid.Column="0" Text="Speech" VerticalAlignment="Center" />
+            <TextBlock
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                Text="{Binding SpeechCount, StringFormat='{}{0} of 2 recorded'}" />
+          </Grid>
+          <Grid ColumnDefinitions="120,Auto">
+            <TextBlock Grid.Column="0" Text="Guided" VerticalAlignment="Center" />
+            <TextBlock
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                Text="{Binding GuidedCount, StringFormat='{}{0} recorded'}" />
+          </Grid>
+
+          <TextBlock Opacity="0.8" Text="{Binding RecordingAdvice}" TextWrapping="Wrap" />
+
+          <Border
+              Width="200"
+              Height="200"
+              HorizontalAlignment="Left"
+              Background="#20000000"
+              CornerRadius="4">
+            <Image
+                RenderOptions.BitmapInterpolationMode="None"
+                Source="{Binding Preview}"
+                Stretch="Uniform" />
+          </Border>
+
+          <StackPanel Orientation="Horizontal" Spacing="12" IsVisible="{Binding !IsRecording}">
+            <Button
+                Command="{Binding RecordNeutralCommand}"
+                Content="Record Neutral"
+                IsEnabled="{Binding CanStartRecording}" />
+            <Button
+                Command="{Binding RecordSpeechCommand}"
+                Content="Record Speech"
+                IsEnabled="{Binding CanStartRecording}" />
+            <Button Command="{Binding OpenDatasetFolderCommand}"
+                    Content="Show Recording Folder"
+                    IsEnabled="{Binding CanOpenDatasetFolder}" />
+          </StackPanel>
+
+          <Button
+              Command="{Binding StopRecordingCommand}"
+              Content="Stop Recording"
+              IsVisible="{Binding IsRecording}" />
+
+          <TextBlock
+              FontWeight="SemiBold"
+              IsVisible="{Binding RecordingStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Text="{Binding RecordingStatus}"
+              TextWrapping="Wrap" />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="Neutral: let your face rest for about 45 seconds. Speech: talk naturally for a minute. Wear the headset the way you normally do - just record across a few separate sittings, so the model sees the small shifts that happen anyway when you take it off and put it back on." />
+        </StackPanel>
+      </controls:ContentExample>
+
+      <!-- ========================== AUDIO ASSIST ======================== -->
+      <!--
+        Strictly additive, and off by default. This can make a movement the tracker already sees
+        bigger; it can never create one. If the tracker says you are not smiling, no amount of
+        shouting puts a smile on your avatar - which is the difference between this and the
+        audio-driven mouth animation it is meant to avoid becoming.
+      -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Audio" />
+
+          <CheckBox
+              Content="Enhance expressions while speaking"
+              IsChecked="{Binding AudioAssistEnabled}" />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="Uses your microphone's loudness to make mouth movements the camera already sees a little larger, so speech reads more clearly across a room. It never invents an expression, only amplifies a real one, and it is ignored entirely when you are not talking. Nothing is recorded or uploaded." />
+
+          <StackPanel IsVisible="{Binding AudioAssistEnabled}" Spacing="6">
+            <TextBlock FontWeight="SemiBold" Text="Audio Input" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <ComboBox
+                  ItemsSource="{Binding AudioInputLabels}"
+                  SelectedIndex="{Binding SelectedAudioInputIndex, Mode=TwoWay}"
+                  Width="380" />
+              <Button Command="{Binding RefreshAudioInputsCommand}" Content="Refresh" />
+              <Button Command="{Binding RestartAudioInputCommand}" Content="Restart audio" />
+            </StackPanel>
+            <TextBlock Text="{Binding AudioSelectedDevice}" TextWrapping="Wrap" />
+            <TextBlock Text="Input level" />
+            <ProgressBar Minimum="0" Maximum="1" Value="{Binding AudioInputLevel}" Height="14" />
+            <TextBlock FontWeight="SemiBold" Text="{Binding AudioVoiceStatus}" />
+
+            <TextBlock Text="{Binding AudioStrength, StringFormat='Strength: {0:F0}%'}" />
+            <Slider
+                Maximum="100"
+                Minimum="0"
+                TickFrequency="10"
+                Value="{Binding AudioStrength}" />
+
+            <TextBlock
+                IsVisible="{Binding AudioStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                Opacity="0.7"
+                Text="{Binding AudioStatus}"
+                TextWrapping="Wrap" />
+
+            <TextBlock
+                FontFamily="Consolas,Menlo,monospace"
+                IsVisible="{Binding ShowAdvanced}"
+                Opacity="0.7"
+                Text="{Binding AudioDiagnostics}" />
+            <TextBlock Opacity="0.65"
+                       Text="Changing or restarting this input touches only microphone capture. Face and eye inference keep running if audio is missing or fails."
+                       TextWrapping="Wrap" />
+          </StackPanel>
+        </StackPanel>
+      </controls:ContentExample>
+
+      <!-- ======================= GRIMACE LAB ========================== -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Grimace / 😬 candidate lab" />
+
+          <TextBlock
+              Opacity="0.75"
+              Text="This is an avatar experiment, not a recording. Preview three restrained combinations of real Unified Expression dimensions in VR, choose the one that actually looks natural on this avatar, and confirm it only if you can imitate it reliably."
+              TextWrapping="Wrap" />
+
+          <TextBlock
+              FontWeight="SemiBold"
+              Text="{Binding GrimaceConfirmationStatus}"
+              TextWrapping="Wrap" />
+
+          <StackPanel IsVisible="{Binding !IsGrimacePreviewing}" Orientation="Horizontal" Spacing="8">
+            <Button
+                Command="{Binding BeginGrimacePreviewCommand}"
+                Content="Preview Candidates in VR"
+                IsEnabled="{Binding CanStartGrimacePreview}" />
+            <Button
+                Command="{Binding ClearGrimaceConfirmationCommand}"
+                Content="Clear Confirmation"
+                IsEnabled="{Binding HasConfirmedGrimace}" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsGrimacePreviewing}" Spacing="8">
+            <TextBlock
+                FontFamily="Consolas,Menlo,monospace"
+                Text="{Binding GrimaceCandidateDetails}"
+                TextWrapping="Wrap" />
+            <TextBlock
+                FontWeight="SemiBold"
+                Text="PREVIEW ONLY — the recorder is locked out and no cue label is published."
+                TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button Command="{Binding PreviousGrimaceCandidateCommand}" Content="Previous" />
+              <Button Command="{Binding NextGrimaceCandidateCommand}" Content="Next" />
+              <Button
+                  Command="{Binding ConfirmGrimaceCandidateCommand}"
+                  Content="Confirm This Candidate"
+                  IsEnabled="{Binding CanConfirmGrimace}" />
+              <Button Command="{Binding CancelGrimacePreviewCommand}" Content="Cancel" />
+            </StackPanel>
+          </StackPanel>
+
+          <TextBlock Text="{Binding GrimaceStatus}" TextWrapping="Wrap" />
+          <TextBlock
+              Opacity="0.65"
+              Text="A confirmed candidate appears as its own Guided calibration choice; candidates A/B/C never enter Full pass or Combinations automatically. Re-preview after changing avatars."
+              TextWrapping="Wrap" />
+        </StackPanel>
+      </controls:ContentExample>
+
+      <!-- ====================== GUIDED CALIBRATION ===================== -->
+      <!--
+        The only place the dataset gets a correct *non-zero* label. Neutral recordings teach the
+        model what rest looks like; this teaches it what a genuine jaw opening looks like, which is
+        the other half of telling those two apart.
+      -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Guided calibration" />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="Your avatar opens its jaw by a set amount and you copy it. Because the app chose the amount, it knows what your face should have been doing - which is the one thing plain recordings cannot tell it. Put your headset on and watch your avatar in a mirror before starting." />
+
+          <StackPanel IsVisible="{Binding !IsGuidedRunning}" Spacing="8">
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <TextBlock VerticalAlignment="Center" Text="Cover" Width="50" />
+              <ComboBox
+                  ItemsSource="{Binding GuidedRoutines}"
+                  SelectedIndex="{Binding SelectedGuidedRoutineIndex}"
+                  Width="260" />
+              <Button
+                  Command="{Binding StartGuidedJawCalibrationCommand}"
+                  Content="Start"
+                  IsEnabled="{Binding CanStartGuided}" />
+            </StackPanel>
+
+            <TextBlock
+                Opacity="0.7"
+                Text="{Binding GuidedRoutineDescription}"
+                TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsGuidedRunning}" Spacing="8">
+            <TextBlock
+                FontSize="20"
+                FontWeight="SemiBold"
+                Text="{Binding GuidedInstruction}"
+                TextWrapping="Wrap" />
+            <TextBlock Opacity="0.75"
+                       Text="The avatar remains the visual demonstration; the true SteamVR overlay names the expression, intensity, repetition, HOLD and RELAX state."
+                       TextWrapping="Wrap" />
+            <ProgressBar Maximum="100" Minimum="0" Value="{Binding GuidedProgress}" />
+            <Button Command="{Binding StopGuidedCalibrationCommand}" Content="Stop" />
+          </StackPanel>
+
+          <TextBlock
+              IsVisible="{Binding GuidedStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Text="{Binding GuidedStatus}"
+              TextWrapping="Wrap" />
+        </StackPanel>
+      </controls:ContentExample>
+
+      <!-- ======================= QUICK CORRECTION ====================== -->
+      <!--
+        A primary control, not an Advanced one. This is the loop the user runs while actually
+        wearing the headset: notice the avatar's jaw hanging open, say so, carry on. It lives here
+        rather than under Advanced because it is used far more often than anything below it.
+      -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Quick correction" />
+
+          <CheckBox
+              Content="Keep recent frames for quick correction"
+              IsChecked="{Binding QuickCorrectionEnabled}" />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="If your avatar's mouth hangs open while your real mouth is closed, press this straight afterwards. It saves the last few seconds as an example of what the tracker got wrong." />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="When on, this keeps up to 10 seconds in memory (about 15 MB) and copies at most 30 camera frames per second. Nothing is encoded or written to disk until you press the button. Turn it off to stop those copies and release the buffer." />
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <Button
+                Command="{Binding FlagMouthClosedCommand}"
+                Content="My mouth was closed"
+                IsEnabled="{Binding CanFlagCorrection}" />
+            <ComboBox
+                IsEnabled="{Binding QuickCorrectionEnabled}"
+                ItemsSource="{Binding CorrectionWindows}"
+                SelectedIndex="{Binding SelectedCorrectionWindowIndex}"
+                VerticalAlignment="Center"
+                Width="150" />
+          </StackPanel>
+
+          <TextBlock
+              FontWeight="SemiBold"
+              IsVisible="{Binding CorrectionStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Text="{Binding CorrectionStatus}"
+              TextWrapping="Wrap" />
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="{Binding SavedCorrectionCount, StringFormat='Corrections saved so far: {0}. They are used the next time you train.'}" />
+
+          <Button
+              Command="{Binding RequestDeleteSavedCorrectionsCommand}"
+              Content="Delete saved corrections..."
+              HorizontalAlignment="Left"
+              IsEnabled="{Binding CanDeleteSavedCorrections}" />
+
+          <Border
+              Background="#18C84040"
+              CornerRadius="4"
+              IsVisible="{Binding ShowDeleteCorrectionsConfirmation}"
+              Padding="10">
+            <StackPanel Spacing="8">
+              <TextBlock
+                  Text="Delete every saved quick correction? Ordinary recordings and trained model files are kept. A model already trained from these examples will not change until you retrain it."
+                  TextWrapping="Wrap" />
+              <StackPanel Orientation="Horizontal" Spacing="10">
+                <Button
+                    Command="{Binding ConfirmDeleteSavedCorrectionsCommand}"
+                    Content="Yes, delete corrections" />
+                <Button
+                    Command="{Binding CancelDeleteSavedCorrectionsCommand}"
+                    Content="Cancel" />
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
+          <TextBlock
+              IsVisible="{Binding QuickCorrectionAvailability, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="{Binding QuickCorrectionAvailability}" />
+        </StackPanel>
+      </controls:ContentExample>
+
+      <!-- =========================== TRAINING ========================== -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Train" />
+
+          <Border Background="#18000000" CornerRadius="4" Padding="10">
+            <StackPanel Spacing="6">
+              <TextBlock FontWeight="SemiBold" Text="Training data" />
+              <TextBlock
+                  FontFamily="Consolas,Menlo,monospace"
+                  Text="{Binding TrainingDataSummary}"
+                  TextWrapping="Wrap" />
+              <TextBlock Text="{Binding TrainingSplitSummary}" TextWrapping="Wrap" />
+              <TextBlock
+                  Opacity="0.75"
+                  Text="{Binding GuidedCoverageSummary}"
+                  TextWrapping="Wrap" />
+              <TextBlock
+                  Opacity="0.65"
+                  Text="All older recordings and corrections remain cumulative. Validation sessions are discovered and scored, but never used to update the model."
+                  TextWrapping="Wrap" />
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button
+                    Command="{Binding OpenDatasetFolderCommand}"
+                    Content="Show Training Data in Folder"
+                    IsEnabled="{Binding CanOpenDatasetFolder}" />
+                <Button
+                    Command="{Binding RefreshSetupCommand}"
+                    Content="Refresh Counts" />
+              </StackPanel>
+              <TextBlock
+                  Opacity="0.65"
+                  Text="You can move or delete a genuinely bad session folder there. Refresh Counts afterward; removing a session can change which newest session is held out."
+                  TextWrapping="Wrap" />
+            </StackPanel>
+          </Border>
+
+          <StackPanel IsVisible="{Binding !IsBusy}" Spacing="6">
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <TextBlock VerticalAlignment="Center" Text="Train next" Width="70" />
+              <ComboBox
+                  ItemsSource="{Binding TrainingModelLabels}"
+                  SelectedIndex="{Binding SelectedModelIndex}"
+                  Width="360" />
+            </StackPanel>
+            <TextBlock
+                Opacity="0.7"
+                Text="{Binding ModelChoiceDescription}"
+                TextWrapping="Wrap" />
+
+            <Border
+                Background="#18000000"
+                CornerRadius="4"
+                IsVisible="{Binding IsModelCSelected}"
+                Padding="10">
+              <StackPanel Spacing="8">
+                <TextBlock Text="{Binding ModelCStatus}" TextWrapping="Wrap" />
+                <Button
+                    Command="{Binding PrepareModelCCommand}"
+                    Content="Prepare Model C"
+                    IsEnabled="{Binding CanPrepareModelC}"
+                    HorizontalAlignment="Left" />
+                <TextBlock
+                    Opacity="0.7"
+                    Text="Preparation generates features for existing recordings once and enables the shared-feature runner. Training C remains disabled until both are verified."
+                    TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+          </StackPanel>
+
+          <Button
+              Command="{Binding TrainCommand}"
+              Content="{Binding TrainButtonText}"
+              IsEnabled="{Binding CanTrain}"
+              IsVisible="{Binding !IsBusy}" />
+
+          <StackPanel IsVisible="{Binding IsBusy}" Spacing="8">
+            <ProgressBar IsIndeterminate="True" />
+            <TextBlock FontWeight="SemiBold" Text="{Binding BusyMessage}" TextWrapping="Wrap" />
+            <Button Command="{Binding CancelWorkCommand}" Content="Cancel" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding HasResult}" Spacing="8">
+            <TextBlock FontWeight="SemiBold" Text="{Binding ResultHeadline}" TextWrapping="Wrap" />
+            <TextBlock
+                IsVisible="{Binding ResultDetail, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                Text="{Binding ResultDetail}"
+                TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button Command="{Binding UseLastCreatedModelCommand}"
+                      Content="Use This Model"
+                      IsEnabled="{Binding CanUseLastCreatedModel}" />
+              <Button Command="{Binding OpenLastRunFolderCommand}"
+                      Content="Open Run Folder"
+                      IsEnabled="{Binding CanOpenLastRunFolder}" />
+            </StackPanel>
+          </StackPanel>
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <Button Command="{Binding ToggleDetailsCommand}" Content="Show Details" />
+          </StackPanel>
+
+          <Border
+              Background="#18000000"
+              CornerRadius="4"
+              IsVisible="{Binding ShowDetails}"
+              MaxHeight="240"
+              Padding="8">
+            <ScrollViewer>
+              <SelectableTextBlock
+                  FontFamily="Consolas,Menlo,monospace"
+                  FontSize="11"
+                  Text="{Binding DetailLog}" />
+            </ScrollViewer>
+          </Border>
+        </StackPanel>
+      </controls:ContentExample>
+
+      <!-- ======================== MODEL SELECTION ====================== -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Face model selection" />
+
+          <TextBlock
+              FontWeight="SemiBold"
+              IsVisible="{Binding ActiveModelName, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Text="{Binding ActiveModelName}"
+              TextWrapping="Wrap" />
+
+          <TextBlock
+              Foreground="#D8A94C"
+              IsVisible="{Binding ModelActionStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+              Text="{Binding ModelActionStatus}"
+              TextWrapping="Wrap" />
+
+          <TextBlock
+              FontFamily="Consolas,Menlo,monospace"
+              Opacity="0.78"
+              Text="{Binding ActiveModelProvenance}"
+              TextWrapping="Wrap" />
+
+          <TextBlock Opacity="0.7" Text="Model to use" />
+
+          <StackPanel Orientation="Horizontal" Spacing="12">
+            <ComboBox
+                ItemsSource="{Binding ComparisonModelLabels}"
+                SelectedIndex="{Binding SelectedComparisonModelIndex}"
+                Width="360" />
+            <Button
+                Command="{Binding UseSelectedModelCommand}"
+                Content="{Binding UseSelectedModelButtonText}"
+                IsEnabled="{Binding CanUseSelectedModel}" />
+          </StackPanel>
+
+          <Border Background="#18000000" CornerRadius="4" Padding="10">
+            <TextBlock FontFamily="Consolas,Menlo,monospace"
+                       Text="{Binding SelectedModelProvenance}"
+                       TextWrapping="Wrap" />
+          </Border>
+
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button Command="{Binding RefreshModelLibraryCommand}" Content="Refresh library" />
+            <Button Command="{Binding OpenSelectedModelFolderCommand}"
+                    Content="Open model/run folder"
+                    IsEnabled="{Binding CanOpenSelectedModelFolder}" />
+            <Button Click="BrowsePersonalModel" Content="Browse compatible ONNX..." />
+          </StackPanel>
+
+          <TextBlock
+              Opacity="0.7"
+              TextWrapping="Wrap"
+              Text="Select Stock or any available trained A/B/C model, then press Use. The Requested and Actually active lines above show what you asked for and what is really running, with the reason if they differ. Stock is always available." />
+
+          <CheckBox Content="Advanced" IsChecked="{Binding ShowAdvanced}" />
+
+          <StackPanel IsVisible="{Binding ShowAdvanced}" Spacing="10">
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <TextBlock VerticalAlignment="Center" Text="Strength" Width="70" />
+              <Slider
+                  Width="240"
+                  Maximum="100"
+                  Minimum="0"
+                  TickFrequency="25"
+                  Value="{Binding PersonalStrength}" />
+              <TextBlock
+                  VerticalAlignment="Center"
+                  Text="{Binding PersonalStrength, StringFormat='{}{0:F0}%'}" />
+            </StackPanel>
+            <TextBlock
+                Opacity="0.7"
+                TextWrapping="Wrap"
+                Text="0% is exactly the stock model, 100% is fully personalized. Useful for blending in a model you are not yet sure about." />
+
+            <StackPanel Orientation="Horizontal" Spacing="12">
+              <Button Command="{Binding ReloadModelCommand}" Content="Reload Model" />
+            </StackPanel>
+
+            <!--
+              Experimental and off by default. Enabling it loads a derived copy of the face model
+              that also emits the visual features a "C" adapter reads. The weights are identical and
+              the expression output is verified bit-identical, so a failure here falls back to the
+              stock model rather than degrading tracking.
+            -->
+            <CheckBox
+                Content="Use the face model's visual features (needed for model C)"
+                IsChecked="{Binding UseEmbeddingRunner}" />
+
+            <TextBlock
+                IsVisible="{Binding EmbeddingRunnerStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                Opacity="0.7"
+                Text="{Binding EmbeddingRunnerStatus}"
+                TextWrapping="Wrap" />
+
+            <TextBlock FontWeight="SemiBold" Text="Live expression comparison" />
+            <CheckBox Content="Sort by largest change" IsChecked="{Binding SortByDelta}" />
+
+            <Grid ColumnDefinitions="180,70,70,70">
+              <TextBlock Grid.Column="0" FontWeight="SemiBold" Text="Expression" />
+              <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="Stock" />
+              <TextBlock Grid.Column="2" FontWeight="SemiBold" Text="Personal" />
+              <TextBlock Grid.Column="3" FontWeight="SemiBold" Text="Delta" />
+            </Grid>
+
+            <ItemsControl ItemsSource="{Binding Comparison}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate>
+                  <Grid ColumnDefinitions="180,70,70,70">
+                    <TextBlock Grid.Column="0" Text="{Binding Name}" />
+                    <TextBlock Grid.Column="1" Text="{Binding Stock, StringFormat='{}{0:F2}'}" />
+                    <TextBlock Grid.Column="2" Text="{Binding Personal, StringFormat='{}{0:F2}'}" />
+                    <TextBlock Grid.Column="3" Text="{Binding Delta, StringFormat='{}{0:+0.00;-0.00; 0.00}'}" />
+                  </Grid>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </StackPanel>
+        </StackPanel>
+      </controls:ContentExample>
+
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>

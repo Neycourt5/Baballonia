@@ -10,6 +10,9 @@ using Baballonia.Models;
 using Baballonia.Services;
 using Baballonia.Services.Inference;
 using Baballonia.Services.Inference.Platforms;
+using Baballonia.Services.Calibration;
+using Baballonia.Services.Personalization;
+using Baballonia.Services.Personalization.Audio;
 using Baballonia.ViewModels;
 using Baballonia.ViewModels.SplitViewPane;
 using Baballonia.Views;
@@ -17,6 +20,7 @@ using CommunityToolkit.Mvvm.DependencyInjection;
 using CommunityToolkit.Mvvm.Messaging;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System;
@@ -109,8 +113,51 @@ public partial class App : Application
             services.AddSingleton<EyeProcessingPipeline>();
             services.AddSingleton<EyePipelineManager>();
             services.AddSingleton<IEyePipelineEventBus, EyePipelineEventBus>();
+            services.TryAddSingleton<IVrCalibrationPresenter, NullVrCalibrationPresenter>();
             services.AddSingleton<SingleCameraSourceFactory>();
             services.AddSingleton<FirmwareSessionFactory>();
+
+            // Personalization: inert unless a calibration session or personal model activates it.
+            services.AddSingleton<ExpressionOverrideService>();
+            services.AddSingleton<IExpressionOverrideSource>(sp => sp.GetRequiredService<ExpressionOverrideService>());
+
+            // Stamps the commanded target onto recorded frames during guided calibration. Registered
+            // as the recorder's cue source so what the avatar shows and what the trainer is told come
+            // from one snapshot rather than two code paths that have to agree.
+            services.AddSingleton<CueStateSource>();
+            services.AddSingleton<IReadOnlyCueStateSource>(sp => sp.GetRequiredService<CueStateSource>());
+            services.AddSingleton<GuidedCalibrationService>();
+
+            services.AddSingleton<TrainingCaptureGate>();
+            services.AddSingleton<DatasetRecorderService>();
+            services.AddSingleton<GrimacePreviewService>();
+            services.AddSingleton<PersonalModelManager>();
+            services.AddSingleton<PersonalizationEnvironment>();
+            services.AddSingleton<PersonalTrainingService>();
+
+            // Holds the last ten seconds of tracking in memory (~15 MB, fixed) so a mistake can be
+            // saved after the user notices it. Nothing reaches disk until they press the button.
+            // Respect the persisted switch before subscribing work begins; off leaves no ring
+            // allocated and the event handlers return before checksums or frame copies.
+            services.AddSingleton(sp => new HardExampleBuffer(
+                sp.GetRequiredService<ILogger<HardExampleBuffer>>(),
+                sp.GetRequiredService<IFacePipelineEventBus>(),
+                enabled: sp.GetRequiredService<ILocalSettingsService>().ReadSetting(
+                    HardExampleService.EnabledSetting, true)));
+            services.AddSingleton<HardExampleService>();
+
+            // Optional audio expression assist. Platform backends replace both halves: a catalog
+            // for the selector and a source factory that opens only the selected input. Empty/null
+            // defaults preserve exact visual-only behaviour everywhere else.
+            services.TryAddSingleton<IAudioInputDeviceCatalog, NullAudioInputDeviceCatalog>();
+            services.TryAddSingleton<IAudioFeatureSourceFactory, NullAudioFeatureSourceFactory>();
+            services.AddSingleton(sp => new AudioAssistService(
+                sp.GetRequiredService<IAudioInputDeviceCatalog>(),
+                sp.GetRequiredService<IAudioFeatureSourceFactory>(),
+                sp.GetRequiredService<ILocalSettingsService>(),
+                enhancer => sp.GetRequiredService<FaceProcessingPipeline>().Enhancer = enhancer,
+                sp.GetRequiredService<ILogger<AudioAssistService>>()));
+            services.AddHostedService<AudioAssistStartupService>();
 
             // Core Services
             services.AddTransient<IIdentityService, IdentityService>();
@@ -142,6 +189,8 @@ public partial class App : Application
             services.AddTransient<AppSettingsView>();
             services.AddTransient<AboutPageViewModel>();
             services.AddTransient<AboutPageView>();
+            services.AddTransient<PersonalizationViewModel>();
+            services.AddTransient<PersonalizationView>();
 
             if (Utils.IsSupportedDesktopOS)
             {

@@ -1,6 +1,9 @@
-﻿using Baballonia.Services.events;
+﻿using Baballonia.Contracts;
+using Baballonia.Services.events;
 using Baballonia.Services.Inference.Enums;
+using OpenCvSharp;
 using System;
+using System.Collections.Generic;
 
 namespace Baballonia.Services.Inference;
 
@@ -11,50 +14,180 @@ public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : D
 
     public bool StabilizeEyes { get; set; } = true;
 
+    /// <summary>
+    /// Optional V2 stage. Null is intentionally the exact pre-V2 path; no copy, allocation or
+    /// alternate postprocessing occurs in that case.
+    /// </summary>
+
+    /// <summary>
+    /// Runs one eye inference tick.
+    /// </summary>
+    /// <remarks>
+    /// Every native buffer this method creates is released in the finally block. It previously
+    /// leaked the 8-channel temporal stack on every tick and disposed the transformed frame twice,
+    /// while returning early on six paths without releasing the camera frame at all - which at
+    /// ~100 ticks a second is a large amount of native memory churn for a method that is supposed
+    /// to be the cheap half of the pipeline.
+    /// </remarks>
     public float[]? RunUpdate()
     {
         var frame = VideoSource?.GetFrame(ColorType.Gray8);
-        if(frame == null)
+        if (frame == null)
             return null;
 
-        if (_fastCorruptionDetector.IsCorrupted(frame).isCorrupted)
-            return null;
+        Mat? transformed = null;
+        Mat? collected = null;
 
-        eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
-
-        var transformed = ImageTransformer?.Apply(frame);
-        if(transformed == null)
-            return null;
-
-        eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
-
-        var collected = _imageCollector.Apply(transformed);
-        transformed.Dispose();
-        if (collected == null)
-            return null;
-
-        if (InferenceService == null)
-            return null;
-
-        ImageConverter?.Convert(collected, InferenceService.GetInputTensor());
-
-        var inferenceResult = InferenceService?.Run();
-        if(inferenceResult == null)
-            return null;
-
-        if (Filter != null)
+        try
         {
-            inferenceResult = Filter.Filter(inferenceResult);
+            if (_fastCorruptionDetector.IsCorrupted(frame).isCorrupted)
+                return null;
+
+            eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
+
+            transformed = ImageTransformer?.Apply(frame);
+            if (transformed == null)
+                return null;
+
+            eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
+
+            var timestampTicks = DateTime.UtcNow.Ticks;
+
+            collected = _imageCollector.Apply(transformed);
+            if (collected == null)
+                return null;   // still filling the temporal queue
+
+            if (InferenceService == null)
+                return null;
+
+            ImageConverter?.Convert(collected, InferenceService.GetInputTensor());
+
+            var modelResult = InferenceService.Run();
+            if (modelResult == null)
+                return null;
+
+            // This detached snapshot is intentionally published before the compatibility
+            // projection. Diagnostics can therefore see every native output (including the
+            // current temporal model's widen/squint/brow channels) without changing the stable
+            // six-value event consumed by calibration and V2.
+            eyePipelineEventBus.Publish(new EyePipelineEvents.NewRawModelOutputEvent(
+                ResolveModelOutputNames(modelResult, InferenceService),
+                Array.AsReadOnly((float[])modelResult.Clone()),
+                timestampTicks));
+
+            // Newer trained eye models may expose expression values in addition to gaze/lid. Their
+            // metadata describes a 12-value right-eye-first layout, while the rest of Baballonia
+            // intentionally retains the six-value legacy contract. Project by name before the
+            // six-slot OneEuro filter and stock post-processing; simply truncating would mistake
+            // right-eye widen/squint/brow for the left eye and used to crash when filtering was on.
+            var inferenceResult = ProjectLegacyEyeOutput(modelResult, InferenceService);
+
+            // Published before the filter and before ProcessExpressions, so subscribers see the
+            // model's raw gaze/lid values in the stable legacy order. The processing below is
+            // deliberately lossy - it fuses the two eyes' vertical gaze into one value and lets a
+            // closed eye borrow the other's yaw, none of which can be undone from the outside.
+            eyePipelineEventBus.Publish(new EyePipelineEvents.NewRawExpressionsEvent(
+                transformed, inferenceResult, timestampTicks));
+
+            if (Filter != null)
+            {
+                inferenceResult = Filter.Filter(inferenceResult);
+            }
+
+            ProcessExpressions(ref inferenceResult);
+
+            eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
+
+            return inferenceResult;
+        }
+        finally
+        {
+            frame.Dispose();
+            transformed?.Dispose();
+            collected?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Drops the temporal frame history. Call when the camera changes.
+    /// </summary>
+    /// <remarks>
+    /// Without this, frames from the previous camera stay in the queue and get stacked with new
+    /// ones, so the model is handed four "consecutive" frames spanning a camera switch.
+    /// </remarks>
+    public void ResetTemporalState() => _imageCollector.Reset();
+
+    private static IReadOnlyList<string> ResolveModelOutputNames(
+        float[] modelResult,
+        IInferenceRunner runner)
+    {
+        if (runner is INamedInferenceOutput { OutputNames: { } names } &&
+            names.Count == modelResult.Length)
+        {
+            var snapshot = new string[names.Count];
+            for (var i = 0; i < snapshot.Length; i++)
+                snapshot[i] = names[i];
+
+            return Array.AsReadOnly(snapshot);
         }
 
-        ProcessExpressions(ref inferenceResult);
+        if (modelResult.Length == Utils.EyeRawExpressions)
+        {
+            return Array.AsReadOnly(new[]
+            {
+                "rightEyeY", "rightEyeX", "rightEyeLid",
+                "leftEyeY", "leftEyeX", "leftEyeLid",
+            });
+        }
 
-        eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
+        var fallback = new string[modelResult.Length];
+        for (var i = 0; i < fallback.Length; i++)
+            fallback[i] = $"output[{i}]";
 
-        frame.Dispose();
-        transformed.Dispose();
+        return Array.AsReadOnly(fallback);
+    }
 
-        return inferenceResult;
+    private static float[] ProjectLegacyEyeOutput(float[] modelResult, IInferenceRunner runner)
+    {
+        if (modelResult.Length == Utils.EyeRawExpressions)
+            return modelResult;
+
+        if (runner is not INamedInferenceOutput { OutputNames: { } outputNames } ||
+            outputNames.Count != modelResult.Length)
+        {
+            throw new InvalidOperationException(
+                $"Eye model emits {modelResult.Length} values, but has no matching named output layout.");
+        }
+
+        var indices = new[]
+        {
+            FindOutput(outputNames, "rightEyeY", "rightEyePitch"),
+            FindOutput(outputNames, "rightEyeX", "rightEyeYaw"),
+            FindOutput(outputNames, "rightEyeLid"),
+            FindOutput(outputNames, "leftEyeY", "leftEyePitch"),
+            FindOutput(outputNames, "leftEyeX", "leftEyeYaw"),
+            FindOutput(outputNames, "leftEyeLid"),
+        };
+
+        var projected = new float[Utils.EyeRawExpressions];
+        for (var i = 0; i < projected.Length; i++)
+            projected[i] = modelResult[indices[i]];
+
+        return projected;
+    }
+
+    private static int FindOutput(IReadOnlyList<string> outputNames, params string[] candidates)
+    {
+        for (var i = 0; i < outputNames.Count; i++)
+        {
+            var actual = outputNames[i].TrimStart('/');
+            foreach (var candidate in candidates)
+                if (string.Equals(actual, candidate, StringComparison.OrdinalIgnoreCase))
+                    return i;
+        }
+
+        throw new InvalidOperationException(
+            $"Eye model output metadata is missing '{string.Join("' or '", candidates)}'.");
     }
 
     private bool ProcessExpressions(ref float[] arKitExpressions)

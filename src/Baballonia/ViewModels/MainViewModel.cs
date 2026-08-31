@@ -41,6 +41,7 @@ public partial class MainViewModel : ViewModelBase
         new(typeof(CalibrationViewModel), "EditRegular", Resources.Calibration_Title_Header), // Calibration
         new(typeof(FirmwareViewModel), "DeveloperBoardRegular", Resources.Firmware_Title_Header), // Firmware
         new(typeof(VrcViewModel), "CommentRegular", "VRChat"), // VRChat. No translation :P
+        new(typeof(PersonalizationViewModel), "PersonRegular", "Personalization"), // Fork-local; literal string keeps Resources.resx conflict-free
         new(typeof(OutputPageViewModel), "TextFirstLineRegular", Resources.Output_Title_Header), // Output
         new(typeof(AppSettingsViewModel), "SettingsRegular", Resources.Settings_Title_Header), // Settings
         new(typeof(AboutPageViewModel), "InfoRegular", Resources.About_Title_Header), // About

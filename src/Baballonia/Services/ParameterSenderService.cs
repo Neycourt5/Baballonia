@@ -1,5 +1,6 @@
 ﻿using Baballonia.Contracts;
 using Baballonia.Helpers;
+using Baballonia.Services.Personalization;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using OscCore;
@@ -20,27 +21,36 @@ public class ParameterSenderService : BackgroundService
     private readonly ICalibrationService _calibrationService;
     private readonly ILogger<ParameterSenderService> _logger;
 
+    /// <summary>
+    /// Supplies avatar-guided calibration targets. Null outside calibration builds/sessions.
+    /// </summary>
+    private readonly IExpressionOverrideSource? _expressionOverrideSource;
+
+    /// <summary>
+    /// True while calibration targets are being sent instead of tracked face values. Written by the
+    /// sender loop, read by the processing-tick handler.
+    /// </summary>
+    private volatile bool _faceOverrideActive;
+
     private string _prefix = "";
     private bool _sendNativeVrcEyeTracking;
     private bool _useDfr;
     private readonly ConcurrentQueue<OscMessage> _vrcftQueue = new();
     private readonly ConcurrentQueue<OscMessage> _dfrQueue = new();
+    private readonly object _vrcftQueueGate = new();
+    private readonly object _dfrQueueGate = new();
 
-    // Expression parameter names
+    // Stock eye output: the six legacy channels, in the order the receiving module expects.
+    // Widen/Squint/Brow were an experiment that is no longer part of the build; the code lives
+    // under experimental/eye-v2 if it is ever picked back up.
     private readonly Dictionary<string, string> _eyeExpressionMap = new()
     {
         { "LeftEyeX", "/LeftEyeX" },
         { "LeftEyeY", "/LeftEyeY" },
         { "LeftEyeLid", "/LeftEyeLid" },
-        //{ "LeftEyeWiden", "/LeftEyeWiden" },
-        //{ "LeftEyeLower", "/LeftEyeLower" },
-        //{ "LeftEyeBrow", "/LeftEyeBrow" },
         { "RightEyeX", "/RightEyeX" },
         { "RightEyeY", "/RightEyeY" },
         { "RightEyeLid", "/RightEyeLid" },
-        //{ "RightEyeWiden", "/RightEyeWiden" },
-        //{ "RightEyeLower", "/RightEyeLower" },
-        //{ "RightEyeBrow", "/RightEyeBrow" },
     };
 
     public readonly Dictionary<string, string> FaceExpressionMap = new()
@@ -98,13 +108,15 @@ public class ParameterSenderService : BackgroundService
         ILocalSettingsService localSettingsService,
         ICalibrationService calibrationService,
         ProcessingLoopService processingLoopService,
-        ILogger<ParameterSenderService> logger)
+        ILogger<ParameterSenderService> logger,
+        IExpressionOverrideSource? expressionOverrideSource = null)
     {
         this._vrcftModuleSendService = vrcftModuleSendService;
         this._dfrSendService = dfrSendService;
         this._localSettingsService = localSettingsService;
         this._calibrationService = calibrationService;
         this._logger = logger;
+        this._expressionOverrideSource = expressionOverrideSource;
 
          processingLoopService.ExpressionChangeEvent += ExpressionUpdateHandler;
     }
@@ -122,6 +134,14 @@ public class ParameterSenderService : BackgroundService
                 _prefix = _localSettingsService.ReadSetting<string>("AppSettings_OSCPrefix");
                 _sendNativeVrcEyeTracking = _localSettingsService.ReadSetting<bool>("VRC_UseNativeTracking");
                 _useDfr = _localSettingsService.ReadSetting<bool>("AppSettings_UseDFR");
+
+                // Sampled here rather than pushed from the cue engine so the avatar animates on the
+                // transmitting clock, independent of camera rate and UI tick jitter.
+                var overrideTarget = _expressionOverrideSource?.SampleTarget();
+                _faceOverrideActive = overrideTarget != null;
+                if (overrideTarget != null)
+                    EnqueueRawFaceVector(overrideTarget);
+
                 await SendAndClearQueue(cancellationToken);
                 await Task.Delay(10, cancellationToken);
             }
@@ -145,22 +165,27 @@ public class ParameterSenderService : BackgroundService
         if (expressions is null) return;
         if (expressions.Length == 0) return;
 
-        for (var i = 0; i < Math.Min(expressions.Length, _eyeExpressionMap.Count); i++)
+        lock (_vrcftQueueGate)
         {
-            var weight = expressions[i];
-            var eyeElement = _eyeExpressionMap.ElementAt(i);
-            var settings = _calibrationService.GetExpressionSettings(eyeElement.Key);
+            for (var i = 0; i < Math.Min(expressions.Length, _eyeExpressionMap.Count); i++)
+            {
+                var weight = expressions[i];
+                var eyeElement = _eyeExpressionMap.ElementAt(i);
+                var settings = _calibrationService.GetExpressionSettings(eyeElement.Key);
 
-            var msg = new OscMessage(_prefix + eyeElement.Value,
-                weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max));
-            _vrcftQueue.Enqueue(msg);
+                _vrcftQueue.Enqueue(new OscMessage(_prefix + eyeElement.Value,
+                    weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max)));
+            }
+
+            if (_sendNativeVrcEyeTracking)
+                ProcessNativeVrcEyeTracking(expressions, _vrcftQueue);
         }
 
         if (_useDfr)
-            ProcessNativeVrcEyeTracking(expressions, _dfrQueue);
-
-        if (_sendNativeVrcEyeTracking)
-            ProcessNativeVrcEyeTracking(expressions, _vrcftQueue);
+        {
+            lock (_dfrQueueGate)
+                ProcessNativeVrcEyeTracking(expressions, _dfrQueue);
+        }
     }
 
     private void ProcessNativeVrcEyeTracking(float[] expressions, ConcurrentQueue<OscMessage> queue)
@@ -188,38 +213,77 @@ public class ParameterSenderService : BackgroundService
         queue.Enqueue(new OscMessage("/tracking/eye/LeftRightPitchYaw", leftEyeY, rightEyeX, rightEyeY, leftEyeX));
     }
 
+    /// <summary>
+    /// Sends an externally commanded calibration target verbatim: clamped to [0,1] but deliberately
+    /// NOT passed through the user's calibration remap. Those ranges exist to correct the stock
+    /// model's output; a commanded ground-truth target is already in canonical units, and remapping
+    /// it would make the avatar show something other than the value we are about to record as the
+    /// training label.
+    /// </summary>
+    private void EnqueueRawFaceVector(float[] target)
+    {
+        lock (_vrcftQueueGate)
+        {
+            for (var i = 0; i < Math.Min(target.Length, FaceExpressionMap.Count); i++)
+            {
+                var faceElement = FaceExpressionMap.ElementAt(i);
+                _vrcftQueue.Enqueue(new OscMessage(
+                    _prefix + faceElement.Value,
+                    Math.Clamp(target[i], 0f, 1f)));
+            }
+        }
+    }
+
     private void ProcessFaceExpressionData(float[] expressions)
     {
+        // Calibration owns the face channel while an override is active. Eye output is untouched:
+        // ProcessEyeExpressionData still runs, so eye tracking keeps working during calibration.
+        if (_faceOverrideActive) return;
+
         if (expressions == null) return;
         if (expressions.Length == 0) return;
 
-        for (var i = 0; i < Math.Min(expressions.Length, FaceExpressionMap.Count); i++)
+        lock (_vrcftQueueGate)
         {
-            var weight = expressions[i];
-            var faceElement = FaceExpressionMap.ElementAt(i);
-            var settings = _calibrationService.GetExpressionSettings(faceElement.Key);
+            for (var i = 0; i < Math.Min(expressions.Length, FaceExpressionMap.Count); i++)
+            {
+                var weight = expressions[i];
+                var faceElement = FaceExpressionMap.ElementAt(i);
+                var settings = _calibrationService.GetExpressionSettings(faceElement.Key);
 
-            var msg = new OscMessage(_prefix + faceElement.Value,
-                Math.Clamp(
-                    weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max),
-                    settings.Min,
-                    settings.Max));
-            _vrcftQueue.Enqueue(msg);
+                var msg = new OscMessage(_prefix + faceElement.Value,
+                    Math.Clamp(
+                        weight.Remap(settings.Lower, settings.Upper, settings.Min, settings.Max),
+                        settings.Min,
+                        settings.Max));
+                _vrcftQueue.Enqueue(msg);
+            }
         }
     }
 
     private async Task SendAndClearQueue(CancellationToken cancellationToken)
     {
-        if (!_vrcftQueue.IsEmpty)
+        OscMessage[] vrcftMessages;
+        lock (_vrcftQueueGate)
         {
-            await _vrcftModuleSendService.Send(_vrcftQueue.ToArray(), cancellationToken);
+            vrcftMessages = _vrcftQueue.ToArray();
             _vrcftQueue.Clear();
         }
 
-        if (!_dfrQueue.IsEmpty)
+        if (vrcftMessages.Length > 0)
         {
-            await _dfrSendService.Send(_dfrQueue.ToArray(), cancellationToken);
+            await _vrcftModuleSendService.Send(vrcftMessages, cancellationToken);
+        }
+
+        OscMessage[] dfrMessages;
+        lock (_dfrQueueGate)
+        {
+            dfrMessages = _dfrQueue.ToArray();
             _dfrQueue.Clear();
         }
+
+        if (dfrMessages.Length > 0)
+            await _dfrSendService.Send(dfrMessages, cancellationToken);
     }
+
 }

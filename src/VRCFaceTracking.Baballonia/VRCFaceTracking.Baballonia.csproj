@@ -5,6 +5,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>AnyCPU;x64</Platforms>
+    <Version>3.2.1</Version>
+    <AssemblyVersion>3.2.1.0</AssemblyVersion>
+    <FileVersion>3.2.1.0</FileVersion>
+    <InformationalVersion>3.2.1-local-baballonia-home-fork</InformationalVersion>
+    <ModulePackageName>VRCFaceTracking.Baballonia-3.2.1-local.zip</ModulePackageName>
   </PropertyGroup>
 
   <ItemGroup>
@@ -21,21 +26,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="Microsoft.Extensions.Logging">
-      <HintPath>..\..\..\..\..\Program Files\WindowsApps\96ba052f-0948-44d8-86c4-a0212e4ae047_5.1.1.0_x64__d7rcq4vxghz0r\Microsoft.Extensions.Logging.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Logging.Abstractions">
-      <HintPath>..\..\..\..\..\Program Files\WindowsApps\96ba052f-0948-44d8-86c4-a0212e4ae047_5.1.1.0_x64__d7rcq4vxghz0r\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Logging.EventLog">
-      <HintPath>..\..\..\..\..\Program Files\WindowsApps\96ba052f-0948-44d8-86c4-a0212e4ae047_5.1.1.0_x64__d7rcq4vxghz0r\Microsoft.Extensions.Logging.EventLog.dll</HintPath>
-    </Reference>
-    <Reference Include="Microsoft.Extensions.Logging.EventSource">
-      <HintPath>..\..\..\..\..\Program Files\WindowsApps\96ba052f-0948-44d8-86c4-a0212e4ae047_5.1.1.0_x64__d7rcq4vxghz0r\Microsoft.Extensions.Logging.EventSource.dll</HintPath>
-    </Reference>
-    <Reference Include="Newtonsoft.Json">
-      <HintPath>..\..\..\..\..\Program Files\WindowsApps\96ba052f-0948-44d8-86c4-a0212e4ae047_5.1.1.0_x64__d7rcq4vxghz0r\Newtonsoft.Json.dll</HintPath>
-    </Reference>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.1" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
   </ItemGroup>
 
   <ItemGroup>
@@ -61,8 +53,8 @@
       <FilesToZip Include="$(OutputPath)module.json" />
     </ItemGroup>
     
-    <!-- Delete existing zip file if it exists -->
-    <Delete Files="$(OutputPath)VRCFaceTracking.Baballonia.zip" ContinueOnError="true" />
+    <!-- Delete only this version's intermediate package before recreating it. -->
+    <Delete Files="$(OutputPath)$(ModulePackageName)" ContinueOnError="true" />
     
     <!-- Create temp directory -->
     <MakeDir Directories="$(TempZipFolder)" />
@@ -72,7 +64,7 @@
     
     <!-- Create zip from temp directory -->
     <ZipDirectory SourceDirectory="$(TempZipFolder)" 
-                  DestinationFile="$(OutputPath)VRCFaceTracking.Baballonia.zip" />
+                  DestinationFile="$(OutputPath)$(ModulePackageName)" />
     
     <!-- Clean up temp directory -->
     <RemoveDir Directories="$(TempZipFolder)" />

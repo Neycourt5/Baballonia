@@ -6,6 +6,7 @@ using Baballonia.Services.Inference.VideoSources;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 
@@ -24,6 +25,18 @@ public class EyePipelineManager
 
     private string? _currentLeftAddress;
     private string? _currentRightAddress;
+
+    /// <summary>The exact eye model that the current runner successfully opened.</summary>
+    public string ActiveModelPath =>
+        (_pipeline.InferenceService as DefaultInferenceRunner)?.ModelPath ?? "not loaded";
+
+    /// <summary>The execution provider selected by the current eye runner.</summary>
+    public string ActiveExecutionProvider =>
+        (_pipeline.InferenceService as DefaultInferenceRunner)?.ExecutionProvider ?? "not loaded";
+
+    /// <summary>Named native output contract reported by the active eye model, when available.</summary>
+    public IReadOnlyList<string> ActiveOutputNames =>
+        (_pipeline.InferenceService as INamedInferenceOutput)?.OutputNames ?? [];
 
     public EyePipelineManager(ILogger<EyePipelineManager> logger, EyeProcessingPipeline pipeline,
         ILocalSettingsService localSettings, InferenceFactory inferenceFactory,
@@ -55,7 +68,19 @@ public class EyePipelineManager
     public async Task LoadInferenceAsync()
     {
         var inf = await Task.Run(CreateInference);
+        var previous = _pipeline.InferenceService;
+
         _pipeline.InferenceService = inf;
+
+        // The new model gets a clean temporal stack: frames captured for the old one describe a
+        // different input contract, and splicing them across the swap feeds it a history it never
+        // saw. Ordering matters - reset after the swap, so no tick can refill the queue from the
+        // outgoing runner.
+        _pipeline.ResetTemporalState();
+
+        // The outgoing session holds native memory and, on Windows, a file lock on the model.
+        // Hot-reloading repeatedly (which the calibration flow does) otherwise accumulates both.
+        (previous as IDisposable)?.Dispose();
     }
 
     private DefaultInferenceRunner CreateInference()
@@ -76,7 +101,12 @@ public class EyePipelineManager
 
     public void LoadInference()
     {
+        var previous = _pipeline.InferenceService;
+
         _pipeline.InferenceService = CreateInference();
+        _pipeline.ResetTemporalState();
+
+        (previous as IDisposable)?.Dispose();
     }
 
     public void LoadFilter()
