@@ -102,23 +102,15 @@ Get-ChildItem -LiteralPath (Join-Path $repo 'artifacts/windows-dependencies/lice
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'windows-dependencies.json') -Destination (Join-Path $publishDirectory 'WINDOWS-DEPENDENCIES.json')
 $readme = @(
-    'Run Baballonia.Desktop.exe to start Baballonia.',
+    'Extract the entire ZIP, then run Baballonia.Desktop.exe.',
+    'Keep all files and folders together. Windows x64; .NET is included.',
     '',
-    'Extract the entire ZIP to a folder first. Keep the files and folders together.',
-    'Windows x64; the .NET runtime is included.',
+    'Personal recordings and C/C2 models are not bundled. Train your own A/B/C/C2',
+    'models inside the app on Personalization. C2 requires a personal Model C first.',
+    'Training requires Python 3.13; ordinary tracking does not.',
     '',
-    'This is an unofficial experimental fork of Project-Babble/Baballonia.',
-    'A new profile uses public stock models. No contributor personal C/C2 model,',
-    'training recordings, or calibration profile is included. Select your cameras',
-    'and calibrate for your own hardware. C2 requires your own trained Model C first.',
-    '',
-    'Personalization / C2 training is optional and requires Python 3.13 and the',
-    'training tools installed from the app Personalization setup. Tracking itself',
-    'does not require Python. Headset calibration requires SteamVR and compatible',
-    'tracking hardware. Keep your own profile and training data private.',
-    '',
-    'Source, setup and limitations: https://github.com/Neycourt5/Baballonia/tree/publish/c2-preview',
-    'Upstream: https://github.com/Project-Babble/Baballonia'
+    'Unofficial experimental Baballonia fork. Setup and limitations:',
+    'https://github.com/Neycourt5/Baballonia/tree/publish/c2-preview'
 ) -join [Environment]::NewLine
 [IO.File]::WriteAllText((Join-Path $publishDirectory 'README.txt'), $readme + [Environment]::NewLine)
 $metadata = [ordered]@{
