@@ -14,7 +14,9 @@ function Get-VerifiedDownload($item) {
     $filename = [IO.Path]::GetFileName(([Uri]$item.url).AbsolutePath)
     $cached = Join-Path $cacheRoot ($item.sha256 + '-' + $filename)
     if (-not (Test-Path -LiteralPath $cached)) {
-        $temporary = $cached + '.download-' + [Guid]::NewGuid().ToString('N')
+        # Keep temporary paths short enough for PowerShell 5's filesystem provider.
+        # Appending the full digest, archive name and GUID can exceed Windows MAX_PATH.
+        $temporary = Join-Path $cacheRoot ('.download-' + [Guid]::NewGuid().ToString('N'))
         Write-Host ('Downloading ' + $item.name)
         $curl = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue
         if ($curl) {
