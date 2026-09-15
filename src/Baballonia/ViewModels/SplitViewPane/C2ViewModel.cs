@@ -214,21 +214,86 @@ public partial class C2ViewModel : ObservableObject, IDisposable
         var remaining = phase == "prepare" ? 3 - elapsed : Math.Max(0, 3.75 + _recordingTask.Seconds - elapsed);
         RecordingState = phase == "hold" ? $"RECORDING — hold steady ({remaining:0}s); {_recorder.FramesWritten} saved frames" :
             phase == "prepare" ? $"Get ready: {remaining:0}s" : "Settle into the pose — these frames are unlabelled";
-        _cue.SetPhase(new CuePhase(_recordingTask.Id, phase, _recordingTask.Dims,
-            _recordingTask.Target(), _recordingTask.Target(), 1, Stopwatch.GetTimestamp(), 0, 0, 0));
-        if (_overlay)
+        var cue = new CuePhase(_recordingTask.Id, phase, _recordingTask.Dims,
+            _recordingTask.Target(), _recordingTask.Target(), 1, Stopwatch.GetTimestamp(), 0, 0, 0);
+        if (!TryPublishCaptureCue(_cue, cue, _overlay ? _presenter : null,
+                BuildHeadsetFrame(_recordingTask, phase, elapsed), out var cancelled))
         {
-            _presenter!.Present(new VrCalibrationFrame(_recordingTask.Name, Instruction + "  " + RecordingState,
-                phase == "hold" ? VrCalibrationPhase.Hold : VrCalibrationPhase.Preparing, 0,
-                CountdownSeconds: remaining, AllowCancel: true).Quantize());
-            if (_presenter.ConsumeAction() == VrCalibrationAction.Cancel)
-            {
-                await FinishAsync(false, "Paused. Completed accepted attempts are saved; repeat this attempt when ready.");
-                return;
-            }
+            await FinishAsync(false, cancelled
+                ? "Paused. Completed accepted attempts are saved; repeat this attempt when ready."
+                : "Headset instructions could not be confirmed. This attempt is excluded; repeat it when the presenter is ready.");
+            return;
         }
         if (elapsed >= 3.75 + _recordingTask.Seconds)
             await FinishAsync(true, "Relax. Review the saved attempt. Accept only if the instruction matched what you actually did; otherwise retry or skip.");
+    }
+
+    // Keep changing recorder diagnostics on the desktop. Putting a saved-frame count inside
+    // Instruction turns every tick into a semantic update that cannot be throttled or retried.
+    internal static VrCalibrationFrame BuildHeadsetFrame(C2Task task, string phase, double elapsed)
+    {
+        var phaseProgress = phase switch
+        {
+            "prepare" => elapsed / 3,
+            "settling" => (elapsed - 3) / 0.75,
+            _ => (elapsed - 3.75) / task.Seconds,
+        };
+        return new VrCalibrationFrame(task.Name, task.Instruction,
+            phase switch
+            {
+                "prepare" => VrCalibrationPhase.Preparing,
+                "settling" => VrCalibrationPhase.Settling,
+                _ => VrCalibrationPhase.Hold,
+            },
+            OverallProgress: elapsed / (3.75 + task.Seconds),
+            PhaseProgress: phaseProgress,
+            CountdownSeconds: phase == "prepare" ? 3 - elapsed : Math.Max(0, 3.75 + task.Seconds - elapsed),
+            AllowCancel: true).Clamp().Quantize();
+    }
+
+    // A capture phase may become a training label only after its headset instruction is accepted.
+    // This small synchronous handoff also lets tests sample the cue while the presenter is updating.
+    internal static bool TryPublishCaptureCue(CueStateSource cue, CuePhase phase,
+        IVrCalibrationPresenter? presenter, VrCalibrationFrame frame, out bool cancelled)
+    {
+        cancelled = false;
+        if (presenter != null)
+        {
+            try
+            {
+                if (!presenter.IsPresenting || !presenter.IsHealthy)
+                {
+                    cue.Clear();
+                    return false;
+                }
+
+                var previous = cue.CurrentCue();
+                if (previous?.Id != phase.CueId || previous.Phase != phase.PhaseName)
+                    cue.Clear(); // Frames during a phase transition are unlabelled.
+
+                presenter.Present(frame);
+                if (!presenter.IsPresenting || !presenter.IsHealthy)
+                {
+                    cue.Clear();
+                    return false;
+                }
+
+                cancelled = presenter.ConsumeAction() == VrCalibrationAction.Cancel;
+                if (cancelled || !presenter.IsPresenting || !presenter.IsHealthy)
+                {
+                    cue.Clear();
+                    return false;
+                }
+            }
+            catch (Exception)
+            {
+                cue.Clear();
+                return false;
+            }
+        }
+
+        cue.SetPhase(phase);
+        return true;
     }
 
     private async Task FinishAsync(bool completed, string message)

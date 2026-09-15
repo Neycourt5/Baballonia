@@ -12,7 +12,13 @@ Portable-PDB checksums match all existing inspected main/Desktop/SDK/CaptureBin 
 
 The jaw curve now uses the real `/jawOpen` output key and an explicit switch that defaults off. Existing stored curve values and identity-exponent C2 candidates retain their behavior while it is off. Sender-route tests cover shaping before calibration, other-channel/override preservation, current settings, and C2 compatibility when opting in. The exact test counts and package checks for each update are recorded in its release notes and `BUILD-INFO.json`.
 
-The VR calibration overlay may flicker (user-reported); this jaw-curve update does not claim to fix or hardware-verify that issue.
+## Overlay flicker repair
+
+Preview `c2-preview-2026.09.15.2` includes a candidate repair for the user-reported built-in SteamVR calibration-panel flicker: a persistent D3D11 shared texture replaces repeated raw-image uploads, with an event query checking copy completion before submission and a 500 ms completion-wait timeout. C2 headset text stays stable while progress changes; a new capture cue is published only after presentation and input polling remain healthy. Completion timers cannot close a newer session, and skipped updates do not reset failed-upload counts.
+
+Automated coverage exercises the presenter with a fake OpenVR boundary and clock, plus actual D3D11 texture sharing/readback using Windows WARP software rendering. These checks can verify resource lifetime, complete pixel copies, update scheduling, and failure handling. They do not exercise a physical GPU driver, SteamVR's compositor, or headset visibility. The final release notes record executed counts and results.
+
+**Headset confirmation remains required.** This change applies to the built-in guided face, C2, and eye-personalization presenter. Home's legacy eye-calibration executable is a separate overlay path. See [renderer design and headset checks](OVERLAY_RENDERING.md) for the API basis, precise scope, and test sequence.
 
 ## Automated results during preview preparation
 
@@ -34,7 +40,7 @@ Initialize declared submodules and use the committed dependency bootstrap. Build
 git submodule update --init --recursive
 powershell -ExecutionPolicy Bypass -File .\download_dependencies.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\run-tests.ps1 -Configuration Release
-powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Version 0.0.0-c2-preview.20260915 -RequireCleanSource
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Version 0.0.0-c2-preview.20260915.2 -RequireCleanSource
 ```
 
 The test script isolates synthetic model/profile writes and explicitly excludes tests requiring real camera/serial/firmware devices, network provisioning, external trainer operation, or SteamVR overlays. Record passed/failed/skipped counts, not only process success.
@@ -78,7 +84,7 @@ Fresh-profile startup does not establish personalized C2 activation. Test profil
 - Rest, small/full jaw opening, jaw/lip separation, gentle/full smiles, tooth visibility, speech, smile+speech, and return to rest on a compatible avatar.
 - Separate normal headset wearings. Approximate cues and one user's preference do not establish general quality.
 - Eyelid/gaze/squint/wide-eye sync, wink handling, convergence, and BlinkGuard reopening behavior; see [eye diagnostics](EYE_GAZE_DIAGNOSTICS.md).
-- Headset instruction visibility, pause/retry, missed-task exclusion, and recording status while wearing it.
+- Headset instruction visibility and flicker, phase transitions, pause/retry/cancel, missed-task exclusion, and recording status while wearing it; follow the [overlay test sequence](OVERLAY_RENDERING.md#headset-checks).
 - Simultaneous face/eye throughput/freshness during recording/training and recovery for every real camera/backend.
 - Installed VRCFaceTracking receiver and avatar mapping; a source module or queued OSC tuple does not prove receiver behavior.
 

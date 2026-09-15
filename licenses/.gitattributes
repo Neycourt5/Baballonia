@@ -1,0 +1,2 @@
+# Preserve downloaded upstream license bytes and their recorded hashes.
+*-LICENSE.txt -text

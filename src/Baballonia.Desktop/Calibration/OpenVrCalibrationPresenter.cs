@@ -3,7 +3,6 @@ using Baballonia.Services.Calibration;
 using Microsoft.Extensions.Logging;
 using SkiaSharp;
 using System;
-using System.Diagnostics;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -65,17 +64,22 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
 
     private OverlayLayout? _layout;
 
-    private readonly OpenVRService _openVr;
+    internal delegate IOpenVrOverlay? AcquireOverlay(out string status);
+    private readonly AcquireOverlay _acquireOverlay;
+    private readonly Func<int, int, ICalibrationOverlayTexture> _createTexture;
+    private readonly TimeProvider _timeProvider;
+    private ICalibrationOverlayTexture? _gpuTexture;
     private readonly ILogger<OpenVrCalibrationPresenter> _logger;
     private readonly object _sync = new();
-    private CVROverlay? _overlay;
+    private IOpenVrOverlay? _overlay;
     private ulong _handle;
     private string _status = "SteamVR presenter has not been started.";
     private bool _healthy;
     private VrCalibrationAction _pendingAction;
     private VrCalibrationFrame? _lastFrame;
     private VrCalibrationFrame? _lastRendered;
-    private Timer? _completionTimer;
+    private ITimer? _completionTimer;
+    private long _completionGeneration;
     private bool _showingCompletion;
     private int _consecutiveFailures;
 
@@ -85,8 +89,8 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
     /// <remarks>
     /// Progress quantised to 2% crosses a boundary roughly every 60 ms during a phase, so the
     /// overlay was re-uploading a three-megabyte texture about sixteen times a second to redraw a
-    /// bar a few pixels longer. Nobody can see a progress bar update faster than this, and every
-    /// upload is a chance for the compositor to sample a half-written frame.
+    /// bar a few pixels longer. Capping these cosmetic uploads avoids repeated CPU/GPU work
+    /// while leaving instruction changes immediate.
     ///
     /// Only cosmetic updates are held back. Anything that changes what the overlay *says* -
     /// instruction, phase, the dot, the buttons - still goes up immediately, because a headset
@@ -96,14 +100,8 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
 
     private long _lastUploadTimestamp;
 
-    // The drawing surface outlives individual frames. Besides saving an allocation and a clear per
-    // update, this keeps the pixel buffer handed to SetOverlayRaw alive for as long as the overlay
-    // exists, rather than freeing it the instant the call returns.
-    //
-    // There are two of them, and that is the fix for a flickering overlay: drawing starts with a
-    // full canvas.Clear(), so with a single buffer the compositor could sample a cleared or
-    // half-drawn texture it was still reading from. The buffer being drawn into is never the one
-    // most recently handed to SteamVR.
+    // Raster buffers stay local to Skia. SteamVR sees a persistent GPU texture, not
+    // a succession of raw images that may disappear while the replacement is loaded.
     private SKBitmap? _surface;
     private SKBitmap? _backSurface;
     private SKCanvas? _backCanvas;
@@ -119,9 +117,32 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
     public OpenVrCalibrationPresenter(
         OpenVRService openVr,
         ILogger<OpenVrCalibrationPresenter> logger)
+        : this((out string status) =>
+        {
+            var overlay = openVr.TryGetOverlay(out status);
+            return overlay == null ? null : new OpenVrOverlay(overlay);
+        }, CreateGpuTexture, logger)
     {
-        _openVr = openVr;
+    }
+
+    internal OpenVrCalibrationPresenter(
+        AcquireOverlay acquireOverlay,
+        Func<int, int, ICalibrationOverlayTexture> createTexture,
+        ILogger<OpenVrCalibrationPresenter> logger,
+        TimeProvider? timeProvider = null)
+    {
+        _acquireOverlay = acquireOverlay;
+        _createTexture = createTexture;
         _logger = logger;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+    }
+
+    private static ICalibrationOverlayTexture CreateGpuTexture(int width, int height)
+    {
+        var system = OpenVR.System ?? throw new InvalidOperationException("SteamVR system interface is unavailable.");
+        var adapter = -1;
+        system.GetDXGIOutputInfo(ref adapter);
+        return new D3D11OverlayTexture(adapter, width, height);
     }
 
     public bool IsAvailable
@@ -187,7 +208,7 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
                 return VrPresenterStartResult.Failure(
                     _status = "The built-in true VR presenter currently requires Windows SteamVR/OpenVR.");
 
-            _overlay = _openVr.TryGetOverlay(out var runtimeStatus);
+            _overlay = _acquireOverlay(out var runtimeStatus);
             if (_overlay == null)
                 return VrPresenterStartResult.Failure(_status = runtimeStatus);
 
@@ -207,6 +228,9 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
 
                 var mouseScale = new HmdVector2_t { v0 = TextureWidth, v1 = TextureHeight };
                 ThrowIfError(_overlay.SetOverlayMouseScale(_handle, ref mouseScale), "set pointer scale");
+                // Skia rasterizes premultiplied RGBA; tell the compositor to blend it that way.
+                ThrowIfError(_overlay.SetOverlayFlag(_handle, VROverlayFlags.IsPremultiplied, true),
+                    "set premultiplied alpha");
 
                 _layout = null;
                 ApplyLayoutLocked(OverlayLayout.Instructions);
@@ -238,7 +262,6 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
             try
             {
                 PresentLocked(frame.Clamp());
-                _consecutiveFailures = 0;
             }
             catch (Exception ex)
             {
@@ -395,13 +418,15 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
                     _status = completionMessage;
                     _showingCompletion = true;
                     _completionTimer?.Dispose();
-                    _completionTimer = new Timer(_ =>
+                    var generation = ++_completionGeneration;
+                    _completionTimer = _timeProvider.CreateTimer(_ =>
                     {
                         lock (_sync)
                         {
                             // Only tear down if this is still the completion frame; a calibration
                             // started in the meantime now owns the surface.
-                            if (_showingCompletion) CloseOverlayLocked();
+                            if (_showingCompletion && generation == _completionGeneration)
+                                CloseOverlayLocked();
                         }
                     }, null, TimeSpan.FromSeconds(2), Timeout.InfiniteTimeSpan);
                 }
@@ -430,6 +455,7 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         onScreen.Instruction == frame.Instruction &&
         onScreen.Phase == frame.Phase &&
         onScreen.Repetition == frame.Repetition &&
+        onScreen.RepetitionCount == frame.RepetitionCount &&
         onScreen.AllowRetry == frame.AllowRetry &&
         onScreen.AllowSkip == frame.AllowSkip &&
         onScreen.AllowCancel == frame.AllowCancel &&
@@ -494,12 +520,15 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         _canvas = new SKCanvas(_surface);
         _backSurface = new SKBitmap(info);
         _backCanvas = new SKCanvas(_backSurface);
+        _gpuTexture = _createTexture(TextureWidth, TextureHeight);
         _lastRendered = null;
         _lastUploadTimestamp = 0;
     }
 
     private void DisposeSurfaceLocked()
     {
+        _gpuTexture?.Dispose();
+        _gpuTexture = null;
         _canvas?.Dispose();
         _surface?.Dispose();
         _backCanvas?.Dispose();
@@ -527,10 +556,8 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         if (_surface == null || _canvas == null) CreateSurfaceLocked();
 
         // Skip identical content before drawing anything. Consumers publish far faster than the
-        // panel actually changes, and redrawing plus re-uploading a megabytes-wide texture for a
-        // pixel-identical result is what made the overlay visibly unstable.
+        // panel actually changes; identical content needs neither rasterization nor a GPU copy.
         frame = frame.Quantize();
-        _lastFrame = frame;
 
         if (_lastRendered == frame) return;
 
@@ -538,12 +565,12 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         // waiting a few tens of milliseconds costs the user nothing and spares the compositor a
         // three-megabyte upload it cannot show them anyway.
         if (IsCosmeticUpdate(frame) && _lastUploadTimestamp != 0 &&
-            Stopwatch.GetElapsedTime(_lastUploadTimestamp) < MinimumCosmeticInterval)
+            _timeProvider.GetElapsedTime(_lastUploadTimestamp) < MinimumCosmeticInterval)
         {
             return;
         }
 
-        // Draw into the buffer SteamVR is *not* holding. See the field comment.
+        // Finish rasterizing locally before copying a complete image into the GPU texture.
         var bitmap = _backSurface!;
         var canvas = _backCanvas!;
 
@@ -636,16 +663,18 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
 
     private void UploadLocked(SKBitmap bitmap, VrCalibrationFrame frame)
     {
-        var error = _overlay!.SetOverlayRaw(
-            _handle, bitmap.GetPixels(), TextureWidth, TextureHeight, 4);
-        ThrowIfError(error, "upload overlay pixels");
+        _gpuTexture!.Upload(bitmap);
+        var texture = _gpuTexture.Texture;
+        ThrowIfError(_overlay!.SetOverlayTexture(_handle, ref texture), "submit overlay texture");
 
         // Only after the upload succeeds, so a failed frame leaves this describing what is still on
         // screen. Present() relies on that to tell a retryable cosmetic update from a lost
         // instruction change.
         SwapSurfacesLocked();
-        _lastUploadTimestamp = Stopwatch.GetTimestamp();
+        _lastUploadTimestamp = _timeProvider.GetTimestamp();
         _lastRendered = frame;
+        _lastFrame = frame;
+        _consecutiveFailures = 0;
     }
 
     /// <summary>
@@ -775,17 +804,18 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
 
     private void CloseOverlayLocked(bool preserveStatus = false)
     {
+        // Disposed timers may already have queued a callback. A generation prevents an
+        // earlier completion screen from closing a later session's overlay.
+        _completionGeneration++;
+        _completionTimer?.Dispose();
+        _completionTimer = null;
         if (_handle != 0 && _overlay != null)
         {
-            try
-            {
-                _overlay.HideOverlay(_handle);
-                _overlay.DestroyOverlay(_handle);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "OpenVR presenter teardown was incomplete");
-            }
+            // Keep the GPU texture alive until SteamVR has released its reference. Each cleanup
+            // is attempted even if a disconnected runtime throws during an earlier operation.
+            Teardown(() => _overlay.HideOverlay(_handle));
+            Teardown(() => _overlay.ClearOverlayTexture(_handle));
+            Teardown(() => _overlay.DestroyOverlay(_handle));
         }
 
         DisposeSurfaceLocked();
@@ -797,6 +827,12 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         _lastFrame = null;
         _pendingAction = VrCalibrationAction.None;
         if (!preserveStatus) _status = "SteamVR presenter stopped.";
+    }
+
+    private void Teardown(Func<EVROverlayError> operation)
+    {
+        try { operation(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "OpenVR presenter teardown was incomplete"); }
     }
 
     public void Dispose()

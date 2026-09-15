@@ -30,6 +30,8 @@
         <PackageReference Condition="'$(Configuration)' == 'Debug'" Include="Avalonia.Diagnostics" Version="11.3.12" />
         <PackageReference Include="Avalonia.Skia" Version="11.3.12" />
         <PackageReference Include="SkiaSharp" Version="3.119.2" />
+        <!-- Managed D3D11 bindings; native calls are restricted to the Windows VR presenter. -->
+        <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
 
 	    <!-- Windows-specific -->
         <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260302" Condition="$([MSBuild]::IsOSPlatform('Windows'))" />

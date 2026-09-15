@@ -1,7 +1,7 @@
 # Build a fresh self-contained Windows directory and ZIP. Existing builds are retained.
 [CmdletBinding()]
 param(
-    [string]$Version = '0.0.0-c2-preview.20260915.1',
+    [string]$Version = '0.0.0-c2-preview.20260915.2',
     [switch]$RequireCleanSource
 )
 $ErrorActionPreference = 'Stop'
@@ -39,6 +39,8 @@ $requiredFiles = @(
     'Baballonia.Desktop.exe', 'Baballonia.Desktop.dll', 'Baballonia.dll',
     'Baballonia.Desktop.runtimeconfig.json', 'Baballonia.Desktop.deps.json',
     'coreclr.dll', 'hostfxr.dll', 'hostpolicy.dll',
+    'Vortice.Direct3D11.dll', 'Vortice.DXGI.dll', 'Vortice.DirectX.dll',
+    'Vortice.Mathematics.dll', 'SharpGen.Runtime.dll', 'SharpGen.Runtime.COM.dll',
     'OpenCvSharp.dll', 'OpenCvSharpExtern.dll', 'opencv_videoio_ffmpeg4130_64.dll',
     'onnxruntime.dll', 'onnxruntime_providers_shared.dll', 'libSkiaSharp.dll', 'libHarfBuzzSharp.dll',
     'faceModel.onnx', 'eyeModel.onnx', 'LocalSettings.json',
@@ -97,6 +99,10 @@ $licenseDirectory = Join-Path $publishDirectory 'licenses'
 Copy-Item -LiteralPath (Join-Path $repo 'LICENSE') -Destination (Join-Path $publishDirectory 'LICENSE')
 Copy-Item -LiteralPath (Join-Path $repo 'CREDITS.md') -Destination (Join-Path $publishDirectory 'CREDITS.md')
 Copy-Item -LiteralPath (Join-Path $repo 'src/HyperText.Avalonia/LICENSE') -Destination (Join-Path $licenseDirectory 'HyperText.Avalonia-LICENSE.txt')
+# Notices for the pinned managed D3D11 bindings and their runtime dependencies.
+Get-ChildItem -LiteralPath (Join-Path $repo 'licenses') -File | Where-Object { $_.Extension -in '.txt', '.md' } | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $licenseDirectory
+}
 Get-ChildItem -LiteralPath (Join-Path $repo 'artifacts/windows-dependencies/licenses') -File | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $licenseDirectory
 }
