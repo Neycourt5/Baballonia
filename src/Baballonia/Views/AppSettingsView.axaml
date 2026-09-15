@@ -362,12 +362,6 @@
                IconPath="PowerRegular"
                SettingToggled="{Binding SteamvrAutoStart, Mode=TwoWay}" />
 
-      <controls:SettingsToggle
-        Title="{x:Static assets:Resources.Settings_Advanced_Header}"
-        Description="{x:Static assets:Resources.Settings_Advanced_Description}"
-        IconPath="SettingsRegular"
-        SettingToggled="{Binding AdvancedOptions, Mode=TwoWay}" />
-
       <Expander
           HorizontalAlignment="Stretch"
           VerticalAlignment="Stretch"
@@ -400,10 +394,11 @@
                 FontSize="14"
                 Foreground="{DynamicResource SystemChromeGrayColor}"
                 Margin="5"
-                Text="{x:Static assets:Resources.Settings_ShareData_Description}" />
+                Text="{Binding DataSharingStatus}" TextWrapping="Wrap" />
             </StackPanel>
             <ToggleSwitch
               Grid.Column="3"
+              IsEnabled="{Binding DataSharingAvailable}"
               IsChecked="{Binding ShareEyeData,  Mode=TwoWay}"/>
           </Grid>
         </Expander.Header>
@@ -466,6 +461,342 @@
               Content="{x:Static assets:Resources.Settings_FirstTime_Button}" />
         </Grid>
       </Border>
+
+      <!-- Advanced options live at the bottom of the list. The two entries below the Advanced toggle
+           are only shown once Advanced is enabled. -->
+      <controls:SettingsToggle
+          Title="{x:Static assets:Resources.Settings_Advanced_Header}"
+          Description="{x:Static assets:Resources.Settings_Advanced_Description}"
+          IconPath="SettingsRegular"
+          SettingToggled="{Binding AdvancedOptions, Mode=TwoWay}" />
+
+      <controls:SettingsToggle
+          IsVisible="{Binding AdvancedOptions}"
+          Title="Split Eye Video Swap"
+          Description="Swap the left/right eye feeds of a split video device. (Leave off for BSB2E)"
+          IconPath="EyeTrackingRegular"
+          SettingToggled="{Binding SplitEyeVideoSwap, Mode=TwoWay}" />
+
+      <controls:SettingsToggle
+          IsVisible="{Binding AdvancedOptions}"
+          Title="Eye Output Safety"
+          Description="Reject invalid eye values and keep gaze, lids, and eye shapes in their valid ranges."
+          IconPath="EyeTrackingRegular"
+          SettingToggled="{Binding EyePostProcessing, Mode=TwoWay}" />
+
+      <Border
+          Background="{DynamicResource SystemChromeMediumLowColor}"
+          CornerRadius="6"
+          Padding="15,10">
+        <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+          <StackPanel Grid.Column="0" Margin="0,5">
+            <TextBlock FontSize="16" FontWeight="SemiBold" Margin="5,0" Text="Eyelid Sync" />
+            <TextBlock FontSize="14" Margin="5,2" TextWrapping="Wrap"
+                       Foreground="{DynamicResource SystemChromeGrayColor}"
+                       Text="Pull both eyelids toward each other, so one eye cannot sit lower or lag behind the other. A deliberate wink still releases it instantly. 0 turns it off." />
+          </StackPanel>
+          <NumericUpDown
+              Grid.Column="1"
+              VerticalAlignment="Center"
+              Width="130"
+              FormatString="F2"
+              Increment="0.05"
+              Maximum="1"
+              Minimum="0"
+              Value="{Binding EyeLidSyncAmount, Mode=TwoWay}" />
+        </Grid>
+      </Border>
+
+      <Border
+          Background="{DynamicResource SystemChromeMediumLowColor}"
+          CornerRadius="6"
+          Padding="15,10">
+        <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+          <StackPanel Grid.Column="0" Margin="0,5">
+            <TextBlock FontSize="16" FontWeight="SemiBold" Margin="5,0" Text="Better Eye" />
+            <TextBlock FontSize="14" Margin="5,2" TextWrapping="Wrap"
+                       Foreground="{DynamicResource SystemChromeGrayColor}"
+                       Text="Which eye the sync settings follow. Average treats both cameras as equally good. Name Left or Right if one camera genuinely reads you better, and the other eye copies it. Stronger takes whichever eye sees the expression more strongly, so a squint only one camera notices still reaches both eyes at full strength — use this if syncing made your expressions weaker rather than steadier. Stronger applies to squint and wide-eye only; eyelids fall back to Average, because on eyelids stronger would mean more closed." />
+          </StackPanel>
+          <ComboBox
+              Grid.Column="1"
+              VerticalAlignment="Center"
+              Width="130"
+              ItemsSource="{Binding EyeSyncSourceOptions}"
+              SelectedIndex="{Binding EyeSyncSourceIndex, Mode=TwoWay}" />
+        </Grid>
+      </Border>
+
+      <Border
+          Background="{DynamicResource SystemChromeMediumLowColor}"
+          CornerRadius="6"
+          Padding="15,10">
+        <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+          <StackPanel Grid.Column="0" Margin="0,5">
+            <TextBlock FontSize="16" FontWeight="SemiBold" Margin="5,0" Text="Squint Sync" />
+            <TextBlock FontSize="14" Margin="5,2" TextWrapping="Wrap"
+                       Foreground="{DynamicResource SystemChromeGrayColor}"
+                       Text="Pull both squint values toward the Better Eye. Off by default, because which eye reads a squint better depends on how your cameras sit. Set Better Eye first, then raise this to 1 to have the other eye copy it exactly. Released during a wink." />
+          </StackPanel>
+          <NumericUpDown
+              Grid.Column="1"
+              VerticalAlignment="Center"
+              Width="130"
+              FormatString="F2"
+              Increment="0.05"
+              Maximum="1"
+              Minimum="0"
+              Value="{Binding EyeSquintSyncAmount, Mode=TwoWay}" />
+        </Grid>
+      </Border>
+
+      <Border
+          Background="{DynamicResource SystemChromeMediumLowColor}"
+          CornerRadius="6"
+          Padding="15,10">
+        <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+          <StackPanel Grid.Column="0" Margin="0,5">
+            <TextBlock FontSize="16" FontWeight="SemiBold" Margin="5,0" Text="Eye Squint Strength" />
+            <TextBlock FontSize="14" Margin="5,2" TextWrapping="Wrap"
+                       Foreground="{DynamicResource SystemChromeGrayColor}"
+                       Text="Controls how strongly a detected squint is expressed on your avatar. Does not change squint detection or blinking. 1.00 is current behaviour; 0 suppresses squint entirely, 2.00 exaggerates it." />
+          </StackPanel>
+          <NumericUpDown
+              Grid.Column="1"
+              VerticalAlignment="Center"
+              Width="130"
+              FormatString="F2"
+              Increment="0.1"
+              Maximum="2"
+              Minimum="0"
+              Value="{Binding EyeSquintStrength, Mode=TwoWay}" />
+        </Grid>
+      </Border>
+
+      <Border
+          Background="{DynamicResource SystemChromeMediumLowColor}"
+          CornerRadius="6"
+          Padding="15,10">
+        <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+          <StackPanel Grid.Column="0" Margin="0,5">
+            <TextBlock FontSize="16" FontWeight="SemiBold" Margin="5,0" Text="Wide-Eye Sync" />
+            <TextBlock FontSize="14" Margin="5,2" TextWrapping="Wrap"
+                       Foreground="{DynamicResource SystemChromeGrayColor}"
+                       Text="The same thing for wide-eye. Separate from Squint Sync because one channel can read well while the other does not." />
+          </StackPanel>
+          <NumericUpDown
+              Grid.Column="1"
+              VerticalAlignment="Center"
+              Width="130"
+              FormatString="F2"
+              Increment="0.05"
+              Maximum="1"
+              Minimum="0"
+              Value="{Binding EyeWidenSyncAmount, Mode=TwoWay}" />
+        </Grid>
+      </Border>
+
+      <Border
+          Background="{DynamicResource SystemChromeMediumLowColor}"
+          CornerRadius="6"
+          Padding="15,10">
+        <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+          <StackPanel Grid.Column="0" Margin="0,5">
+            <TextBlock FontSize="16" FontWeight="SemiBold" Margin="5,0" Text="Gaze Sync" />
+            <TextBlock FontSize="14" Margin="5,2" TextWrapping="Wrap"
+                       Foreground="{DynamicResource SystemChromeGrayColor}"
+                       Text="Pull both eyes to look at the same place. Turn this up if one eye seems to arrive before the other, or to drift while the other holds still. The two cameras estimate each eye separately, and their horizontal guesses agree far less than you would expect, so what looks like one eye lagging is usually the two disagreeing rather than either being late. At 1 the eyes are perfectly conjugate; lower values keep some of the inward turn you make when focusing on something close." />
+          </StackPanel>
+          <NumericUpDown
+              Grid.Column="1"
+              VerticalAlignment="Center"
+              Width="130"
+              FormatString="F2"
+              Increment="0.05"
+              Maximum="1"
+              Minimum="0"
+              Value="{Binding EyeGazeSyncAmount, Mode=TwoWay}" />
+        </Grid>
+      </Border>
+
+      <Border
+          Background="{DynamicResource SystemChromeMediumLowColor}"
+          CornerRadius="6"
+          Padding="15,10">
+        <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+          <StackPanel Grid.Column="0" Margin="0,5">
+            <TextBlock FontSize="16" FontWeight="SemiBold" Margin="5,0" Text="Jaw Open Curve" />
+            <TextBlock FontSize="14" Margin="5,2" TextWrapping="Wrap"
+                       Foreground="{DynamicResource SystemChromeGrayColor}"
+                       Text="Raise this if opening your mouth a little drops the avatar's whole jaw. It bends how fast jaw open climbs without changing where it ends: a small opening stays small, while opening wide still reaches full. Turning the jaw down with a normal limit would cap the wide opening too. 1.00 leaves it exactly as it is; try 1.50 to 2.00. Below 1 makes it more eager instead." />
+          </StackPanel>
+          <NumericUpDown
+              Grid.Column="1"
+              VerticalAlignment="Center"
+              Width="130"
+              FormatString="F2"
+              Increment="0.1"
+              Maximum="3"
+              Minimum="0.5"
+              Value="{Binding JawOpenCurve, Mode=TwoWay}" />
+        </Grid>
+      </Border>
+
+      <!--  BlinkGuard: post-blink gaze stabilization. Off by default.  -->
+      <Expander Margin="0,10,0,0" IsExpanded="False">
+        <Expander.Header>
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="BlinkGuard (post-blink gaze)" />
+        </Expander.Header>
+        <StackPanel Margin="10" Spacing="10">
+
+          <TextBlock TextWrapping="Wrap"
+                     Foreground="{DynamicResource SystemChromeGrayColor}"
+                     Text="Stops your avatar&apos;s eyes flicking somewhere random for a few frames after a blink. While an eyelid is down the gaze is held where it was; when the eye reopens, the first readings must agree with each other before they are believed. Ordinary eye movement and saccades are not smoothed or delayed at all - this only acts between the lid closing and gaze becoming trustworthy again." />
+
+          <controls:SettingsToggle
+              Title="Enable BlinkGuard"
+              Description="Off by default. It changes live gaze, so turn it on deliberately."
+              IconPath="EyeRegular"
+              SettingToggled="{Binding BlinkGuardEnabled, Mode=TwoWay}" />
+
+          <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+            <StackPanel Grid.Column="0" Margin="0,5">
+              <TextBlock FontSize="15" FontWeight="SemiBold" Text="Strength" />
+              <TextBlock FontSize="13" TextWrapping="Wrap"
+                         Foreground="{DynamicResource SystemChromeGrayColor}"
+                         Text="Balanced is the default. Subtle intervenes only on the clearest failures; Strong waits for more agreement before believing the eye, at the cost of a little more time. Custom uses the advanced values below." />
+            </StackPanel>
+            <ComboBox Grid.Column="1" VerticalAlignment="Center" Width="130"
+                      ItemsSource="{Binding BlinkGuardPresetOptions}"
+                      SelectedIndex="{Binding BlinkGuardPresetIndex, Mode=TwoWay}" />
+          </Grid>
+
+          <!--  Live readout. The point of the whole panel: tuning needs numbers.  -->
+          <Border Background="{DynamicResource SystemChromeMediumLowColor}" CornerRadius="6" Padding="12">
+            <StackPanel Spacing="6">
+              <TextBlock FontWeight="SemiBold" Text="Diagnostics" />
+              <TextBlock FontFamily="Consolas,monospace" FontSize="13" TextWrapping="Wrap"
+                         Text="{Binding BlinkGuardStatus}" />
+              <TextBlock FontFamily="Consolas,monospace" FontSize="13" TextWrapping="Wrap"
+                         Text="{Binding BlinkGuardCounters}" />
+              <TextBlock FontSize="13" TextWrapping="Wrap" Opacity="0.8"
+                         Text="{Binding BlinkGuardCaptureStatus}" />
+              <WrapPanel Orientation="Horizontal">
+                <Button Margin="0,6,8,0" Content="Start capture"
+                        Command="{Binding StartBlinkGuardCaptureCommand}" />
+                <Button Margin="0,6,8,0" Content="Stop capture"
+                        Command="{Binding StopBlinkGuardCaptureCommand}" />
+                <Button Margin="0,6,8,0" Content="Export CSV"
+                        Command="{Binding ExportBlinkGuardCaptureCommand}" />
+                <Button Margin="0,6,8,0" Content="Reset counters"
+                        Command="{Binding ResetBlinkGuardCountersCommand}" />
+                <Button Margin="0,6,0,0" Content="Reset defaults"
+                        Command="{Binding ResetBlinkGuardDefaultsCommand}" />
+              </WrapPanel>
+            </StackPanel>
+          </Border>
+
+          <!--  Advanced. Only consulted when the preset is Custom, which is stated on the label.  -->
+          <Expander IsExpanded="False">
+            <Expander.Header>
+              <TextBlock Text="Advanced (used when Strength is Custom)" />
+            </Expander.Header>
+            <StackPanel Margin="10" Spacing="8">
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Grid.Column="0" VerticalAlignment="Center" TextWrapping="Wrap"
+                           Text="Closed threshold - eyelid closedness that counts as shut" />
+                <NumericUpDown Grid.Column="1" Width="120" FormatString="F2" Increment="0.05"
+                               Minimum="0.1" Maximum="0.95"
+                               Value="{Binding BlinkGuardClosedThreshold, Mode=TwoWay}" />
+              </Grid>
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Grid.Column="0" VerticalAlignment="Center" TextWrapping="Wrap"
+                           Text="Reopen threshold - must be lower than closed, or the eye could latch shut" />
+                <NumericUpDown Grid.Column="1" Width="120" FormatString="F2" Increment="0.05"
+                               Minimum="0.05" Maximum="0.9"
+                               Value="{Binding BlinkGuardReopenThreshold, Mode=TwoWay}" />
+              </Grid>
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Grid.Column="0" VerticalAlignment="Center" TextWrapping="Wrap"
+                           Text="Minimum hold after reopening (ms)" />
+                <NumericUpDown Grid.Column="1" Width="120" FormatString="F0" Increment="5"
+                               Minimum="0" Maximum="200"
+                               Value="{Binding BlinkGuardMinimumHoldMs, Mode=TwoWay}" />
+              </Grid>
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Grid.Column="0" VerticalAlignment="Center" TextWrapping="Wrap"
+                           Text="Agreeing samples required before gaze is believed" />
+                <NumericUpDown Grid.Column="1" Width="120" FormatString="F0" Increment="1"
+                               Minimum="1" Maximum="15"
+                               Value="{Binding BlinkGuardStableSamples, Mode=TwoWay}" />
+              </Grid>
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Grid.Column="0" VerticalAlignment="Center" TextWrapping="Wrap"
+                           Text="How far apart those samples may be (degrees)" />
+                <NumericUpDown Grid.Column="1" Width="120" FormatString="F1" Increment="0.5"
+                               Minimum="0.5" Maximum="30"
+                               Value="{Binding BlinkGuardToleranceDegrees, Mode=TwoWay}" />
+              </Grid>
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Grid.Column="0" VerticalAlignment="Center" TextWrapping="Wrap"
+                           Text="Give up and take the best candidate after (ms)" />
+                <NumericUpDown Grid.Column="1" Width="120" FormatString="F0" Increment="5"
+                               Minimum="30" Maximum="1000"
+                               Value="{Binding BlinkGuardTimeoutMs, Mode=TwoWay}" />
+              </Grid>
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Grid.Column="0" VerticalAlignment="Center" TextWrapping="Wrap"
+                           Text="Blend into the reacquired gaze over (ms)" />
+                <NumericUpDown Grid.Column="1" Width="120" FormatString="F0" Increment="5"
+                               Minimum="0" Maximum="500"
+                               Value="{Binding BlinkGuardTransitionMs, Mode=TwoWay}" />
+              </Grid>
+              <CheckBox IsChecked="{Binding BlinkGuardUseConfidence, Mode=TwoWay}"
+                        Content="Use confidence gating (this app&apos;s own tracking supplies no confidence value - leave off)" />
+              <CheckBox IsChecked="{Binding BlinkGuardNormalSpikeGuard, Mode=TwoWay}"
+                        Content="Also veto impossible single-frame jumps outside blinks (experimental; can clip real saccades)" />
+            </StackPanel>
+          </Expander>
+
+        </StackPanel>
+      </Expander>
+
+      <controls:SettingsToggle
+          Title="Detect Winks"
+          Description="Let a wink release eyelid and expression syncing. Turn this off if you never wink: every false positive is a moment of the asymmetry you turned syncing on to remove, bought for a gesture you do not make."
+          IconPath="EyeRegular"
+          SettingToggled="{Binding EyeWinkDetection, Mode=TwoWay}" />
+
+      <Border
+          IsVisible="{Binding AdvancedOptions}"
+          Background="{DynamicResource SystemChromeMediumLowColor}"
+          CornerRadius="6"
+          Padding="15,10">
+        <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
+          <StackPanel Grid.Column="0" Margin="0,5">
+            <TextBlock FontSize="16" FontWeight="SemiBold" Margin="5,0" Text="Conjugate Gaze" />
+            <TextBlock FontSize="14" Margin="5,2" TextWrapping="Wrap"
+                       Foreground="{DynamicResource SystemChromeGrayColor}"
+                       Text="How strongly both eyes are forced to look the same direction. 0 keeps natural convergence for close-up focus; 1 makes the eyes perfectly parallel. Raise this only if your eyes look crossed." />
+          </StackPanel>
+          <NumericUpDown
+              Grid.Column="1"
+              VerticalAlignment="Center"
+              Width="130"
+              FormatString="F2"
+              Increment="0.05"
+              Maximum="1"
+              Minimum="0"
+              Value="{Binding EyeGazeConjugateAmount, Mode=TwoWay}" />
+        </Grid>
+      </Border>
+
+      <controls:SettingsToggle
+          IsVisible="{Binding DebugMenuToggleVisible}"
+          Title="Show Debug menu"
+          Description="Show the Debug / Performance page in the navigation sidebar."
+          IconPath="WindowDevToolsRegular"
+          SettingToggled="{Binding ShowDebugMenu, Mode=TwoWay}" />
 
     </StackPanel>
   </ScrollViewer>

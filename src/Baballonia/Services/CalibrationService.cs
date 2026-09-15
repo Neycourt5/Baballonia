@@ -2,32 +2,33 @@
 using Baballonia.Services.Calibration;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System;
 
 namespace Baballonia.Services;
 
 public class CalibrationService : ICalibrationService
 {
-    // Expression parameter names
-    private readonly Dictionary<string, string> _eyeExpressionMap = new()
+    // Grouped by canonical range, not by pipeline ownership: gaze is bipolar; all blendshapes are
+    // unit-valued. Keeping each OSC key in exactly one group prevents later loops from overwriting
+    // the correct default (the old table listed right-eye X/Y in both groups).
+    private readonly Dictionary<string, string> _gazeExpressionMap = new()
     {
-        { "LeftEyeX", "/LeftEyeX" },
-        { "LeftEyeY", "/LeftEyeY" },
-        { "RightEyeX", "/RightEyeX" },
-        { "RightEyeY", "/RightEyeY" },
+        { "LeftEyeX", "/leftEyeX" },
+        { "LeftEyeY", "/leftEyeY" },
+        { "RightEyeX", "/rightEyeX" },
+        { "RightEyeY", "/rightEyeY" },
     };
 
-    private readonly Dictionary<string, string> _faceExpressionMap = new()
+    private readonly Dictionary<string, string> _unitExpressionMap = new()
     {
-        { "LeftEyeLid", "/LeftEyeLid" },
-        { "LeftEyeWiden", "/LeftEyeWiden" },
-        // { "LeftEyeLower", "/LeftEyeLower" },
-        { "LeftEyeBrow", "/LeftEyeBrow" },
-        { "RightEyeX", "/RightEyeX" },
-        { "RightEyeY", "/RightEyeY" },
-        { "RightEyeLid", "/RightEyeLid" },
-        { "RightEyeWiden", "/RightEyeWiden" },
-        // { "RightEyeLower", "/RightEyeLower" },
-        { "RightEyeBrow", "/RightEyeBrow" },
+        { "LeftEyeLid", "/leftEyeLid" },
+        { "LeftEyeWiden", "/leftEyeWiden" },
+        { "LeftEyeSquint", "/leftEyeSquint" },
+        { "LeftEyeBrow", "/leftEyeBrow" },
+        { "RightEyeLid", "/rightEyeLid" },
+        { "RightEyeWiden", "/rightEyeWiden" },
+        { "RightEyeSquint", "/rightEyeSquint" },
+        { "RightEyeBrow", "/rightEyeBrow" },
         { "CheekPuffLeft", "/cheekPuffLeft" },
         { "CheekPuffRight", "/cheekPuffRight" },
         { "CheekSuckLeft", "/cheekSuckLeft" },
@@ -78,6 +79,7 @@ public class CalibrationService : ICalibrationService
     private readonly ConcurrentDictionary<string, CalibrationParameter> _expressionSettings = new();
 
     private readonly ILocalSettingsService _localSettingsService;
+    private CalibrationParameter _DefaultCalibration = new CalibrationParameter();
 
     public CalibrationService(ILocalSettingsService localSettingsService)
     {
@@ -96,11 +98,12 @@ public class CalibrationService : ICalibrationService
         var isUpper = expression.EndsWith("Upper");
         var parameterName = expression[..^5]; // Remove "Upper"/"Lower", both 5 letters in size :3
 
-        _expressionSettings.TryGetValue(parameterName, out var currentSettings);
+        if (!_expressionSettings.TryGetValue(parameterName, out var currentSettings))
+            currentSettings = DefaultFor(parameterName);
 
-        var lower = isUpper ? currentSettings!.Lower : value;
-        var upper = isUpper ? value : currentSettings!.Upper;
-        var min = currentSettings!.Min;
+        var lower = isUpper ? currentSettings.Lower : value;
+        var upper = isUpper ? value : currentSettings.Upper;
+        var min = currentSettings.Min;
         var max = currentSettings.Max;
 
         var param = new CalibrationParameter(lower, upper, min, max);
@@ -108,11 +111,18 @@ public class CalibrationService : ICalibrationService
         SaveAsync();
     }
 
-    public CalibrationParameter GetExpressionSettings(string parameterName)
+    public CalibrationParameter GetExpressionSettings(string parameterName) // run once per paremeter, per frame
     {
         return _expressionSettings.TryGetValue(parameterName, out var settings) ?
             settings :
-            new CalibrationParameter();
+            _DefaultCalibration;
+    }
+
+    public CalibrationParameter GetNullableExpressionSettings(string parameterName) // run once per paremeter, per frame
+    {
+        return _expressionSettings.TryGetValue(parameterName, out var settings) ?
+            settings :
+            null;
     }
 
     public float GetExpressionSetting(string expression)
@@ -141,30 +151,43 @@ public class CalibrationService : ICalibrationService
         _expressionSettings.Clear();
         if (parameters == null)
         {
-            foreach (var parameterName in _eyeExpressionMap)
+            foreach (var parameterName in _gazeExpressionMap)
             {
-                _expressionSettings[parameterName.Key] = new CalibrationParameter(-1, 1f, -1f, 1f);
+                _expressionSettings[parameterName.Value] = new CalibrationParameter(-1, 1f, -1f, 1f);
             }
 
-            foreach (var parameterName in _faceExpressionMap)
+            foreach (var parameterName in _unitExpressionMap)
             {
-                _expressionSettings[parameterName.Key] = new CalibrationParameter(0, 1f, 0f, 1f);
+                _expressionSettings[parameterName.Value] = new CalibrationParameter(0, 1f, 0f, 1f);
             }
         }
         else
         {
-            var eyeParameterNames = _eyeExpressionMap.Keys;
+            var repairedLegacyGaze = false;
+            var eyeParameterNames = _gazeExpressionMap.Values;
             foreach (var parameterName in eyeParameterNames)
             {
                 var param = parameters.GetValueOrDefault(parameterName);
+                // Older builds saved right-eye gaze with the blendshape default. Fixing only
+                // new-profile defaults left existing users clipping every negative gaze value.
+                // Match that exact old default; preserve any explicit calibration trims.
+                if (param is { Lower: 0f, Upper: 1f, Min: 0f, Max: 1f })
+                {
+                    param = new CalibrationParameter(-1f, 1f, -1f, 1f);
+                    parameters[parameterName] = param;
+                    repairedLegacyGaze = true;
+                }
                 _expressionSettings[parameterName] = param ?? new CalibrationParameter(-1f, 1f, -1f, 1f);
             }
-            var faceParameterNames = _faceExpressionMap.Keys;
+            var faceParameterNames = _unitExpressionMap.Values;
             foreach (var parameterName in faceParameterNames)
             {
                 var param = parameters.GetValueOrDefault(parameterName);
                 _expressionSettings[parameterName] = param ?? new CalibrationParameter(0f, 1f, 0f, 1f);
             }
+            // Save the original dictionary so this repair also retains unknown/custom keys.
+            if (repairedLegacyGaze)
+                _localSettingsService.SaveSetting("CalibrationParams", parameters);
         }
     }
 
@@ -194,5 +217,17 @@ public class CalibrationService : ICalibrationService
             parameter.Upper = parameter.Max;
         }
         SaveAsync();
+    }
+
+    private static CalibrationParameter DefaultFor(string parameterName)
+    {
+        var normalized = parameterName.TrimStart('/');
+        var isGaze = normalized.Equals("leftEyeX", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("leftEyeY", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("rightEyeX", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("rightEyeY", StringComparison.OrdinalIgnoreCase);
+        return isGaze
+            ? new CalibrationParameter(-1f, 1f, -1f, 1f)
+            : new CalibrationParameter(0f, 1f, 0f, 1f);
     }
 }

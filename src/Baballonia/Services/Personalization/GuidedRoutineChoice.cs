@@ -52,6 +52,11 @@ public sealed record GuidedRoutineChoice(
                 "Two expressions at once, which teaches how they interfere with each other.",
                 GuidedCues.CombinationPass, Repetitions: 2),
 
+            new("smiles", "Smiles (fix a goofy grin)",
+                "The same smile with your teeth together, then showing teeth, then wide, then " +
+                "with your mouth open. Run this when an ordinary smile comes out as a huge grin.",
+                GuidedCues.SmilePass, Repetitions: 2),
+
             new("asymmetric", "One-sided smiles",
                 "Left and right smiles separately, so they stop mirroring each other. " +
                 "Skip this if you cannot hold a one-sided smile.",

@@ -1,0 +1,139 @@
+﻿<UserControl
+    d:DesignHeight="700"
+    d:DesignWidth="800"
+    mc:Ignorable="d"
+    x:Class="Baballonia.Views.EyePersonalizationView"
+    x:DataType="splitViewPane:EyePersonalizationViewModel"
+    xmlns="https://github.com/avaloniaui"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:models="clr-namespace:Baballonia.Models"
+    xmlns:splitViewPane="clr-namespace:Baballonia.ViewModels.SplitViewPane"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <StackPanel Spacing="12">
+
+    <TextBlock TextWrapping="Wrap"
+               Text="Teaches the app how your eyes differ from what the model expects. Mainly squinting and wide-eye: if your hardest squint barely registers, this rescales that channel so your own strongest expression reaches full strength — while your resting face still reads as resting. Gaze is corrected too, but only when the recording shows it beating the base model." />
+    <TextBlock TextWrapping="Wrap"
+               Text="No headset required. The gaze poses use the dot panel below; the squint and wide-eye poses do not involve the dot at all. Record once, fit, then compare against the unmodified model with the buttons below." />
+    <TextBlock TextWrapping="Wrap" Opacity="0.75" FontSize="12"
+               Text="{Binding RoutineDescription}" />
+
+    <!--  The one thing that can make a good fit look like a bad one.  -->
+    <Border IsVisible="{Binding CalibrationStale}"
+            Background="#3D2A00"
+            BorderBrush="#C8922A"
+            BorderThickness="1"
+            CornerRadius="6"
+            Padding="12">
+      <TextBlock TextWrapping="Wrap"
+                 Text="Re-run Quick Eye Setup. Your saved gaze centre was measured against a different correction than the one now installed, and it is applied on top of this one — so the two corrections stack and gaze will sit off to one side. Capturing Quick Eye Setup again measures the centre through the current correction and clears this notice." />
+    </Border>
+
+    <!--  Recording  -->
+    <WrapPanel Orientation="Horizontal">
+      <Button Margin="0,0,8,8"
+              Command="{Binding StartCaptureCommand}"
+              IsEnabled="{Binding CanRecord}"
+              Content="Record guided capture" />
+      <Button Margin="0,0,8,8"
+              Command="{Binding FitFromLastCaptureCommand}"
+              IsEnabled="{Binding CanFit}"
+              Content="Fit correction from recording" />
+      <Button Margin="0,0,0,8"
+              Command="{Binding ClearFitCommand}"
+              IsEnabled="{Binding CanClear}"
+              Content="Remove correction" />
+    </WrapPanel>
+
+    <!--  In-progress capture: the dot, the instruction, and the way out  -->
+    <Border IsVisible="{Binding IsCapturing}"
+            Background="{DynamicResource SystemChromeMediumLowColor}"
+            CornerRadius="8"
+            Padding="16">
+      <StackPanel Spacing="10">
+        <TextBlock FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap"
+                   Text="{Binding CaptureInstruction}" />
+        <ProgressBar Minimum="0" Maximum="1" Height="10"
+                     Value="{Binding CaptureProgress}" />
+
+        <!--  Desktop fallback for the headset dot. Deliberately plain: anything else on screen is
+              something to read, and reading it means looking away from the target.  -->
+        <Border IsVisible="{Binding ShowDesktopDot}"
+                Background="#0A0E16"
+                CornerRadius="6"
+                HorizontalAlignment="Center"
+                Width="440" Height="240">
+          <Canvas Width="440" Height="240">
+            <Ellipse Width="38" Height="38" Fill="#FFE048"
+                     Canvas.Left="{Binding DotCanvasLeft}"
+                     Canvas.Top="{Binding DotCanvasTop}" />
+          </Canvas>
+        </Border>
+
+        <WrapPanel Orientation="Horizontal">
+          <Button Margin="0,0,8,0" Command="{Binding RetryPoseCommand}" Content="Retry this pose" />
+          <Button Margin="0,0,8,0" Command="{Binding SkipPoseCommand}" Content="Skip" />
+          <Button Command="{Binding CancelCaptureCommand}" Content="Stop" />
+        </WrapPanel>
+      </StackPanel>
+    </Border>
+
+    <!--  Strength and A/B  -->
+    <Border Background="{DynamicResource SystemChromeMediumLowColor}"
+            CornerRadius="8"
+            Padding="16">
+      <StackPanel Spacing="8">
+        <Grid ColumnDefinitions="Auto,*,Auto">
+          <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Correction strength" />
+          <Slider Grid.Column="1" Margin="12,0" Minimum="0" Maximum="100"
+                  Value="{Binding Strength, Mode=TwoWay}" />
+          <TextBlock Grid.Column="2" VerticalAlignment="Center" MinWidth="48"
+                     TextAlignment="Right" FontWeight="SemiBold"
+                     Text="{Binding Strength, StringFormat='{}{0:F0}%'}" />
+        </Grid>
+
+        <WrapPanel Orientation="Horizontal">
+          <Button Margin="0,0,8,0" Command="{Binding CompareBaseCommand}" Content="Base model (0%)" />
+          <Button Margin="0,0,8,0" Command="{Binding ComparePersonalCommand}" Content="Personalized (100%)" />
+          <CheckBox VerticalAlignment="Center" IsChecked="{Binding Enabled, Mode=TwoWay}"
+                    Content="Enabled" />
+        </WrapPanel>
+
+        <TextBlock TextWrapping="Wrap" Text="{Binding Status}" />
+        <TextBlock TextWrapping="Wrap" Opacity="0.7" FontSize="12" Text="{Binding FitSummary}" />
+      </StackPanel>
+    </Border>
+
+    <!--  Live comparison. The point of the screen: a correction cannot be judged from a
+          status line, only by watching the two columns while you look around.  -->
+    <TextBlock FontWeight="SemiBold" Margin="0,4,0,0" Text="Base vs personalized (live)" />
+    <Border Background="{DynamicResource SystemChromeMediumLowColor}"
+            CornerRadius="8"
+            Padding="16">
+      <StackPanel Spacing="2">
+        <Grid ColumnDefinitions="*,72,72,72" Margin="0,0,0,6">
+          <TextBlock Grid.Column="0" FontWeight="SemiBold" Opacity="0.6" Text="Channel" />
+          <TextBlock Grid.Column="1" FontWeight="SemiBold" Opacity="0.6" TextAlignment="Right" Text="Base" />
+          <TextBlock Grid.Column="2" FontWeight="SemiBold" Opacity="0.6" TextAlignment="Right" Text="Personal" />
+          <TextBlock Grid.Column="3" FontWeight="SemiBold" Opacity="0.6" TextAlignment="Right" Text="Δ" />
+        </Grid>
+        <ItemsControl ItemsSource="{Binding Comparison}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="models:ExpressionComparisonRow">
+              <Grid ColumnDefinitions="*,72,72,72" Margin="0,2">
+                <TextBlock Grid.Column="0" Text="{Binding Name}" TextTrimming="CharacterEllipsis" />
+                <TextBlock Grid.Column="1" TextAlignment="Right"
+                           Text="{Binding Stock, StringFormat='{}{0:F3}'}" />
+                <TextBlock Grid.Column="2" TextAlignment="Right" FontWeight="SemiBold"
+                           Text="{Binding Personal, StringFormat='{}{0:F3}'}" />
+                <TextBlock Grid.Column="3" TextAlignment="Right" Opacity="0.75"
+                           Text="{Binding Delta, StringFormat='{}{0:+0.000;-0.000; 0.000}'}" />
+              </Grid>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </StackPanel>
+    </Border>
+  </StackPanel>
+</UserControl>

@@ -1,4 +1,4 @@
-using Avalonia.Controls;
+﻿using Avalonia.Controls;
 using Avalonia.Controls.Templates;
 using Baballonia.ViewModels;
 using Baballonia.ViewModels.SplitViewPane;
@@ -22,7 +22,9 @@ public class ViewLocator : IDataTemplate
         RegisterViewFactory<OutputPageViewModel, OutputPageView>();
         RegisterViewFactory<AppSettingsViewModel, AppSettingsView>();
         RegisterViewFactory<AboutPageViewModel, AboutPageView>();
+        RegisterViewFactory<DebugViewModel, DebugView>();
         RegisterViewFactory<PersonalizationViewModel, PersonalizationView>();
+        RegisterViewFactory<EyePersonalizationViewModel, EyePersonalizationView>();
 
         if (!Utils.IsSupportedDesktopOS) return;
 

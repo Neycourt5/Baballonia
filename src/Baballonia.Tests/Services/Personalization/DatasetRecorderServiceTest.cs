@@ -139,6 +139,37 @@ public class DatasetRecorderServiceTest
     }
 
     [TestMethod]
+    public async Task Session_WritesRecoverableMetadataBeforeAnyFrameOrCleanStop()
+    {
+        var id = StartSession(SessionType.Speech);
+        var path = PersonalizationPaths.SessionMetadataPath(id);
+
+        Assert.IsTrue(File.Exists(path),
+            "a crash after StartSession must not leave an undiscoverable frames directory");
+        var initial = JsonSerializer.Deserialize<SessionMetadata>(File.ReadAllText(path));
+        Assert.IsNotNull(initial);
+        Assert.AreEqual(id, initial.SessionId);
+        Assert.AreEqual("Speech", initial.SessionType);
+        Assert.IsNull(initial.EndedUtc, "the initial document must remain visibly incomplete");
+        Assert.IsNull(initial.FrameCount, "a clean-stop count must not be invented at startup");
+
+        await _recorder.StopSessionAsync();
+    }
+
+    [TestMethod]
+    public void SessionIdsDoNotCollideAtTheSameTimestamp()
+    {
+        var instant = new DateTime(2026, 8, 25, 12, 34, 56, 789, DateTimeKind.Utc);
+        var first = PersonalizationPaths.NewSessionId(SessionType.Correction, instant);
+        var second = PersonalizationPaths.NewSessionId(SessionType.Correction, instant);
+
+        Assert.AreNotEqual(first, second,
+            "same-tick captures must never append to or overwrite the same dataset directory");
+        Assert.IsTrue(first.EndsWith("_correction", StringComparison.Ordinal));
+        Assert.IsTrue(second.EndsWith("_correction", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
     public async Task FrameIndicesMatchImageFilenames_SoLabelsCannotDriftFromImages()
     {
         var id = StartSession();
@@ -279,6 +310,37 @@ public class DatasetRecorderServiceTest
     }
 
     [TestMethod]
+    public async Task SynchronousStopDoesNotDependOnTheCallingSynchronizationContext()
+    {
+        StartSession();
+        PublishFrame(17);
+
+        var completed = new TaskCompletionSource<Exception?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var thread = new Thread(() =>
+        {
+            SynchronizationContext.SetSynchronizationContext(new NonPumpingContext());
+            try
+            {
+                _recorder.StopSessionAsync().GetAwaiter().GetResult();
+                completed.SetResult(null);
+            }
+            catch (Exception ex)
+            {
+                completed.SetResult(ex);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "DatasetRecorder synchronous-dispose regression"
+        };
+
+        thread.Start();
+        var failure = await completed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.IsNull(failure, failure?.ToString());
+    }
+
+    [TestMethod]
     public async Task CueMetadata_IsStampedWhenGuided()
     {
         var cue = new FrameLabel.CueLabel
@@ -407,5 +469,14 @@ public class DatasetRecorderServiceTest
     private sealed class StubCueSource(FrameLabel.CueLabel cue) : IReadOnlyCueStateSource
     {
         public FrameLabel.CueLabel? CurrentCue() => cue;
+    }
+
+    private sealed class NonPumpingContext : SynchronizationContext
+    {
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            // Deliberately do not execute posted callbacks. A library await that captures this
+            // context deadlocks the synchronous disposal path used by page navigation.
+        }
     }
 }

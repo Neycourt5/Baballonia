@@ -4,7 +4,6 @@ using Baballonia.Desktop.Calibration;
 using Baballonia.Desktop.Captures;
 using Baballonia.Services.Personalization.Audio;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
 using System;
 #if WINDOWS
 using Baballonia.Desktop.Audio;
@@ -24,7 +23,19 @@ sealed class Program
      * but a Mutex should do the job until we have reason to roll one ourselves. Sources:
      * https://stackoverflow.com/questions/6486195/ensuring-only-one-application-instance
      * https://github.com/AvaloniaUI/Avalonia/discussions/17854#discussioncomment-11700510 */
-    private static readonly Mutex Mutex = new(false, "baballonia-unique-id");
+    /// <remarks>
+    /// Named per profile. The reasons above are all about one installation being opened twice by
+    /// accident, and none of them argue against two copies deliberately doing different jobs - one
+    /// driving eyes, another the face. A single shared name would make that impossible, and the
+    /// second copy would exit with a code nobody would think to look up.
+    /// </remarks>
+    private static readonly Mutex Mutex = new(false, MutexName());
+
+    private static string MutexName()
+    {
+        var profile = (Environment.GetEnvironmentVariable("BABALLONIA_PROFILE") ?? string.Empty).Trim();
+        return string.IsNullOrEmpty(profile) ? "baballonia-unique-id" : $"baballonia-unique-id-{profile}";
+    }
 
     // Initialization code. Don't use any Avalonia, third-party APIs or any
     // SynchronizationContext-reliant code before AppMain is called: things aren't initialized

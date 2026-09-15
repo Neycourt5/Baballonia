@@ -1,18 +1,10 @@
-﻿using Microsoft.ML.OnnxRuntime.Tensors;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
+using Microsoft.ML.OnnxRuntime.Tensors;
 
 namespace Baballonia.Contracts;
 
 public interface IInferenceRunner
 {
-    public float[]? Run();
+    public OrderedFloatMap? Run();
     public DenseTensor<float> GetInputTensor();
-}
-
-/// <summary>
-/// Optional metadata for inference runners whose output has named elements.
-/// </summary>
-public interface INamedInferenceOutput
-{
-    public IReadOnlyList<string>? OutputNames { get; }
 }

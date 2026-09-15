@@ -1,8 +1,9 @@
-using Baballonia.Services;
+﻿using Baballonia.Services;
 using Baballonia.Services.Calibration;
 using Microsoft.Extensions.Logging;
 using SkiaSharp;
 using System;
+using System.Diagnostics;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -30,6 +31,40 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
     /// </summary>
     private const int MaxConsecutiveFailures = 3;
 
+    /// <summary>
+    /// How the panel is placed, which differs completely between the two things it is used for.
+    /// </summary>
+    /// <remarks>
+    /// <para><see cref="Instructions"/> has to be read <em>while looking somewhere else</em> — at
+    /// your avatar in a mirror, copying its expression. A panel big enough to cover the mirror
+    /// defeats the exercise, so it is small, translucent, and parked below the line of sight where
+    /// it can be glanced at.</para>
+    ///
+    /// <para><see cref="GazeTarget"/> is the opposite: the dot <em>is</em> what you look at, so it
+    /// needs the full panel to reach the outer targets, centred and unobstructed.</para>
+    /// </remarks>
+    private enum OverlayLayout
+    {
+        Instructions,
+        GazeTarget,
+    }
+
+    // Instruction panel: about +/-17 degrees wide, sitting from roughly 13 to 25 degrees below eye
+    // level. That leaves the whole central view - where the mirror is - clear.
+    private const float InstructionWidthMeters = 0.75f;
+    private const float InstructionHeightFraction = 360f / TextureHeight;
+    private const float InstructionCentreY = -0.42f;
+    private const float InstructionDistance = -1.20f;
+    private const float InstructionAlpha = 0.80f;
+
+    // Gaze panel: wide enough for the +/-18 degree dot grid, centred.
+    private const float TargetWidthMeters = 1.35f;
+    private const float TargetCentreY = -0.05f;
+    private const float TargetDistance = -1.25f;
+    private const float TargetAlpha = 0.95f;
+
+    private OverlayLayout? _layout;
+
     private readonly OpenVRService _openVr;
     private readonly ILogger<OpenVrCalibrationPresenter> _logger;
     private readonly object _sync = new();
@@ -44,10 +79,34 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
     private bool _showingCompletion;
     private int _consecutiveFailures;
 
+    /// <summary>
+    /// Shortest gap between uploads that only move a progress bar or a countdown digit.
+    /// </summary>
+    /// <remarks>
+    /// Progress quantised to 2% crosses a boundary roughly every 60 ms during a phase, so the
+    /// overlay was re-uploading a three-megabyte texture about sixteen times a second to redraw a
+    /// bar a few pixels longer. Nobody can see a progress bar update faster than this, and every
+    /// upload is a chance for the compositor to sample a half-written frame.
+    ///
+    /// Only cosmetic updates are held back. Anything that changes what the overlay *says* -
+    /// instruction, phase, the dot, the buttons - still goes up immediately, because a headset
+    /// showing the previous instruction is how a session gets mislabelled.
+    /// </remarks>
+    private static readonly TimeSpan MinimumCosmeticInterval = TimeSpan.FromMilliseconds(100);
+
+    private long _lastUploadTimestamp;
+
     // The drawing surface outlives individual frames. Besides saving an allocation and a clear per
     // update, this keeps the pixel buffer handed to SetOverlayRaw alive for as long as the overlay
     // exists, rather than freeing it the instant the call returns.
+    //
+    // There are two of them, and that is the fix for a flickering overlay: drawing starts with a
+    // full canvas.Clear(), so with a single buffer the compositor could sample a cleared or
+    // half-drawn texture it was still reading from. The buffer being drawn into is never the one
+    // most recently handed to SteamVR.
     private SKBitmap? _surface;
+    private SKBitmap? _backSurface;
+    private SKCanvas? _backCanvas;
     private SKCanvas? _canvas;
 
     // Font lookup is the expensive part of drawing text, and the old code paid it per string - eight
@@ -143,24 +202,14 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
                 if (error != EVROverlayError.None || _handle == 0)
                     return FailAndCloseLocked($"SteamVR could not create the calibration overlay: {error}.");
 
-                ThrowIfError(_overlay.SetOverlayWidthInMeters(_handle, 1.35f), "set overlay size");
-                ThrowIfError(_overlay.SetOverlayAlpha(_handle, 0.98f), "set overlay opacity");
                 ThrowIfError(_overlay.SetOverlayInputMethod(_handle, VROverlayInputMethod.Mouse),
                     "enable controller pointer input");
 
                 var mouseScale = new HmdVector2_t { v0 = TextureWidth, v1 = TextureHeight };
                 ThrowIfError(_overlay.SetOverlayMouseScale(_handle, ref mouseScale), "set pointer scale");
 
-                // OpenVR HMD coordinates use -Z in front of the viewer. Keeping the panel just
-                // below center lets the user still see their avatar mirror around it.
-                var transform = new HmdMatrix34_t
-                {
-                    m0 = 1, m1 = 0, m2 = 0, m3 = 0,
-                    m4 = 0, m5 = 1, m6 = 0, m7 = -0.05f,
-                    m8 = 0, m9 = 0, m10 = 1, m11 = -1.25f,
-                };
-                ThrowIfError(_overlay.SetOverlayTransformTrackedDeviceRelative(
-                    _handle, OpenVR.k_unTrackedDeviceIndex_Hmd, ref transform), "attach overlay to headset");
+                _layout = null;
+                ApplyLayoutLocked(OverlayLayout.Instructions);
 
                 _pendingAction = VrCalibrationAction.None;
                 CreateSurfaceLocked();
@@ -269,21 +318,65 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
         float x,
         float y)
     {
-        const float buttonTop = 680;
-        const float buttonBottom = 738;
-        var reflectedY = TextureHeight - y;
-        var inButtonBand = y is >= buttonTop and <= buttonBottom ||
-                           reflectedY is >= buttonTop and <= buttonBottom;
-        if (!inButtonBand)
-            return VrCalibrationAction.None;
+        var target = UsesGazeTargetLayout(frame);
 
-        if (frame.AllowRetry && x is >= 64 and <= 320)
+        if (frame.AllowRetry && Hit(ButtonRect.Retry(target), x, y, target))
             return VrCalibrationAction.Retry;
-        if (frame.AllowSkip && x is >= 384 and <= 640)
+        if (frame.AllowSkip && Hit(ButtonRect.Skip(target), x, y, target))
             return VrCalibrationAction.Skip;
-        if (frame.AllowCancel && x is >= 704 and <= 960)
+        if (frame.AllowCancel && Hit(ButtonRect.Cancel(target), x, y, target))
             return VrCalibrationAction.Cancel;
         return VrCalibrationAction.None;
+    }
+
+    /// <summary>Which layout a frame will be drawn with. One rule, used by drawing and hit-testing.</summary>
+    private static bool UsesGazeTargetLayout(VrCalibrationFrame frame) =>
+        frame.Phase == VrCalibrationPhase.Target && frame is { TargetX: not null, TargetY: not null };
+
+    /// <summary>
+    /// Where a button is drawn, in texture pixels. The single source both the renderer and the
+    /// pointer hit-test read, so a moved button cannot become an invisible one that still works.
+    /// </summary>
+    private readonly record struct ButtonRect(float Left, float Right, float Top, float Bottom)
+    {
+        // The gaze layout shows the whole texture and keeps the original strip along the bottom.
+        // The instruction layout is cropped and compact, so its buttons sit inside the visible part.
+        public static ButtonRect Retry(bool target) =>
+            target ? new(64, 320, 680, 738) : new(44, 244, 236, 294);
+        public static ButtonRect Skip(bool target) =>
+            target ? new(384, 640, 680, 738) : new(260, 420, 236, 294);
+        public static ButtonRect Cancel(bool target) =>
+            target ? new(704, 960, 680, 738) : new(436, 636, 236, 294);
+    }
+
+    /// <summary>
+    /// Whether a pointer landed on a button, tolerating every coordinate convention OpenVR might
+    /// hand us.
+    /// </summary>
+    /// <remarks>
+    /// Two independent ambiguities, and guessing wrong makes a visible button silently unclickable.
+    /// Bindings have historically reported overlay mouse Y using either the texture's top-left
+    /// origin or its reflected bottom-left one. And the instruction layout crops the texture, so Y
+    /// may arrive scaled across the visible strip rather than the whole texture. Accepting all four
+    /// readings keeps the target narrow in X - where there is no ambiguity - while not making the
+    /// user guess which invisible band works.
+    /// </remarks>
+    private static bool Hit(ButtonRect rect, float x, float y, bool target)
+    {
+        if (x < rect.Left || x > rect.Right)
+            return false;
+
+        if (InBand(y) || InBand(TextureHeight - y))
+            return true;
+
+        if (target)
+            return false;
+
+        // The cropped layout may report Y across the visible strip instead of the full texture.
+        var scale = InstructionHeightFraction;
+        return InBand(y * scale) || InBand((TextureHeight - y) * scale);
+
+        bool InBand(float value) => value >= rect.Top && value <= rect.Bottom;
     }
 
     public void End(string? completionMessage = null)
@@ -345,23 +438,87 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
 
     private bool IsCosmeticUpdate(VrCalibrationFrame frame) => IsCosmeticUpdate(frame, _lastRendered);
 
+    /// <summary>
+    /// Places and sizes the panel for what it is currently being used for.
+    /// </summary>
+    /// <remarks>
+    /// Only applied when the mode actually changes, which happens at most once per pose — calling
+    /// these every frame would fight the compositor for no benefit.
+    /// </remarks>
+    private void ApplyLayoutLocked(OverlayLayout layout)
+    {
+        if (_layout == layout || _overlay == null || _handle == 0)
+            return;
+
+        var instructions = layout == OverlayLayout.Instructions;
+
+        // Crop the instruction layout to the part of the texture it actually draws in, so the panel
+        // is short rather than a mostly-empty rectangle hanging in the view.
+        var bounds = new VRTextureBounds_t
+        {
+            uMin = 0,
+            vMin = 0,
+            uMax = 1,
+            vMax = instructions ? InstructionHeightFraction : 1f,
+        };
+        ThrowIfError(_overlay.SetOverlayTextureBounds(_handle, ref bounds), "set overlay texture bounds");
+
+        ThrowIfError(_overlay.SetOverlayWidthInMeters(
+            _handle, instructions ? InstructionWidthMeters : TargetWidthMeters), "set overlay size");
+        ThrowIfError(_overlay.SetOverlayAlpha(
+            _handle, instructions ? InstructionAlpha : TargetAlpha), "set overlay opacity");
+
+        // OpenVR HMD coordinates use -Z in front of the viewer.
+        var transform = new HmdMatrix34_t
+        {
+            m0 = 1, m1 = 0, m2 = 0, m3 = 0,
+            m4 = 0, m5 = 1, m6 = 0, m7 = instructions ? InstructionCentreY : TargetCentreY,
+            m8 = 0, m9 = 0, m10 = 1, m11 = instructions ? InstructionDistance : TargetDistance,
+        };
+        ThrowIfError(_overlay.SetOverlayTransformTrackedDeviceRelative(
+            _handle, OpenVR.k_unTrackedDeviceIndex_Hmd, ref transform), "attach overlay to headset");
+
+        _layout = layout;
+
+        // The panel moved, so nothing that was on it is still valid to compare against.
+        _lastRendered = null;
+    }
+
     /// <summary>Allocates the reusable drawing surface. Called once per overlay session.</summary>
     private void CreateSurfaceLocked()
     {
         DisposeSurfaceLocked();
-        _surface = new SKBitmap(new SKImageInfo(
-            TextureWidth, TextureHeight, SKColorType.Rgba8888, SKAlphaType.Premul));
+        var info = new SKImageInfo(
+            TextureWidth, TextureHeight, SKColorType.Rgba8888, SKAlphaType.Premul);
+        _surface = new SKBitmap(info);
         _canvas = new SKCanvas(_surface);
+        _backSurface = new SKBitmap(info);
+        _backCanvas = new SKCanvas(_backSurface);
         _lastRendered = null;
+        _lastUploadTimestamp = 0;
     }
 
     private void DisposeSurfaceLocked()
     {
         _canvas?.Dispose();
         _surface?.Dispose();
+        _backCanvas?.Dispose();
+        _backSurface?.Dispose();
         _canvas = null;
         _surface = null;
+        _backCanvas = null;
+        _backSurface = null;
         _lastRendered = null;
+        _lastUploadTimestamp = 0;
+    }
+
+    /// <summary>
+    /// Makes the buffer just uploaded the front one, so the next frame is drawn into the other.
+    /// </summary>
+    private void SwapSurfacesLocked()
+    {
+        (_surface, _backSurface) = (_backSurface, _surface);
+        (_canvas, _backCanvas) = (_backCanvas, _canvas);
     }
 
     private void PresentLocked(VrCalibrationFrame frame)
@@ -377,73 +534,132 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
 
         if (_lastRendered == frame) return;
 
-        var bitmap = _surface!;
-        var canvas = _canvas!;
-        // Fully opaque: a translucent panel shows every upload seam against the scene behind it.
-        canvas.Clear(new SKColor(7, 10, 18, 255));
-
-        DrawText(canvas, frame.Title.ToUpperInvariant(), 54, 70, 46, SKColors.White, true);
-
-        var phaseColor = frame.Phase switch
+        // Hold back updates that only move a bar. The instruction on screen is already correct, so
+        // waiting a few tens of milliseconds costs the user nothing and spares the compositor a
+        // three-megabyte upload it cannot show them anyway.
+        if (IsCosmeticUpdate(frame) && _lastUploadTimestamp != 0 &&
+            Stopwatch.GetElapsedTime(_lastUploadTimestamp) < MinimumCosmeticInterval)
         {
-            VrCalibrationPhase.Hold or VrCalibrationPhase.Sampling or VrCalibrationPhase.Target
-                => new SKColor(61, 214, 140),
-            VrCalibrationPhase.Settling => new SKColor(255, 201, 71),
-            VrCalibrationPhase.Relax => new SKColor(94, 190, 255),
-            VrCalibrationPhase.Error => new SKColor(255, 105, 105),
-            VrCalibrationPhase.Complete => new SKColor(88, 230, 150),
-            _ => new SKColor(255, 201, 71),
-        };
-        var phaseLabel = frame.Phase switch
-        {
-            VrCalibrationPhase.Preparing => frame.CountdownSeconds is { } countdown
-                ? $"GET READY  {Math.Max(1, (int)Math.Ceiling(countdown))}" : "GET READY",
-            VrCalibrationPhase.Sampling => "SAMPLING",
-            VrCalibrationPhase.Settling => "SETTLE",
-            VrCalibrationPhase.Hold => "HOLD",
-            VrCalibrationPhase.Relax => "RELAX",
-            VrCalibrationPhase.Target => "LOOK AT THE DOT",
-            VrCalibrationPhase.Error => "ERROR",
-            VrCalibrationPhase.Complete => "DONE",
-            _ => frame.Phase.ToString().ToUpperInvariant(),
-        };
-        DrawText(canvas, phaseLabel, 54, 137, 50, phaseColor, true);
-
-        DrawWrappedText(canvas, frame.Instruction, 54, 190, TextureWidth - 108, 34,
-            new SKColor(230, 234, 243), 44);
-
-        if (frame.TargetX is { } targetX && frame.TargetY is { } targetY)
-        {
-            var x = TextureWidth / 2f + targetX * 340f;
-            var y = 410f + targetY * 180f;
-            using var halo = new SKPaint { Color = new SKColor(255, 255, 255, 60), IsAntialias = true };
-            using var dot = new SKPaint { Color = new SKColor(255, 224, 72), IsAntialias = true };
-            canvas.DrawCircle(x, y, 43, halo);
-            canvas.DrawCircle(x, y, 19, dot);
+            return;
         }
 
-        var detailParts = new List<string>();
-        if (frame.Intensity is { } intensity) detailParts.Add($"Intensity {(int)Math.Round(intensity * 100)}%");
-        if (frame.RepetitionCount > 0)
-            detailParts.Add($"Repetition {Math.Clamp(frame.Repetition, 1, frame.RepetitionCount)} of {frame.RepetitionCount}");
-        if (detailParts.Count > 0)
-            DrawText(canvas, string.Join("   •   ", detailParts), 54, 568, 27, new SKColor(188, 197, 214));
+        // Draw into the buffer SteamVR is *not* holding. See the field comment.
+        var bitmap = _backSurface!;
+        var canvas = _backCanvas!;
 
-        DrawProgress(canvas, 54, 600, TextureWidth - 108, 18, frame.PhaseProgress, phaseColor);
-        DrawProgress(canvas, 54, 638, TextureWidth - 108, 12, frame.OverallProgress,
+        var wantsTarget = frame.Phase == VrCalibrationPhase.Target &&
+                          frame is { TargetX: not null, TargetY: not null };
+        ApplyLayoutLocked(wantsTarget ? OverlayLayout.GazeTarget : OverlayLayout.Instructions);
+
+        canvas.Clear(SKColors.Transparent);
+
+        // A gaze target is the one frame where the chrome actively hurts: any text on the panel is
+        // something to read, and reading it means looking away from the dot whose position is being
+        // recorded as ground truth. So the Target phase draws the dot, a thin progress bar and a
+        // cancel affordance, and nothing else.
+        if (wantsTarget)
+        {
+            DrawGazeTarget(canvas, frame.TargetX!.Value, frame.TargetY!.Value);
+            DrawProgress(canvas, 54, 700, TextureWidth - 108, 10, frame.PhaseProgress,
+                new SKColor(61, 214, 140));
+            if (frame.AllowCancel)
+                DrawButton(canvas, "CANCEL", ButtonRect.Cancel(true), new SKColor(222, 91, 91));
+
+            UploadLocked(bitmap, frame);
+            return;
+        }
+
+        DrawInstructionPanel(canvas, frame);
+        UploadLocked(bitmap, frame);
+    }
+
+    /// <summary>
+    /// The instruction layout, drawn compactly in the top of the texture.
+    /// </summary>
+    /// <remarks>
+    /// Everything lives above <see cref="InstructionHeightFraction"/> of the texture, because that
+    /// is the part the panel actually shows. The whole panel is small and parked below the line of
+    /// sight, so this is written to be <em>glanceable</em>: one large line saying what to do and how
+    /// far through you are, and nothing that needs studying.
+    /// </remarks>
+    private static void DrawInstructionPanel(SKCanvas canvas, VrCalibrationFrame frame)
+    {
+        // A rounded translucent slab rather than a full-bleed rectangle: the corners let the scene
+        // through and stop it reading as a box bolted to your face.
+        using (var background = new SKPaint { Color = new SKColor(9, 12, 20, 214), IsAntialias = true })
+            canvas.DrawRoundRect(new SKRect(8, 8, TextureWidth - 8, 352), 22, 22, background);
+
+        var phaseColor = PhaseColor(frame.Phase);
+
+        DrawText(canvas, PhaseLabel(frame).ToUpperInvariant(), 44, 96, 62, phaseColor, true);
+
+        var heading = frame.Title.ToUpperInvariant();
+        if (!string.IsNullOrWhiteSpace(heading))
+            DrawText(canvas, heading, 44, 152, 34, new SKColor(178, 188, 206));
+
+        DrawWrappedText(canvas, frame.Instruction, 44, 206, TextureWidth - 88, 34,
+            new SKColor(232, 236, 245), 42, maxLines: 2);
+
+        DrawProgress(canvas, 44, 284, TextureWidth - 88, 12, frame.PhaseProgress, phaseColor);
+        DrawProgress(canvas, 44, 306, TextureWidth - 88, 8, frame.OverallProgress,
             new SKColor(94, 190, 255));
 
-        if (frame.AllowRetry) DrawButton(canvas, "RETRY", 64, 680, 256, phaseColor);
-        if (frame.AllowSkip) DrawButton(canvas, "SKIP", 384, 680, 256, new SKColor(130, 145, 170));
-        if (frame.AllowCancel) DrawButton(canvas, "CANCEL", 704, 680, 256, new SKColor(222, 91, 91));
+        if (frame.AllowRetry) DrawButton(canvas, "RETRY", ButtonRect.Retry(false), phaseColor);
+        if (frame.AllowSkip) DrawButton(canvas, "SKIP", ButtonRect.Skip(false), new SKColor(130, 145, 170));
+        if (frame.AllowCancel) DrawButton(canvas, "CANCEL", ButtonRect.Cancel(false), new SKColor(222, 91, 91));
+    }
 
-        var error = _overlay.SetOverlayRaw(_handle, bitmap.GetPixels(), TextureWidth, TextureHeight, 4);
+    private static SKColor PhaseColor(VrCalibrationPhase phase) => phase switch
+    {
+        VrCalibrationPhase.Hold or VrCalibrationPhase.Sampling or VrCalibrationPhase.Target
+            => new SKColor(61, 214, 140),
+        VrCalibrationPhase.Settling => new SKColor(255, 201, 71),
+        VrCalibrationPhase.Relax => new SKColor(94, 190, 255),
+        VrCalibrationPhase.Error => new SKColor(255, 105, 105),
+        VrCalibrationPhase.Complete => new SKColor(88, 230, 150),
+        _ => new SKColor(255, 201, 71),
+    };
+
+    private static string PhaseLabel(VrCalibrationFrame frame) => frame.Phase switch
+    {
+        VrCalibrationPhase.Preparing => frame.CountdownSeconds is { } countdown
+            ? $"GET READY  {Math.Max(1, (int)Math.Ceiling(countdown))}" : "GET READY",
+        VrCalibrationPhase.Sampling => "SAMPLING",
+        VrCalibrationPhase.Settling => "SETTLE",
+        VrCalibrationPhase.Hold => "HOLD",
+        VrCalibrationPhase.Relax => "RELAX",
+        VrCalibrationPhase.Target => "LOOK AT THE DOT",
+        VrCalibrationPhase.Error => "ERROR",
+        VrCalibrationPhase.Complete => "DONE",
+        _ => frame.Phase.ToString().ToUpperInvariant(),
+    };
+
+    private void UploadLocked(SKBitmap bitmap, VrCalibrationFrame frame)
+    {
+        var error = _overlay!.SetOverlayRaw(
+            _handle, bitmap.GetPixels(), TextureWidth, TextureHeight, 4);
         ThrowIfError(error, "upload overlay pixels");
 
         // Only after the upload succeeds, so a failed frame leaves this describing what is still on
         // screen. Present() relies on that to tell a retryable cosmetic update from a lost
         // instruction change.
+        SwapSurfacesLocked();
+        _lastUploadTimestamp = Stopwatch.GetTimestamp();
         _lastRendered = frame;
+    }
+
+    /// <summary>
+    /// The fixation dot. Centred on the panel and scaled to its reach, which is roughly +/-20
+    /// degrees horizontally and a narrower band vertically.
+    /// </summary>
+    private static void DrawGazeTarget(SKCanvas canvas, float targetX, float targetY)
+    {
+        var x = TextureWidth / 2f + targetX * 340f;
+        var y = 410f + targetY * 180f;
+        using var halo = new SKPaint { Color = new SKColor(255, 255, 255, 60), IsAntialias = true };
+        using var dot = new SKPaint { Color = new SKColor(255, 224, 72), IsAntialias = true };
+        canvas.DrawCircle(x, y, 43, halo);
+        canvas.DrawCircle(x, y, 19, dot);
     }
 
     private static void DrawProgress(
@@ -457,27 +673,35 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
             canvas.DrawRoundRect(new SKRect(x, y, x + fill, y + height), height / 2, height / 2, foreground);
     }
 
+    private static void DrawButton(SKCanvas canvas, string label, ButtonRect rect, SKColor color)
+    {
+        DrawButton(canvas, label, rect.Left, rect.Top, rect.Right - rect.Left, color,
+            rect.Bottom - rect.Top);
+    }
+
     private static void DrawButton(
-        SKCanvas canvas, string label, float x, float y, float width, SKColor color)
+        SKCanvas canvas, string label, float x, float y, float width, SKColor color,
+        float height = 58)
     {
         using var fill = new SKPaint { Color = color.WithAlpha(55), IsAntialias = true };
         using var stroke = new SKPaint
         {
             Color = color, IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 2,
         };
-        var rect = new SKRect(x, y, x + width, y + 58);
+        var rect = new SKRect(x, y, x + width, y + height);
         canvas.DrawRoundRect(rect, 10, 10, fill);
         canvas.DrawRoundRect(rect, 10, 10, stroke);
-        DrawCenteredText(canvas, label, x + width / 2, y + 39, 25, color, true);
+        DrawCenteredText(canvas, label, x + width / 2, y + height / 2 + 9, 25, color, true);
     }
 
     private static void DrawWrappedText(
         SKCanvas canvas, string text, float x, float y, float maxWidth, float size,
-        SKColor color, float lineHeight)
+        SKColor color, float lineHeight, int maxLines = int.MaxValue)
     {
         using var paint = TextPaint(size, color, false);
         var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         var line = "";
+        var drawn = 0;
         foreach (var word in words)
         {
             var candidate = line.Length == 0 ? word : $"{line} {word}";
@@ -487,11 +711,28 @@ public sealed class OpenVrCalibrationPresenter : IVrCalibrationPresenter
                 continue;
             }
 
+            // The compact panel is cropped, so an over-long instruction would otherwise be drawn
+            // into the part of the texture nobody can see - silently truncated with no ellipsis to
+            // say so.
+            if (drawn + 1 >= maxLines)
+            {
+                canvas.DrawText(Ellipsize(line + " ...", paint, maxWidth), x, y, paint);
+                return;
+            }
+
             canvas.DrawText(line, x, y, paint);
+            drawn++;
             y += lineHeight;
             line = word;
         }
         if (line.Length > 0) canvas.DrawText(line, x, y, paint);
+    }
+
+    private static string Ellipsize(string text, SKPaint paint, float maxWidth)
+    {
+        while (text.Length > 4 && paint.MeasureText(text) > maxWidth)
+            text = text[..(text.Length - 5)] + " ...";
+        return text;
     }
 
     private static void DrawText(

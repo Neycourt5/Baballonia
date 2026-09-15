@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
@@ -93,6 +93,28 @@ public class ParameterSenderOverrideTest
 
     private static float[] Ramp() => Enumerable.Range(0, N).Select(i => i / (float)(N - 1)).ToArray();
 
+    /// <summary>
+    /// The face vector as the pipeline actually hands it over: an OrderedFloatMap keyed by OSC
+    /// address, in canonical schema order.
+    /// </summary>
+    private static OrderedFloatMap FaceMap(float[] values)
+    {
+        var map = new OrderedFloatMap(PersonalizationSchemaBinding.ExpectedKeys.ToArray());
+        values.AsSpan(0, N).CopyTo(map.ValuesSpan);
+        return map;
+    }
+
+    /// <summary>The six-value eye layout the stock eye model produces, keyed as the runner keys it.</summary>
+    private static readonly string[] EyeKeys =
+        ["/rightEyeY", "/rightEyeX", "/rightEyeLid", "/leftEyeY", "/leftEyeX", "/leftEyeLid"];
+
+    private static OrderedFloatMap EyeMap(params float[] values)
+    {
+        var map = new OrderedFloatMap(EyeKeys);
+        values.CopyTo(map.ValuesSpan);
+        return map;
+    }
+
     private ParameterSenderService CreateService(VrcftModuleSendService vrcftSender)
     {
         var loop = (ProcessingLoopService)RuntimeHelpers.GetUninitializedObject(typeof(ProcessingLoopService));
@@ -138,9 +160,7 @@ public class ParameterSenderOverrideTest
         Invoke("EnqueueRawFaceVector", Ramp());
 
         var addresses = Queue.Select(m => m.Address).ToList();
-        var expected = PersonalizationSchema.ExpressionNames
-            .Select(n => _service.FaceExpressionMap[n])
-            .ToList();
+        var expected = PersonalizationSchemaBinding.ExpectedKeys.ToList();
 
         CollectionAssert.AreEqual(expected, addresses,
             "Override addresses must follow the same positional schema the model and labels use.");
@@ -165,7 +185,7 @@ public class ParameterSenderOverrideTest
     {
         SetOverrideActive(true);
 
-        Invoke("ProcessFaceExpressionData", Ramp());
+        Invoke("ProcessFaceExpressionData", FaceMap(Ramp()));
 
         Assert.IsTrue(Queue.IsEmpty,
             "Live tracked face values must not compete with commanded calibration targets.");
@@ -176,7 +196,7 @@ public class ParameterSenderOverrideTest
     {
         SetOverrideActive(true);
 
-        Invoke("ProcessEyeExpressionData", new float[] { 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f });
+        Invoke("ProcessEyeExpressionData", EyeMap(0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f), null!);
 
         Assert.IsFalse(Queue.IsEmpty,
             "Calibration overrides the face channel only; eye tracking must be unaffected.");
@@ -188,13 +208,16 @@ public class ParameterSenderOverrideTest
     [TestMethod]
     public void LegacySixEyeVector_StillUsesDefaultCalibrationPath()
     {
-        Invoke("ProcessEyeExpressionData", new[] { 0.2f, 0.4f, 0.6f, 0.8f, 1f, 0.5f });
+        // Layout is right-eye-first: [rightY, rightX, rightLid, leftY, leftX, leftLid].
+        Invoke("ProcessEyeExpressionData", EyeMap(0.2f, 0.4f, 0.6f, 0.8f, 1f, 0.5f), null!);
 
         var sent = DrainByAddress();
         Assert.AreEqual(6, sent.Count);
-        Assert.AreEqual(0.1f, sent["/LeftEyeX"], 1e-6);
-        Assert.AreEqual(0.3f, sent["/LeftEyeLid"], 1e-6);
-        Assert.IsFalse(sent.ContainsKey("/LeftEyeWiden"));
+        // The mocked calibration halves everything, and the eye path still goes through it.
+        Assert.AreEqual(0.5f, sent["/leftEyeX"], 1e-6);
+        Assert.AreEqual(0.25f, sent["/leftEyeLid"], 1e-6);
+        Assert.IsFalse(sent.ContainsKey("/leftEyeWiden"),
+            "A six-output model must not invent widen/squint channels.");
     }
 
     [TestMethod]
@@ -202,7 +225,7 @@ public class ParameterSenderOverrideTest
     {
         SetOverrideActive(false);
 
-        Invoke("ProcessFaceExpressionData", Ramp());
+        Invoke("ProcessFaceExpressionData", FaceMap(Ramp()));
 
         var sent = DrainByAddress();
         Assert.AreEqual(N, sent.Count);
@@ -216,11 +239,11 @@ public class ParameterSenderOverrideTest
     public void ClearingOverride_RestoresTrackedFaceOutputImmediately()
     {
         SetOverrideActive(true);
-        Invoke("ProcessFaceExpressionData", Ramp());
+        Invoke("ProcessFaceExpressionData", FaceMap(Ramp()));
         Assert.IsTrue(Queue.IsEmpty);
 
         SetOverrideActive(false);
-        Invoke("ProcessFaceExpressionData", Ramp());
+        Invoke("ProcessFaceExpressionData", FaceMap(Ramp()));
 
         Assert.AreEqual(N, Queue.Count, "Live face tracking must resume on the next frame.");
     }

@@ -1,3 +1,4 @@
+﻿using System;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -20,6 +21,15 @@ public partial class AppSettingsView : ViewBase
     private readonly NumericUpDown _selectedMinFreqCutoffUpDown;
     private readonly NumericUpDown _selectedSpeedCutoffUpDown;
 
+    /// <summary>
+    /// Polls BlinkGuard's live state for the diagnostics box.
+    /// </summary>
+    /// <remarks>
+    /// Four times a second, not per frame: this is a settings page, and the tracking loop must not
+    /// gain a UI dependency. Stopped on unload so a closed page costs nothing.
+    /// </remarks>
+    private readonly DispatcherTimer _blinkGuardTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
+
     public AppSettingsView()
     {
         InitializeComponent();
@@ -34,6 +44,14 @@ public partial class AppSettingsView : ViewBase
 
         _selectedMinFreqCutoffUpDown = this.Find<NumericUpDown>("SelectedMinFreqCutoffUpDown")!;
         _selectedSpeedCutoffUpDown = this.Find<NumericUpDown>("SelectedSpeedCutoffUpDown")!;
+
+        _blinkGuardTimer.Tick += (_, _) =>
+        {
+            if (DataContext is AppSettingsViewModel vm)
+                vm.RefreshBlinkGuardDiagnostics();
+        };
+        _blinkGuardTimer.Start();
+        Unloaded += (_, _) => _blinkGuardTimer.Stop();
 
         UpdateThemes();
 

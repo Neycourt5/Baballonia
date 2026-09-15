@@ -1,4 +1,4 @@
-using Baballonia.Desktop.Calibration;
+﻿using Baballonia.Desktop.Calibration;
 using Baballonia.Services.Calibration;
 using JetBrains.Annotations;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -86,5 +86,65 @@ public class OverlayFailureToleranceTest
     {
         // The first frame of a session has no predecessor to fall back to, so it must land.
         Assert.IsFalse(OpenVrCalibrationPresenter.IsCosmeticUpdate(OnScreen(), null));
+    }
+}
+
+/// <summary>
+/// What the overlay is allowed to delay, now that cosmetic-only updates are rate-limited.
+/// </summary>
+/// <remarks>
+/// The overlay was re-uploading a three-megabyte texture about sixteen times a second to nudge a
+/// progress bar, and the user reported it as visible flashing. Cosmetic updates are now held to a
+/// minimum interval — which is only safe because "cosmetic" excludes everything the user has to
+/// act on. These pin the classification the throttle depends on, and the gaze dot in particular,
+/// since a dot that moved late would be recorded against the position it moved *from*.
+/// </remarks>
+[TestClass]
+[TestSubject(typeof(OpenVrCalibrationPresenter))]
+public class OverlayUpdateThrottleTest
+{
+    private static VrCalibrationFrame Target() => new(
+        "EYE PERSONALIZATION", "Look at the dot and hold still.", VrCalibrationPhase.Target,
+        OverallProgress: 0.3, PhaseProgress: 0.2, TargetX: 0.4f, TargetY: -0.2f);
+
+    [TestMethod]
+    public void AMovingDotIsNeverTreatedAsCosmetic()
+    {
+        var onScreen = Target();
+
+        Assert.IsFalse(OpenVrCalibrationPresenter.IsCosmeticUpdate(
+            onScreen with { TargetX = -0.4f }, onScreen),
+            "a delayed dot would be recorded against the position it moved from");
+        Assert.IsFalse(OpenVrCalibrationPresenter.IsCosmeticUpdate(
+            onScreen with { TargetY = 0.3f }, onScreen));
+    }
+
+    [TestMethod]
+    public void ADotAppearingOrVanishingIsNeverCosmetic()
+    {
+        var onScreen = Target();
+
+        Assert.IsFalse(OpenVrCalibrationPresenter.IsCosmeticUpdate(
+            onScreen with { TargetX = null, TargetY = null }, onScreen));
+        Assert.IsFalse(OpenVrCalibrationPresenter.IsCosmeticUpdate(
+            onScreen, onScreen with { TargetX = null, TargetY = null }));
+    }
+
+    [TestMethod]
+    public void OnlyTheProgressBarMovingIsCosmetic()
+    {
+        // This is the case the throttle exists for: during a hold, nothing changes but the bar.
+        var onScreen = Target();
+
+        Assert.IsTrue(OpenVrCalibrationPresenter.IsCosmeticUpdate(
+            onScreen with { PhaseProgress = 0.9, OverallProgress = 0.35 }, onScreen));
+    }
+
+    [TestMethod]
+    public void NothingIsCosmeticAgainstABlankScreen()
+    {
+        // On the first frame there is nothing on screen to compare against, so it must go up
+        // immediately rather than being held back as a "small change".
+        Assert.IsFalse(OpenVrCalibrationPresenter.IsCosmeticUpdate(Target(), null));
     }
 }

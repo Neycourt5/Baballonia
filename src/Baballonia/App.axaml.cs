@@ -1,4 +1,4 @@
-using Avalonia;
+﻿using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Threading;
@@ -13,6 +13,7 @@ using Baballonia.Services.Inference.Platforms;
 using Baballonia.Services.Calibration;
 using Baballonia.Services.Personalization;
 using Baballonia.Services.Personalization.Audio;
+using Baballonia.Services.Personalization.C2;
 using Baballonia.ViewModels;
 using Baballonia.ViewModels.SplitViewPane;
 using Baballonia.Views;
@@ -35,6 +36,7 @@ public partial class App : Application
 {
     private IHost? _host;
     private bool IsTeardDown = false;
+    private volatile bool _shuttingDown;
     private static Action<IServiceCollection> ConfigurePlatformServices { get; set; }
     private static Action<IServiceCollection>? _platformSpecifficServices;
 
@@ -79,6 +81,9 @@ public partial class App : Application
 
     public override void OnFrameworkInitializationCompleted()
     {
+        AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
+        TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+
         var locator = new ViewLocator();
         DataTemplates.Add(locator);
 
@@ -104,14 +109,21 @@ public partial class App : Application
 
             services.AddSingleton<IActivationService, ActivationService>();
             services.AddSingleton<IDispatcherService, DispatcherService>();
+            services.AddSingleton<PipelineMetrics>();
+            services.AddSingleton<EyeStageTrace>();
+            services.AddSingleton<ThreadProfiler>();
             services.AddSingleton<ProcessingLoopService>();
 
             services.AddSingleton<InferenceFactory>();
             services.AddSingleton<FaceProcessingPipeline>();
             services.AddSingleton<FacePipelineManager>();
+            services.AddSingleton<ICameraSlotHost>(provider =>
+                provider.GetRequiredService<FacePipelineManager>());
             services.AddSingleton<IFacePipelineEventBus, FacePipelineEventBus>();
             services.AddSingleton<EyeProcessingPipeline>();
             services.AddSingleton<EyePipelineManager>();
+            services.AddSingleton<ICameraSlotHost>(provider =>
+                provider.GetRequiredService<EyePipelineManager>());
             services.AddSingleton<IEyePipelineEventBus, EyePipelineEventBus>();
             services.TryAddSingleton<IVrCalibrationPresenter, NullVrCalibrationPresenter>();
             services.AddSingleton<SingleCameraSourceFactory>();
@@ -127,11 +139,37 @@ public partial class App : Application
             services.AddSingleton<CueStateSource>();
             services.AddSingleton<IReadOnlyCueStateSource>(sp => sp.GetRequiredService<CueStateSource>());
             services.AddSingleton<GuidedCalibrationService>();
+            services.AddSingleton<EyeCalibrationLibrary>();
+            services.AddSingleton<EyeCalibrationRecorder>();
+
+            // Personalized eye correction: guided capture and its dataset writer. Inert until a
+            // capture is started.
+            services.AddSingleton<Baballonia.Services.Personalization.Eye.EyeDatasetRecorder>();
+            services.AddSingleton<Baballonia.Services.Personalization.Eye.EyeGuidedCaptureService>();
+            services.AddSingleton<Baballonia.Services.Personalization.Eye.EyePersonalizationManager>();
 
             services.AddSingleton<TrainingCaptureGate>();
             services.AddSingleton<DatasetRecorderService>();
             services.AddSingleton<GrimacePreviewService>();
+
+            // The smile lab is the same service pointed at a different catalogue, so it is keyed
+            // rather than duplicated. Its confirmation is stored under its own settings key, so the
+            // two labs cannot overwrite each other's chosen pose.
+            services.AddKeyedSingleton<GrimacePreviewService>(
+                PersonalizationViewModel.SmileLabKey,
+                (provider, _) => new GrimacePreviewService(
+                    provider.GetRequiredService<ExpressionOverrideService>(),
+                    provider.GetRequiredService<TrainingCaptureGate>(),
+                    provider.GetRequiredService<ILocalSettingsService>(),
+                    provider.GetRequiredService<IVrCalibrationPresenter>(),
+                    provider.GetRequiredService<ILogger<GrimacePreviewService>>(),
+                    SmileCandidateCatalog.Catalog));
             services.AddSingleton<PersonalModelManager>();
+            services.AddHostedService<PersonalModelStartupService>();
+            services.AddSingleton<C2RuntimeContext>();
+            services.AddSingleton<C2ModelManager>();
+            services.AddHostedService(sp => sp.GetRequiredService<C2ModelManager>());
+
             services.AddSingleton<PersonalizationEnvironment>();
             services.AddSingleton<PersonalTrainingService>();
 
@@ -189,8 +227,13 @@ public partial class App : Application
             services.AddTransient<AppSettingsView>();
             services.AddTransient<AboutPageViewModel>();
             services.AddTransient<AboutPageView>();
+            services.AddTransient<DebugViewModel>();
+            services.AddTransient<DebugView>();
             services.AddTransient<PersonalizationViewModel>();
+            services.AddTransient<C2ViewModel>();
             services.AddTransient<PersonalizationView>();
+            services.AddTransient<EyePersonalizationViewModel>();
+            services.AddTransient<EyePersonalizationView>();
 
             if (Utils.IsSupportedDesktopOS)
             {
@@ -208,6 +251,9 @@ public partial class App : Application
             ConfigurePlatformServices.Invoke(services);
             _platformSpecifficServices?.Invoke(services);
 
+            services.AddHostedService(provider => provider.GetService<ThreadProfiler>()!);
+            services.AddSingleton<CameraWatchdogService>();
+            services.AddHostedService(provider => provider.GetRequiredService<CameraWatchdogService>());
             services.AddHostedService(provider => provider.GetService<OscRecvService>()!);
             services.AddHostedService(provider => provider.GetService<ParameterSenderService>()!);
 
@@ -281,8 +327,29 @@ public partial class App : Application
                 desktop.MainWindow.Loaded += (_, _) => { desktop.MainWindow.ShowOnboardingIfNeeded(); };
                 desktop.Exit += (s, e) =>
                 {
-                    OnShutdown(s, e);
-                    _host.Dispose();
+                    OnShutdown(s, e); // flushes settings synchronously (ForceSave) + teardown
+
+                    // On Windows the OpenCV/DirectShow camera capture wedges its native Read()/Release()
+                    // during teardown, leaving a thread the OS can't reap; a graceful _host.Dispose()
+                    // then waits on it forever, so the process lingers in the background after the window
+                    // closes (you'd have to End Task it). Try a bounded graceful dispose, then
+                    // force-terminate: TerminateProcess reaps the wedged camera thread that a cooperative
+                    // exit (ExitProcess) cannot. Linux's V4L2/GStreamer capture unblocks cleanly, so it
+                    // keeps the normal graceful path.
+                    if (OperatingSystem.IsWindows())
+                    {
+                        var settings = Ioc.Default.GetService<ILocalSettingsService>();
+                        Task.Run(() => { try { _host.Dispose(); } catch { /* ignore */ } })
+                            .Wait(TimeSpan.FromSeconds(2));
+                        // Final atomic flush right before force-terminate: captures anything changed
+                        // during dispose and cancels the debounce so no write is mid-flight at Kill.
+                        try { settings?.ForceSave(); } catch { /* best effort */ }
+                        System.Diagnostics.Process.GetCurrentProcess().Kill();
+                    }
+                    else
+                    {
+                        _host.Dispose();
+                    }
                 };
                 desktop.ShutdownRequested += OnShutdown;
                 break;
@@ -297,6 +364,7 @@ public partial class App : Application
     private void OnShutdown(object? sender, EventArgs e)
     {
         if (ApplicationLifetime is not IClassicDesktopStyleApplicationLifetime) return;
+        _shuttingDown = true;
         if (IsTeardDown) return;
 
         var mainService = Ioc.Default.GetService<IMainService>();
@@ -305,5 +373,38 @@ public partial class App : Application
 
         mainService?.Teardown();
         IsTeardDown = true;
+    }
+
+    private void OnUnhandledException(object? sender, UnhandledExceptionEventArgs e)
+    {
+        var ex = e.ExceptionObject as Exception;
+
+        // Benign Avalonia/Linux DBus-vs-dispatcher teardown race at exit; exit cleanly, don't abort.
+        if ((_shuttingDown || IsTeardDown) && IsBenignCancellation(ex))
+        {
+            Environment.Exit(0);
+            return;
+        }
+
+        SafeLogError(ex, "Unhandled exception");
+    }
+
+    private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
+    {
+        SafeLogError(e.Exception, "Unobserved task exception");
+        e.SetObserved();
+    }
+
+    private static bool IsBenignCancellation(Exception? ex) => ex switch
+    {
+        OperationCanceledException => true,
+        AggregateException agg => agg.Flatten().InnerExceptions.All(i => i is OperationCanceledException),
+        _ => false
+    };
+
+    private static void SafeLogError(Exception? ex, string message)
+    {
+        try { Ioc.Default.GetService<ILogger<App>>()?.LogError(ex, message); }
+        catch { Console.Error.WriteLine($"{message}: {ex}"); }
     }
 }

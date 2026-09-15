@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -105,7 +105,7 @@ public class EmbeddingRunnerTest
 
         var result = runner.Run();
         Assert.IsNotNull(result);
-        Assert.AreEqual(PersonalizationSchema.ExpressionCount, result.Length);
+        Assert.AreEqual(PersonalizationSchema.ExpressionCount, result.Count);
     }
 
     [TestMethod]
@@ -127,7 +127,7 @@ public class EmbeddingRunnerTest
         var embedding = runner.GetEmbedding();
 
         Assert.IsNotNull(expressions);
-        Assert.AreEqual(PersonalizationSchema.ExpressionCount, expressions.Length);
+        Assert.AreEqual(PersonalizationSchema.ExpressionCount, expressions.Count);
         Assert.IsNotNull(embedding, "the derived model should have produced an embedding");
         Assert.AreEqual(1280, embedding.Length);
         Assert.IsTrue(embedding.ToArray().All(float.IsFinite));
@@ -161,13 +161,13 @@ public class EmbeddingRunnerTest
             derived.InputTensor.SetValue(i, value);
         }
 
-        var expected = stock.Run();
-        var actual = derived.Run();
+        var expected = stock.Run()?.Values.ToArray();
+        var actual = derived.Run()?.Values.ToArray();
 
         Assert.IsNotNull(expected);
         Assert.IsNotNull(actual);
-        for (var i = 0; i < expected.Length; i++)
-            Assert.AreEqual(expected[i], actual[i], 0f,
+        for (var i = 0; i < expected!.Length; i++)
+            Assert.AreEqual(expected[i], actual![i], 0f,
                 $"expression {i} differs between the stock and derived models");
     }
 
@@ -188,7 +188,7 @@ public class EmbeddingRunnerTest
         runner.Setup(StockModelPath, useGpu: false);
 
         Assert.IsNull(runner.GetEmbedding());
-        Assert.AreEqual(PersonalizationSchema.ExpressionCount, runner.Run()!.Length,
+        Assert.AreEqual(PersonalizationSchema.ExpressionCount, runner.Run()!.Count,
             "expressions must still come out normally");
     }
 }

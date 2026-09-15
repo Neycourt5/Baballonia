@@ -290,7 +290,14 @@ public class GuidedCaptureRoutineTest
 
             foreach (var dim in cue.Dims)
             {
-                Assert.IsTrue(holds.Any(h => h.To[dim] > 0), $"{cue.Id} never commands {dim} on");
+                // A suppressed dimension is cued at zero on purpose - it is part of the pose being
+                // held rather than the expression being exercised - so requiring it to be commanded
+                // on would be requiring the opposite of what it is for.
+                if (cue.Exercises(dim))
+                    Assert.IsTrue(holds.Any(h => h.To[dim] > 0), $"{cue.Id} never commands {dim} on");
+                else
+                    Assert.IsTrue(holds.All(h => h.To[dim] == 0), $"{cue.Id} should hold {dim} down");
+
                 Assert.IsTrue(rests.All(r => r.To[dim] == 0), $"{cue.Id} rests do not release {dim}");
             }
         }

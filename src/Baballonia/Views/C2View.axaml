@@ -1,0 +1,68 @@
+<UserControl xmlns="https://github.com/avaloniaui" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Baballonia.ViewModels.SplitViewPane"
+             x:Class="Baballonia.Views.C2View" x:DataType="vm:C2ViewModel">
+  <StackPanel Spacing="12" Margin="0,8">
+    <TextBlock Text="{Binding UsingNow}" FontWeight="SemiBold" TextWrapping="Wrap" />
+    <TextBlock Text="{Binding Status}" TextWrapping="Wrap" />
+    <Border Padding="12" CornerRadius="8" Background="{DynamicResource SystemChromeMediumLowColor}">
+      <StackPanel Spacing="8">
+        <TextBlock Text="Next action" FontWeight="SemiBold" />
+        <TextBlock Text="{Binding NextAction}" TextWrapping="Wrap" />
+        <TextBlock Text="{Binding RecordingState}" FontWeight="SemiBold" TextWrapping="Wrap" />
+        <TextBlock Text="Recordings stay on this computer. C2 uses reviewed holds and keeps unlabelled expressions with your working C. Training does not select a candidate." TextWrapping="Wrap" Opacity="0.8" />
+      </StackPanel>
+    </Border>
+    <Expander Header="Your recordings and what is still needed" HorizontalAlignment="Stretch">
+      <StackPanel Spacing="8">
+        <TextBlock Text="{Binding Coverage}" TextWrapping="Wrap" />
+        <Button Content="Refresh recordings" Command="{Binding RefreshCommand}" IsEnabled="{Binding !IsBusy}" />
+      </StackPanel>
+    </Expander>
+    <StackPanel Spacing="8" IsEnabled="{Binding !IsRecording}">
+      <TextBlock Text="Choose a short task" FontWeight="SemiBold" />
+      <ComboBox ItemsSource="{Binding Tasks}" SelectedItem="{Binding SelectedTask}" HorizontalAlignment="Stretch" IsEnabled="{Binding !IsBusy}" />
+      <TextBlock Text="{Binding SelectedTask.Purpose}" TextWrapping="Wrap" />
+    </StackPanel>
+    <TextBlock Text="{Binding Instruction}" TextWrapping="Wrap" FontSize="18" />
+    <WrapPanel>
+      <Button Margin="0,0,8,8" Content="Record this attempt" Command="{Binding RecordCommand}" IsEnabled="{Binding !IsBusy}" IsVisible="{Binding !IsRecording}" />
+      <Button Margin="0,0,8,8" Content="Pause / continue later" Command="{Binding PauseCommand}" IsVisible="{Binding IsRecording}" />
+    </WrapPanel>
+    <TextBlock Text="A short countdown precedes each hold. Values are approximate cues, not measured anatomy. If you cannot follow a task naturally, skip it; optional tasks are not required to train." TextWrapping="Wrap" Opacity="0.8" />
+    <CheckBox Content="Show instructions in the headset when available" IsChecked="{Binding UseHeadsetInstructions}" IsEnabled="{Binding !IsRecording}" />
+    <Expander Header="Separate wearing sessions and check recordings" HorizontalAlignment="Stretch" IsEnabled="{Binding !IsRecording}">
+      <StackPanel Spacing="8" IsEnabled="{Binding !IsBusy}">
+        <CheckBox Content="Check-only — keep separate from practice used to teach C2" IsChecked="{Binding CheckOnly}" />
+        <TextBlock Text="Leave unchecked for practice. For a check, take the headset off and put it back on, then use the button below. Stop/Start and restarting the app do not create independent evidence." TextWrapping="Wrap" Opacity="0.8" />
+        <Button Content="I have reseated the headset — start a new wearing session" Command="{Binding NewWearingSessionCommand}" />
+      </StackPanel>
+    </Expander>
+    <TextBlock Text="Review saved attempts and existing recordings" FontWeight="SemiBold" />
+    <ComboBox ItemsSource="{Binding Recordings}" SelectedItem="{Binding SelectedRecording}" HorizontalAlignment="Stretch" />
+    <TextBlock Text="{Binding RecordingExplanation}" TextWrapping="Wrap" />
+    <WrapPanel IsEnabled="{Binding !IsBusy}">
+      <Button Margin="0,0,8,8" Content="Accept hold / reuse existing for replay" Command="{Binding AcceptCommand}" />
+      <Button Margin="0,0,8,8" Content="Missed / not shown correctly / skip" Command="{Binding ExcludeCommand}" />
+    </WrapPanel>
+    <TextBlock Text="Accept a new hold only if you actually made the displayed movement. Existing recordings are reused for preservation/replay; old neutral labels and closed-lip corrections do not become verified zeros. Excluding keeps the original files. Retry with Record this attempt." TextWrapping="Wrap" Opacity="0.8" />
+    <TextBlock Text="Candidate and comparison" FontWeight="SemiBold" />
+    <TextBlock Text="{Binding CandidateStatus}" TextWrapping="Wrap" />
+    <ComboBox ItemsSource="{Binding Candidates}" SelectedItem="{Binding SelectedCandidate}" HorizontalAlignment="Stretch" />
+    <WrapPanel IsEnabled="{Binding !IsBusy}">
+      <Button Margin="0,0,8,8" Content="Compare selected report" Command="{Binding CompareCommand}" />
+      <Button Margin="0,0,8,8" Content="Try C2 for 60 seconds" Command="{Binding TryCandidateCommand}" />
+      <Button Margin="0,0,8,8" Content="Keep using this C2" Command="{Binding KeepCandidateCommand}" />
+      <Button Margin="0,0,8,8" Content="Return to Model C" Command="{Binding ReturnToCurrentCommand}" />
+    </WrapPanel>
+    <TextBlock Text="Like the trial? Select Keep using this C2 to keep the selected candidate active and load it again on restart. Return to Model C turns C2 off. You can adjust calibration for expressions this C2 leaves with Model C. Changes to its corrected expressions, reference model, camera or smoothing settings require the recorded settings." TextWrapping="Wrap" Opacity="0.8" />
+    <TextBlock Text="Audio Assist can stay on with a kept C2 and is applied after its visual correction. Comparison reports cover visual correction only; recording, training and temporary comparison trials require Audio Assist off." TextWrapping="Wrap" Opacity="0.8" />
+    <WrapPanel>
+      <Button Margin="0,0,8,8" Content="Train C2 experimental candidate" Command="{Binding TrainCommand}" IsEnabled="{Binding !IsBusy}" />
+      <Button Margin="0,0,8,8" Content="Cancel training" Command="{Binding CancelTrainingCommand}" IsVisible="{Binding IsBusy}" />
+    </WrapPanel>
+    <TextBlock Text="Training needs accepted practice with both relaxed and positive examples. Without independent checks, results remain exploratory. Keep using your current model until comparison and an explicit trial support a change." TextWrapping="Wrap" Opacity="0.8" />
+    <Expander Header="Advanced — local report and operation details" HorizontalAlignment="Stretch">
+      <TextBlock Text="{Binding Details}" TextWrapping="Wrap" FontSize="12" />
+    </Expander>
+  </StackPanel>
+</UserControl>

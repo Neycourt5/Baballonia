@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Channels;
@@ -103,7 +104,10 @@ public sealed class DatasetRecorderService : IDisposable
         SessionType type,
         SessionMetadata.CameraGeometry? camera = null,
         string? notes = null,
-        bool requireRecentSourceFrame = false)
+        bool requireRecentSourceFrame = false,
+        string? datasetRoot = null,
+        C2.C2CaptureContext? c2 = null,
+        IReadOnlyCueStateSource? cueSource = null)
     {
         lock (_sessionLock)
         {
@@ -132,7 +136,8 @@ public sealed class DatasetRecorderService : IDisposable
                 var startedUtc = DateTime.UtcNow;
                 var sessionId = PersonalizationPaths.NewSessionId(type, startedUtc);
 
-                Directory.CreateDirectory(PersonalizationPaths.FramesDirectory(sessionId));
+                var directory = Path.Combine(datasetRoot ?? PersonalizationPaths.DatasetRoot, sessionId);
+                Directory.CreateDirectory(Path.Combine(directory, "frames"));
 
                 var metadata = new SessionMetadata
                 {
@@ -144,10 +149,16 @@ public sealed class DatasetRecorderService : IDisposable
                     ImageHeight = 0,
                     JpegQuality = JpegQuality,
                     Camera = camera,
-                    Notes = notes
+                    Notes = notes,
+                    C2 = c2
                 };
 
-                _session = new RecordingSession(sessionId, metadata, _logger);
+                // Leave enough provenance to recover an interrupted recording. The finalizer
+                // rewrites this file with geometry and counts, but a crash before StopSessionAsync
+                // must not strand otherwise usable frames in an anonymous directory.
+                WriteSessionMetadata(directory, metadata);
+
+                _session = new RecordingSession(sessionId, directory, metadata, _logger, cueSource);
                 _session.Start();
                 _captureLease = captureLease;
 
@@ -180,12 +191,17 @@ public sealed class DatasetRecorderService : IDisposable
             _captureLease = null;
         }
 
-        captureLease?.Dispose();
-
         if (session == null)
+        {
+            captureLease?.Dispose();
             return null;
+        }
 
-        var summary = await session.CompleteAsync();
+        // Dispose can synchronously wait for this method while running on the Avalonia UI thread.
+        // Do not capture that context: the writer must be able to drain and finalize independently.
+        SessionSummary summary;
+        try { summary = await session.CompleteAsync().ConfigureAwait(false); }
+        finally { captureLease?.Dispose(); }
 
         _logger.LogInformation(
             "Personalization: session {SessionId} finished - {Frames} frames, {Fps:F1} unique fps, {Dropped} dropped",
@@ -241,8 +257,35 @@ public sealed class DatasetRecorderService : IDisposable
             _captureLease = null;
         }
 
-        captureLease?.Dispose();
-        session?.CompleteAsync().GetAwaiter().GetResult();
+        try { session?.CompleteAsync().GetAwaiter().GetResult(); }
+        finally { captureLease?.Dispose(); }
+    }
+
+    private static void WriteSessionMetadata(string directory, SessionMetadata metadata)
+    {
+        var path = Path.Combine(directory, "session.json");
+        var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(
+                temporaryPath,
+                JsonSerializer.Serialize(metadata, PersonalizationPaths.IndentedJson),
+                PersonalizationPaths.Utf8NoBom);
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(temporaryPath))
+                    File.Delete(temporaryPath);
+            }
+            catch
+            {
+                // Keep the original write/move exception; a same-directory temp file is harmless
+                // and can be diagnosed without concealing why session.json was not committed.
+            }
+        }
     }
 
     /// <summary>Outcome of a recording, useful for UI display and for tests.</summary>
@@ -259,6 +302,8 @@ public sealed class DatasetRecorderService : IDisposable
         private readonly Channel<CapturedFrame> _channel;
         private readonly SessionMetadata _metadata;
         private readonly ILogger _logger;
+        private readonly string _directory;
+        private readonly IReadOnlyCueStateSource? _cueSource;
         private readonly long _minTicksBetweenFrames = Stopwatch.Frequency / MaxRecordFps;
 
         public string SessionId { get; }
@@ -274,11 +319,14 @@ public sealed class DatasetRecorderService : IDisposable
         private int _imageWidth;
         private int _imageHeight;
 
-        public RecordingSession(string sessionId, SessionMetadata metadata, ILogger logger)
+        public RecordingSession(string sessionId, string directory, SessionMetadata metadata, ILogger logger,
+            IReadOnlyCueStateSource? cueSource)
         {
             SessionId = sessionId;
             _metadata = metadata;
             _logger = logger;
+            _directory = directory;
+            _cueSource = cueSource;
 
             _channel = Channel.CreateBounded<CapturedFrame>(
                 new BoundedChannelOptions(QueueCapacity)
@@ -307,6 +355,9 @@ public sealed class DatasetRecorderService : IDisposable
         /// </summary>
         public void Offer(FacePipelineEvents.NewRawExpressionsEvent e, FrameLabel.CueLabel? cue)
         {
+            if (_metadata.C2 != null && (e.embedding == null ||
+                e.embedding.Length != _metadata.C2.EmbeddingDim || e.inferenceTimestamp <= 0))
+                return; // C2 never silently backfills a missing live feature or invents capture time.
             var now = Stopwatch.GetTimestamp();
 
             if (_lastAcceptedTimestamp != 0 && now - _lastAcceptedTimestamp < _minTicksBetweenFrames)
@@ -332,7 +383,10 @@ public sealed class DatasetRecorderService : IDisposable
                 Image: e.transformedFrame.Clone(),
                 Stock: (float[])e.rawResult.Clone(),
                 TimestampTicks: e.timestampTicks,
-                Cue: cue);
+                Cue: _cueSource != null ? _cueSource.CurrentCue() : cue,
+                Embedding: _metadata.C2 != null ? e.embedding!.ToArray() : null,
+                InferenceTimestamp: _metadata.C2 != null ? e.inferenceTimestamp : 0,
+                SourceFrame: _metadata.C2 != null ? e.sourceFrame : null);
 
             if (!_channel.Writer.TryWrite(captured))
             {
@@ -343,11 +397,14 @@ public sealed class DatasetRecorderService : IDisposable
 
         private async Task WriteLoopAsync()
         {
-            var labelsPath = PersonalizationPaths.LabelsPath(SessionId);
-            var framesDir = PersonalizationPaths.FramesDirectory(SessionId);
+            var labelsPath = Path.Combine(_directory, "labels.jsonl");
+            var framesDir = Path.Combine(_directory, "frames");
             var encodeParams = new[] { new ImageEncodingParam(ImwriteFlags.JpegQuality, JpegQuality) };
 
             await using var labels = new StreamWriter(labelsPath, append: true, PersonalizationPaths.Utf8NoBom);
+            using var embeddings = _metadata.C2 != null
+                ? new BinaryWriter(File.Open(Path.Combine(_directory, "embeddings.f32"), FileMode.CreateNew)) : null;
+            var embeddingRow = 0;
 
             await foreach (var frame in _channel.Reader.ReadAllAsync())
             {
@@ -362,12 +419,21 @@ public sealed class DatasetRecorderService : IDisposable
                     var imagePath = Path.Combine(framesDir, $"{frame.Index:D6}.jpg");
                     frame.Image.SaveImage(imagePath, encodeParams);
 
+                    int? row = null;
+                    if (frame.Embedding != null && embeddings != null)
+                    {
+                        row = embeddingRow++;
+                        foreach (var value in frame.Embedding) embeddings.Write(value);
+                    }
                     var label = new FrameLabel
                     {
                         Index = frame.Index,
                         TimestampTicks = frame.TimestampTicks,
                         Stock = frame.Stock,
-                        Cue = frame.Cue
+                        Cue = frame.Cue,
+                        InferenceTimestamp = frame.InferenceTimestamp,
+                        EmbeddingRow = row,
+                        SourceFrame = frame.SourceFrame
                     };
 
                     await labels.WriteLineAsync(JsonSerializer.Serialize(label, PersonalizationPaths.Json));
@@ -376,6 +442,9 @@ public sealed class DatasetRecorderService : IDisposable
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Personalization: failed writing frame {Index}", frame.Index);
+                    // A partial feature row can shift all following rows. Retain incomplete
+                    // recovery metadata instead of blessing damaged C2 pairs as complete.
+                    if (_metadata.C2 != null) throw;
                 }
                 finally
                 {
@@ -390,8 +459,15 @@ public sealed class DatasetRecorderService : IDisposable
         {
             _channel.Writer.TryComplete();
 
-            if (_writerTask != null)
-                await _writerTask;
+            try
+            {
+                if (_writerTask != null)
+                    await _writerTask.ConfigureAwait(false);
+            }
+            finally
+            {
+                while (_channel.Reader.TryRead(out var pending)) pending.Image.Dispose();
+            }
 
             var elapsedSeconds = _firstFrameTimestamp == 0
                 ? 0d
@@ -416,17 +492,17 @@ public sealed class DatasetRecorderService : IDisposable
                 Camera = _metadata.Camera,
                 Notes = _metadata.Notes,
                 FrameCount = written,
-                EffectiveFps = Math.Round(fps, 2)
+                EffectiveFps = Math.Round(fps, 2),
+                C2 = _metadata.C2
             };
 
-            await File.WriteAllTextAsync(
-                PersonalizationPaths.SessionMetadataPath(SessionId),
-                JsonSerializer.Serialize(finalized, PersonalizationPaths.IndentedJson),
-                PersonalizationPaths.Utf8NoBom);
+            // Preserve the immediately written recovery document until the finalized replacement
+            // is complete. A process interruption during shutdown must not truncate session.json.
+            WriteSessionMetadata(_directory, finalized);
 
             return new SessionSummary(
                 SessionId,
-                PersonalizationPaths.SessionDirectory(SessionId),
+                _directory,
                 written,
                 Volatile.Read(ref _droppedFrames),
                 fps);
@@ -439,7 +515,10 @@ public sealed class DatasetRecorderService : IDisposable
         Mat Image,
         float[] Stock,
         long TimestampTicks,
-        FrameLabel.CueLabel? Cue);
+        FrameLabel.CueLabel? Cue,
+        float[]? Embedding,
+        long InferenceTimestamp,
+        Inference.VideoFrameIdentity? SourceFrame);
 }
 
 /// <summary>

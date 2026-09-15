@@ -28,14 +28,30 @@ namespace Baballonia.Services.Personalization;
 /// can be commanded gently while the primary goes to full - "smile with your mouth a bit open" is a
 /// pose a person can actually hold, whereas both at maximum usually is not.
 /// </param>
+/// <param name="Suppressed">
+/// Dimensions this cue asserts are *absent* while it is held, commanded at zero throughout.
+///
+/// They are still cued - they appear in <see cref="Dims"/> and carry label weight - but they mean
+/// something different from the rest, and the distinction is worth being able to state. An ordinary
+/// cued dimension is the expression being exercised; a suppressed one is part of the pose being held
+/// still, and "keep your teeth together while you smile" is supervision only because it is an
+/// instruction somebody can comply with.
+/// </param>
 public sealed record GuidedCue(
     string Id,
     string DisplayName,
     IReadOnlyList<int> Dims,
     string Action,
     IReadOnlyList<float>? Levels = null,
-    IReadOnlyDictionary<int, float>? DimScale = null)
+    IReadOnlyDictionary<int, float>? DimScale = null,
+    IReadOnlyList<int>? Suppressed = null)
 {
+    /// <summary>Dimensions held at zero for the whole cue, never exercised.</summary>
+    public IReadOnlyList<int> SuppressedDims => Suppressed ?? [];
+
+    /// <summary>Whether this cue exercises a dimension rather than holding it down.</summary>
+    public bool Exercises(int dim) => Dims.Contains(dim) && !SuppressedDims.Contains(dim);
+
     /// <summary>Intensities actually commanded, falling back to the shared default ladder.</summary>
     public IReadOnlyList<float> EffectiveLevels =>
         Levels is { Count: > 0 } ? Levels : GuidedCaptureRoutine.DefaultLevels;
@@ -178,13 +194,67 @@ public static class GuidedCues
         [Ix("MouthPucker"), Ix("JawOpen")],
         "Pucker with your jaw a little open", DimScale: GentleJaw());
 
+    /// <summary>
+    /// A smile with the jaw deliberately held shut, at both intensities.
+    /// </summary>
+    /// <remarks>
+    /// This closes a gap in the corpus that is the likely cause of an ordinary smile arriving as a
+    /// wide open-mouthed grin.
+    ///
+    /// Look at what the other cues teach the jaw during a smile. <see cref="Smile"/> drives only the
+    /// two corners, so JawOpen is *uncued* and the labeller correctly gives it no weight - nothing is
+    /// asserted about it. <see cref="SmileWithJaw"/> drives the jaw at 0.6. So across the whole
+    /// corpus, the only jaw supervision that ever co-occurs with a smile says the jaw is **open**.
+    /// The model is never once shown a smile whose jaw is shut, and it has no reason to learn that
+    /// such a thing exists.
+    ///
+    /// Commanding a dimension to zero is the point rather than a quirk: a scale of 0 puts JawOpen in
+    /// <see cref="GuidedCue.Dims"/>, so it is cued and weighted, with a commanded value of nothing.
+    /// "Keep your teeth together" is an instruction a person can actually comply with, which is what
+    /// makes this a label that was given rather than assumed.
+    /// </remarks>
+    public static GuidedCue SmileJawShut { get; } = new(
+        "SmileShut", "Smile (teeth together)",
+        [Ix("MouthSmileLeft"), Ix("MouthSmileRight"), Ix("JawOpen")],
+        "Smile with your teeth together",
+        DimScale: new Dictionary<int, float> { [Ix("JawOpen")] = 0f },
+        Suppressed: [Ix("JawOpen")]);
+
+    /// <summary>
+    /// The everyday smile that shows a little teeth, with the jaw still shut.
+    /// </summary>
+    /// <remarks>
+    /// The one people actually make at each other, and the one worth getting right. Showing teeth is
+    /// the upper lip lifting rather than the mouth opening, so it cues MouthUpperUp alongside the
+    /// corners - gently, because a smile that bares the full upper gum is a different expression and
+    /// belongs to the grimace cues.
+    ///
+    /// The jaw is pinned shut here for the same reason as above.
+    /// </remarks>
+    public static GuidedCue SmileTeeth { get; } = new(
+        "SmileTeeth", "Smile with teeth",
+        [
+            Ix("MouthSmileLeft"), Ix("MouthSmileRight"),
+            Ix("MouthUpperUpLeft"), Ix("MouthUpperUpRight"),
+            Ix("JawOpen"),
+        ],
+        "Smile showing some teeth, jaw closed",
+        DimScale: new Dictionary<int, float>
+        {
+            [Ix("MouthUpperUpLeft")] = 0.7f,
+            [Ix("MouthUpperUpRight")] = 0.7f,
+            [Ix("JawOpen")] = 0f,
+        },
+        Suppressed: [Ix("JawOpen")]);
+
     // ---- passes --------------------------------------------------------------------------------
 
     /// <summary>Everything, for the picker.</summary>
     public static IReadOnlyList<GuidedCue> All { get; } =
     [
         JawOpen, Smile, Frown, Pucker, Funnel, MouthLeft, MouthRight, TongueOut,
-        SmileLeft, SmileRight, SmileWithJaw, FrownWithJaw, PuckerWithJaw
+        SmileLeft, SmileRight, SmileJawShut, SmileTeeth,
+        SmileWithJaw, FrownWithJaw, PuckerWithJaw
     ];
 
     /// <summary>
@@ -200,6 +270,20 @@ public static class GuidedCues
     public static IReadOnlyList<GuidedCue> CombinationPass { get; } =
     [
         SmileWithJaw, FrownWithJaw, PuckerWithJaw
+    ];
+
+    /// <summary>
+    /// The smile pass: the same expression at every size and with the jaw both shut and open.
+    /// </summary>
+    /// <remarks>
+    /// Worth running on its own when smiles specifically are wrong, which is a common enough
+    /// complaint to deserve a short routine rather than a full pass. The ordering matters: the two
+    /// jaw-shut cues come first and the open-jaw one last, so the session ends having taught that a
+    /// smile *can* open the mouth rather than that it never does.
+    /// </remarks>
+    public static IReadOnlyList<GuidedCue> SmilePass { get; } =
+    [
+        SmileJawShut, SmileTeeth, Smile, SmileWithJaw
     ];
 
     /// <summary>Lookup by <see cref="GuidedCue.Id"/>, for restoring a saved picker selection.</summary>

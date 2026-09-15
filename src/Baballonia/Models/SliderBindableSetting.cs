@@ -18,7 +18,7 @@ public partial class SliderBindableSetting : ObservableObject
         Name = name;
         Lower = lower;
         Upper = upper;
-        Min = max;
-        Max = min;
+        Min = min;
+        Max = max;
     }
 }

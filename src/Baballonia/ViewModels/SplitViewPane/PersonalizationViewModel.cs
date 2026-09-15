@@ -16,6 +16,7 @@ using Baballonia.Services.Personalization;
 using Baballonia.Services.Personalization.Audio;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using OpenCvSharp;
 
@@ -42,7 +43,21 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     private readonly HardExampleService? _hardExamples;
     private readonly GuidedCalibrationService? _guided;
     private readonly AudioAssistService? _audio;
+    /// <summary>The key the smile lab's preview service is registered under.</summary>
+    public const string SmileLabKey = "smile-lab";
+
     private readonly GrimacePreviewService? _grimace;
+
+    /// <summary>
+    /// The smile lab: the same preview service pointed at a different catalogue.
+    /// </summary>
+    /// <remarks>
+    /// A second instance rather than a second implementation. The two labs ask different questions -
+    /// grimace asks what an expression is, smile asks how much of one there should be - but playing
+    /// a pose on the avatar and recording which one somebody chose is identical work, and a fork of
+    /// it would drift.
+    /// </remarks>
+    private readonly GrimacePreviewService? _smile;
 
     /// <summary>
     /// Ticks the cue engine while a guided session runs. Faster than the status timer because it
@@ -51,6 +66,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     /// </summary>
     private readonly DispatcherTimer _guidedTimer;
     private readonly DispatcherTimer _grimaceTimer;
+    private readonly DispatcherTimer _smileTimer;
 
     private readonly Action<FacePipelineEvents.NewTransformedFrameEvent> _frameHandler;
     private readonly Action<FacePipelineEvents.NewRawExpressionsEvent> _rawHandler;
@@ -60,6 +76,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     private WriteableBitmap? _backingBitmap;
     private CancellationTokenSource? _workCancellation;
     private bool _lastObservedModelActive;
+    private string? _lastObservedC2Name;
     private bool _lastRecorderFrameReady;
 
     // Latest values, written on the processing tick and drained by the timer. Binding at the tick
@@ -174,6 +191,20 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         "Grimace is not trainable until you preview and explicitly confirm one candidate.";
     private string? _appliedGrimaceCandidateId;
 
+    // ---- Smile candidate lab ---------------------------------------------------------------
+
+    [ObservableProperty] private bool _isSmilePreviewing;
+    [ObservableProperty] private bool _canStartSmilePreview;
+    [ObservableProperty] private bool _canConfirmSmile;
+    [ObservableProperty] private bool _hasConfirmedSmile;
+    [ObservableProperty] private string _smileStatus =
+        "Preview each smile on your avatar and pick the one that looks like your ordinary smile.";
+    [ObservableProperty] private string _smileCandidateDetails =
+        "No candidate is active. Nothing is being recorded.";
+    [ObservableProperty] private string _smileConfirmationStatus =
+        "Smile shaping is not trained until you preview and confirm one candidate.";
+    private string? _appliedSmileCandidateId;
+
     // ---- quick correction ---------------------------------------------------------------------
 
     /// <summary>
@@ -284,6 +315,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
     [ObservableProperty] private string _selectedSessionType = nameof(SessionType.Neutral);
 
+    public C2ViewModel? C2 { get; }
+
     public PersonalizationViewModel(
         DatasetRecorderService recorder,
         PersonalModelManager modelManager,
@@ -295,8 +328,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         HardExampleService? hardExamples = null,
         GuidedCalibrationService? guided = null,
         AudioAssistService? audio = null,
-        GrimacePreviewService? grimace = null)
+        GrimacePreviewService? grimace = null,
+        [FromKeyedServices(SmileLabKey)] GrimacePreviewService? smile = null,
+        C2ViewModel? c2 = null)
     {
+        C2 = c2;
         _recorder = recorder;
         _modelManager = modelManager;
         _trainingService = trainingService;
@@ -308,6 +344,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         _guided = guided;
         _audio = audio;
         _grimace = grimace;
+        _smile = smile;
 
         _quickCorrectionEnabled = hardExamples?.Enabled ?? false;
 
@@ -323,6 +360,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         _guidedTimer.Tick += (_, _) => OnGuidedTick();
         _grimaceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
         _grimaceTimer.Tick += (_, _) => OnGrimaceTick();
+        _smileTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+        _smileTimer.Tick += (_, _) => OnSmileTick();
 
         foreach (var (name, index) in PersonalizationSchema.ExpressionNames.Select((n, i) => (n, i)))
             Comparison.Add(new ExpressionComparisonRow(index, name));
@@ -340,17 +379,14 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         UpdateGuidedRoutineDescription();
         RefreshGrimaceState();
+        RefreshSmileState();
 
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
         _statusTimer.Tick += (_, _) => OnTick();
         _statusTimer.Start();
 
-        _ = InitializeAsync();
-    }
-
-    private async Task InitializeAsync()
-    {
-        await _modelManager.ReloadAsync();
+        // Startup owns model loading. Visiting this page must only observe it: reloading here
+        // replaces the reference corrector and invalidates a C2 the user chose to keep.
         RefreshSetup();
     }
 
@@ -396,7 +432,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         SavedCorrectionCount = HardExampleService.CountSaved();
         var captureOrPreviewActive = _recorder.IsRecording || IsRecording || IsGuidedRunning ||
-                                     (_grimace?.IsPreviewing ?? false);
+                                     (_grimace?.IsPreviewing ?? false) ||
+                                     (_smile?.IsPreviewing ?? false);
         CanDeleteSavedCorrections = _hardExamples != null && SavedCorrectionCount > 0 &&
                                     !IsBusy && !captureOrPreviewActive;
         if (SavedCorrectionCount == 0) ShowDeleteCorrectionsConfirmation = false;
@@ -418,6 +455,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         CanStartGuided = _guided != null && _cameraSeenRecently && !IsBusy &&
                          !captureOrPreviewActive;
         RefreshGrimaceState();
+        RefreshSmileState();
 
         var choice = TrainingModelChoice.ForIndex(SelectedModelIndex);
         ModelChoiceDescription = choice.Description;
@@ -511,7 +549,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             RecordingStatus = "Wait for training/setup to finish before starting a recording.";
             return;
         }
-        if (_recorder.IsRecording || IsGuidedRunning || (_grimace?.IsPreviewing ?? false))
+        if (_recorder.IsRecording || IsGuidedRunning ||
+            (_grimace?.IsPreviewing ?? false) || (_smile?.IsPreviewing ?? false))
         {
             RecordingStatus = "Another recording or avatar preview is already active.";
             return;
@@ -536,11 +575,13 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
                 ? "Recording. Let your face rest - breathe normally for about 45 seconds."
                 : "Recording. Talk naturally for a minute or so.";
             RefreshGrimaceState();
+            RefreshSmileState();
             CanStartRecording = false;
             CanOpenDatasetFolder = false;
             CanStartGuided = false;
             CanTrain = false;
             CanPrepareModelC = false;
+            CanStartSmilePreview = false;
             CanDeleteSavedCorrections = false;
             CanFlagCorrection = false;
         }
@@ -595,7 +636,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     private void OpenDatasetFolder()
     {
         if (IsBusy || _recorder.IsRecording || IsRecording || IsGuidedRunning ||
-            (_grimace?.IsPreviewing ?? false))
+            (_grimace?.IsPreviewing ?? false) || (_smile?.IsPreviewing ?? false))
         {
             RecordingStatus = "Finish the active recording, calibration, preview, or training " +
                               "operation before opening the dataset for file management.";
@@ -754,7 +795,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             GuidedStatus = "Wait for training/setup to finish before starting guided calibration.";
             return;
         }
-        if (_recorder.IsRecording || IsRecording || (_grimace?.IsPreviewing ?? false))
+        if (_recorder.IsRecording || IsRecording ||
+            (_grimace?.IsPreviewing ?? false) || (_smile?.IsPreviewing ?? false))
         {
             GuidedStatus = "Stop the current recording or candidate preview first.";
             return;
@@ -775,10 +817,12 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         GuidedProgress = 0;
         _guidedTimer.Start();
         RefreshGrimaceState();
+        RefreshSmileState();
         CanStartRecording = false;
         CanOpenDatasetFolder = false;
         CanTrain = false;
         CanPrepareModelC = false;
+        CanStartSmilePreview = false;
         CanDeleteSavedCorrections = false;
         CanFlagCorrection = false;
     }
@@ -919,12 +963,14 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
     {
         var confirmedChoice = _grimace?.ConfirmedRoutineChoice;
         var confirmedCandidateId = _grimace?.ConfirmedCandidate?.Id;
+        var confirmedRoutineId = _grimace?.Catalog.ConfirmedRoutineId ??
+                                 GrimaceCandidateCatalog.Catalog.ConfirmedRoutineId;
         if (!string.Equals(
                 confirmedCandidateId, _appliedGrimaceCandidateId, StringComparison.Ordinal))
         {
             for (var i = GuidedRoutines.Count - 1; i >= 0; i--)
             {
-                if (string.Equals(GuidedRoutines[i].Id, "grimace-confirmed", StringComparison.Ordinal))
+                if (string.Equals(GuidedRoutines[i].Id, confirmedRoutineId, StringComparison.Ordinal))
                     GuidedRoutines.RemoveAt(i);
             }
             if (confirmedChoice != null)
@@ -948,7 +994,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
         IsGrimacePreviewing = _grimace.IsPreviewing;
         CanStartGrimacePreview = !IsBusy && !IsRecording && !IsGuidedRunning &&
-                                 !_grimace.IsPreviewing;
+                                 !_grimace.IsPreviewing && !(_smile?.IsPreviewing ?? false);
         CanConfirmGrimace = _grimace.IsPreviewing && _grimace.CurrentCandidate != null;
         GrimaceStatus = _grimace.Status;
 
@@ -956,7 +1002,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         GrimaceCandidateDetails = current == null
             ? "No candidate is active. Nothing is being recorded."
             : $"{current.DisplayName}\n{current.Description}\n" +
-              "Exact non-zero components: " + string.Join(", ", current.Components
+              "Commanded components: " + string.Join(", ", current.Components
                   .OrderBy(component => component.Key)
                   .Select(component =>
                       $"{PersonalizationSchema.ExpressionNames[component.Key]}={component.Value:P0}"));
@@ -967,6 +1013,160 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             ? "Not confirmed: no Grimace candidate can enter a guided recording or become a label."
             : $"Confirmed: {confirmed.DisplayName}. Only this exact schema/fingerprint is available " +
               "as the separate Grimace guided routine.";
+    }
+
+    // =============================================================================================
+    // Smile candidate preview
+    // =============================================================================================
+
+    [RelayCommand]
+    private void BeginSmilePreview()
+    {
+        if (_smile is null)
+        {
+            SmileStatus = "The smile candidate preview is unavailable in this build.";
+            return;
+        }
+
+        if (IsBusy)
+        {
+            SmileStatus = "Wait for the current training/setup operation to finish first.";
+            return;
+        }
+
+        var result = _smile.BeginPreview();
+        if (result.Success)
+            _smileTimer.Start();
+        RefreshSmileState();
+        RefreshSetup();
+        SmileStatus = result.Message;
+    }
+
+    [RelayCommand]
+    private void PreviousSmileCandidate()
+    {
+        if (_smile is null) return;
+        var result = _smile.ShowPreviousCandidate();
+        RefreshSmileState();
+        SmileStatus = result.Message;
+    }
+
+    [RelayCommand]
+    private void NextSmileCandidate()
+    {
+        if (_smile is null) return;
+        var result = _smile.ShowNextCandidate();
+        RefreshSmileState();
+        SmileStatus = result.Message;
+    }
+
+    [RelayCommand]
+    private void ConfirmSmileCandidate()
+    {
+        if (_smile is null) return;
+        var result = _smile.ConfirmCurrentCandidate();
+        if (!_smile.IsPreviewing)
+            _smileTimer.Stop();
+        RefreshSmileState();
+        RefreshSetup();
+        SmileStatus = result.Message;
+    }
+
+    [RelayCommand]
+    private void CancelSmilePreview()
+    {
+        if (_smile is null) return;
+        _smile.CancelPreview();
+        _smileTimer.Stop();
+        RefreshSmileState();
+        RefreshSetup();
+    }
+
+    [RelayCommand]
+    private void ClearSmileConfirmation()
+    {
+        if (_smile is null) return;
+        _smile.ClearConfirmation();
+        RefreshSmileState();
+        RefreshSetup();
+    }
+
+    private void OnSmileTick()
+    {
+        if (_smile is null)
+        {
+            _smileTimer.Stop();
+            return;
+        }
+
+        var previousIndex = _smile.CurrentCandidateIndex;
+        var stillPreviewing = _smile.Tick();
+        if (!stillPreviewing)
+            _smileTimer.Stop();
+
+        // Avoid rebinding the picker/status fifty times per second. Only controller actions or a
+        // cancelled preview change observable state; the tick otherwise just feeds the deadman.
+        if (!stillPreviewing || previousIndex != _smile.CurrentCandidateIndex)
+        {
+            RefreshSmileState();
+            RefreshSetup();
+        }
+    }
+
+    private void RefreshSmileState()
+    {
+        var confirmedChoice = _smile?.ConfirmedRoutineChoice;
+        var confirmedCandidateId = _smile?.ConfirmedCandidate?.Id;
+        var confirmedRoutineId = _smile?.Catalog.ConfirmedRoutineId ??
+                                 SmileCandidateCatalog.Catalog.ConfirmedRoutineId;
+        if (!string.Equals(
+                confirmedCandidateId, _appliedSmileCandidateId, StringComparison.Ordinal))
+        {
+            for (var i = GuidedRoutines.Count - 1; i >= 0; i--)
+            {
+                if (string.Equals(GuidedRoutines[i].Id, confirmedRoutineId, StringComparison.Ordinal))
+                    GuidedRoutines.RemoveAt(i);
+            }
+            if (confirmedChoice != null)
+                GuidedRoutines.Add(confirmedChoice);
+            _appliedSmileCandidateId = confirmedCandidateId;
+        }
+
+        if (GuidedRoutines.Count > 0 && SelectedGuidedRoutineIndex >= GuidedRoutines.Count)
+            SelectedGuidedRoutineIndex = GuidedRoutines.Count - 1;
+        UpdateGuidedRoutineDescription();
+
+        if (_smile is null)
+        {
+            IsSmilePreviewing = false;
+            CanStartSmilePreview = false;
+            CanConfirmSmile = false;
+            HasConfirmedSmile = false;
+            SmileConfirmationStatus = "The smile candidate lab is unavailable in this build.";
+            return;
+        }
+
+        IsSmilePreviewing = _smile.IsPreviewing;
+        CanStartSmilePreview = !IsBusy && !IsRecording && !IsGuidedRunning &&
+                                 !_smile.IsPreviewing && !(_grimace?.IsPreviewing ?? false);
+        CanConfirmSmile = _smile.IsPreviewing && _smile.CurrentCandidate != null;
+        SmileStatus = _smile.Status;
+
+        var current = _smile.CurrentCandidate;
+        SmileCandidateDetails = current == null
+            ? "No candidate is active. Nothing is being recorded."
+            : $"{current.DisplayName}\n{current.Description}\n" +
+              "Commanded components: " + string.Join(", ", current.Components
+                  .OrderBy(component => component.Key)
+                  .Select(component =>
+                      $"{PersonalizationSchema.ExpressionNames[component.Key]}={component.Value:P0}"));
+
+        var confirmed = _smile.ConfirmedCandidate;
+        HasConfirmedSmile = confirmed != null;
+        SmileConfirmationStatus = confirmed == null
+            ? "Not confirmed: no smile shape has been chosen yet."
+            : $"Confirmed: {confirmed.DisplayName}. Only this exact schema/fingerprint is available " +
+              "as the separate smile guided routine.";
     }
 
     // =============================================================================================
@@ -1005,7 +1205,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
             return;
         }
         if (IsBusy || _recorder.IsRecording || IsGuidedRunning ||
-            (_grimace?.IsPreviewing ?? false))
+            (_grimace?.IsPreviewing ?? false) || (_smile?.IsPreviewing ?? false))
         {
             CorrectionStatus =
                 "Wait for the current training, recording, calibration, or preview to finish.";
@@ -1038,7 +1238,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         ShowDeleteCorrectionsConfirmation = false;
         if (_hardExamples is null) return;
         if (IsBusy || _recorder.IsRecording || IsGuidedRunning ||
-            (_grimace?.IsPreviewing ?? false))
+            (_grimace?.IsPreviewing ?? false) || (_smile?.IsPreviewing ?? false))
         {
             CorrectionStatus =
                 "Stop training, recording, calibration, or preview before deleting correction data.";
@@ -1107,7 +1307,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         if (IsBusy)
             return;
         if (_recorder.IsRecording || IsRecording || IsGuidedRunning ||
-            (_grimace?.IsPreviewing ?? false))
+            (_grimace?.IsPreviewing ?? false) || (_smile?.IsPreviewing ?? false))
         {
             ResultHeadline = "Finish the active capture first.";
             ResultDetail = "Training/setup cannot read the dataset while a recording, guided " +
@@ -1126,6 +1326,7 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         CanOpenDatasetFolder = false;
         CanStartGuided = false;
         CanStartGrimacePreview = false;
+        CanStartSmilePreview = false;
         CanDeleteSavedCorrections = false;
         CanFlagCorrection = false;
         HasResult = false;
@@ -1386,6 +1587,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         var activeName = _modelManager.IsActive && activeMetadata != null
             ? $"{activeMetadata.DisplayName} — {System.IO.Path.GetFileName(activePath)}"
             : "Default Baballonia (Stock)";
+        if (C2?.HasActiveC2 == true)
+            activeName = $"C2 {C2.ActiveC2Name} over {activeName}";
 
         ActiveModelName = $"Requested: {requestedName}{Environment.NewLine}Actually active: {activeName}";
         var details = new List<string>();
@@ -1614,9 +1817,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         // manager's effective state so the picker drops its Current badge and the status switches
         // to Stock without requiring a page navigation or manual refresh.
         var modelActive = _modelManager.IsActive;
-        if (modelActive != _lastObservedModelActive)
+        var c2ActiveName = C2?.HasActiveC2 == true ? C2.ActiveC2Name : null;
+        if (modelActive != _lastObservedModelActive || c2ActiveName != _lastObservedC2Name)
         {
             _lastObservedModelActive = modelActive;
+            _lastObservedC2Name = c2ActiveName;
             RefreshComparisonModels();
             UpdateActiveModelStatus();
         }
@@ -1702,9 +1907,11 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
 
     public void Dispose()
     {
+        C2?.Dispose();
         _statusTimer.Stop();
         _guidedTimer.Stop();
         _grimaceTimer.Stop();
+        _smileTimer.Stop();
         _faceEventBus.Unsubscribe(_frameHandler);
         _faceEventBus.Unsubscribe(_rawHandler);
         _faceEventBus.Unsubscribe(_correctedHandler);
@@ -1716,6 +1923,8 @@ public partial class PersonalizationViewModel : ViewModelBase, IDisposable
         // leaving it frozen in whatever expression was being commanded.
         _guided?.Dispose();
         _grimace?.Dispose();
+        if (!ReferenceEquals(_smile, _grimace))
+            _smile?.Dispose();
 
         if (_recorder.IsRecording)
             _recorder.StopSessionAsync().GetAwaiter().GetResult();

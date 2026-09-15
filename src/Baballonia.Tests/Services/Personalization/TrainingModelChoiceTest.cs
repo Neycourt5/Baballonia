@@ -70,13 +70,13 @@ public class TrainingModelChoiceTest
     }
 
     [TestMethod]
-    public void SelectorLabelsDescribeTheCurrentABaselineAndExperimentalCHonestly()
+    public void SelectorLabelsPreserveLegacyChoicesWithoutClaimingAnUnmeasuredWinner()
     {
         Assert.AreEqual(3, TrainingModelChoice.Options.Count);
         Assert.AreEqual("A — Expressions only (simple)", TrainingModelChoice.Options[0].Label);
         Assert.IsFalse(TrainingModelChoice.Options[0].Label.Contains("recommended"));
-        Assert.AreEqual("B — Expressions + camera image (current best)", TrainingModelChoice.Options[1].Label);
-        Assert.AreEqual("C — Shared visual features (experimental)", TrainingModelChoice.Options[2].Label);
+        Assert.AreEqual("B — Expressions + camera image", TrainingModelChoice.Options[1].Label);
+        Assert.AreEqual("C — Shared visual features (existing recipe)", TrainingModelChoice.Options[2].Label);
         StringAssert.Contains(TrainingModelChoice.Options[2].Description, "instead of running a second camera CNN");
     }
 

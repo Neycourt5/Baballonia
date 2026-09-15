@@ -65,7 +65,7 @@ public sealed class EmbeddingModelCorrector : IEmbeddingAwareCorrector, IPersona
     public float[] Correct(DenseTensor<float> image, float[] stock) => Correct(image, stock, null);
 
     /// <inheritdoc />
-    public float[] Correct(DenseTensor<float> image, float[] stock, DenseTensor<float> embedding)
+    public float[] Correct(DenseTensor<float> image, float[] stock, DenseTensor<float>? embedding)
     {
         if (_failed || _disposed)
             return (float[])stock.Clone();

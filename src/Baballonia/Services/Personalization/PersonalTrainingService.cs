@@ -126,6 +126,40 @@ public sealed class PersonalTrainingService(
         get { lock (_logLock) return string.Join(Environment.NewLine, _detailLog); }
     }
 
+    /// <summary>C2 shares the installed Python/process runner, but never installs or selects a model.</summary>
+    public async Task<TrainingResult> TrainC2Async(string manifest, string output,
+        IProgress<TrainingProgress>? progress, CancellationToken cancellationToken)
+    {
+        if (Interlocked.CompareExchange(ref _running, 1, 0) != 0)
+            return new TrainingResult(false, "Another training operation is running.");
+        ClearLog();
+        try
+        {
+            var root = PersonalizationEnvironment.FindTrainingRoot();
+            var python = PersonalizationEnvironment.VenvPython(PersonalizationEnvironment.DefaultVenvDirectory);
+            if (root == null || !File.Exists(python))
+                return new TrainingResult(false, "Training tools are missing. Use Set Up Training Tools on this page.");
+            string? candidate = null;
+            var process = await RunAsync(python,
+                ["-m", "babble_personal.c2", "--manifest", manifest, "--out", output], root,
+                cancellationToken, line =>
+                {
+                    if (line.StartsWith("[candidate] ")) candidate = line[12..];
+                    if (line.StartsWith("[stage]") || line.StartsWith("[training]") || line.StartsWith("[preparing]"))
+                        progress?.Report(new TrainingProgress(TrainingStage.Training, line));
+                });
+            cancellationToken.ThrowIfCancellationRequested();
+            return process.Success && candidate != null
+                ? new TrainingResult(true, "C2 candidate saved for comparison. Your active model is unchanged.",
+                    TrainingSucceeded: true, RunDirectory: candidate,
+                    ExportedModelPath: Path.Combine(candidate, "candidate.onnx"))
+                : new TrainingResult(false, "C2 could not finish. " +
+                    process.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries).LastOrDefault()?.Trim(),
+                    Remedy: "Review C2 readiness and the details, then retry. Your active model is unchanged.");
+        }
+        finally { Interlocked.Exchange(ref _running, 0); }
+    }
+
     private void ClearLog()
     {
         lock (_logLock) _detailLog.Clear();

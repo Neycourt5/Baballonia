@@ -9,12 +9,10 @@ using System.Threading.Tasks;
 
 namespace Baballonia.Services;
 
-public class DataUploaderService
+public class DataUploaderService : IDisposable
 {
     private const string GarageEndpoint = "http://207.211.165.193:3900";
     private const string BucketName = "babbledata";
-    private const string UploaderIdentifierOne = "GK1b5679b9dba9ff5b96e15cca";
-    private const string UploaderIdentifierTwo = "4791149192ade8866bda2f09236e5f4cb0a5c76f10b7ec71cfd15e9995d360c0";
     private const string PublicKey = @"-----BEGIN PUBLIC KEY-----
 MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAvaow3ZwmKDl6x5Xi7o8o
 Q+bQ7OfgAS5GyJbgx9Tj2px04jZObbCoLnyGkbVRptCMIqrP/5X+Lpc3npcSKxa3
@@ -31,13 +29,19 @@ cGmQGUQ2S2mcUlUC5lN2EMkuJybKiMeALJNEk2IqBi/rZIWrCzHTcuuvjSOjyck0
 -----END PUBLIC KEY-----
 ";
 
-    private readonly AmazonS3Client _uploaderClient;
+    private readonly AmazonS3Client? _uploaderClient;
     private readonly IIdentityService _identityService;
-    private readonly RSA _publicRsa;
+    private readonly RSA? _publicRsa;
 
-    public DataUploaderService(IIdentityService identityService)
+    public bool IsConfigured { get; }
+
+    public DataUploaderService(IIdentityService identityService, DataUploadConfiguration? configuration = null)
     {
         _identityService = identityService;
+        configuration ??= DataUploadConfiguration.FromEnvironment();
+        IsConfigured = configuration.IsConfigured;
+        if (!IsConfigured)
+            return;
         var uploaderConfig = new AmazonS3Config
         {
             ServiceURL = GarageEndpoint,
@@ -46,16 +50,21 @@ cGmQGUQ2S2mcUlUC5lN2EMkuJybKiMeALJNEk2IqBi/rZIWrCzHTcuuvjSOjyck0
             AuthenticationRegion = "garage"
         };
         var uploaderCredentials = new BasicAWSCredentials(
-            UploaderIdentifierOne,
-            UploaderIdentifierTwo
+            configuration.AccessKeyId,
+            configuration.SecretAccessKey
         );
         _publicRsa = RSA.Create();
         _publicRsa.ImportFromPem(PublicKey);
         _uploaderClient = new AmazonS3Client(uploaderCredentials, uploaderConfig);
     }
 
-    public async Task UploadDataAsync(string pathToFile)
+    public async Task UploadDataAsync(string pathToFile, bool hasConsent)
     {
+        // Even a saved opt-in cannot upload without deliberately configured credentials.
+        // Return before opening the recording or making any network request.
+        if (!hasConsent || _uploaderClient is null || _publicRsa is null)
+            return;
+
         var dataToUpload = await File.ReadAllBytesAsync(pathToFile);
         var fileName = Path.GetFileName(pathToFile);
         var uniqueName = $"{_identityService.GetUniqueUserId()}_{DateTime.Now:yyyyMMdd_HHmmss}_{fileName}";
@@ -92,5 +101,10 @@ cGmQGUQ2S2mcUlUC5lN2EMkuJybKiMeALJNEk2IqBi/rZIWrCzHTcuuvjSOjyck0
         };
 
         await _uploaderClient.PutObjectAsync(putRequest);
+    }
+    public void Dispose()
+    {
+        _uploaderClient?.Dispose();
+        _publicRsa?.Dispose();
     }
 }

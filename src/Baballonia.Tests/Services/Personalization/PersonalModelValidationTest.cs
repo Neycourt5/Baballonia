@@ -37,7 +37,7 @@ public class PersonalModelValidationTest
         var pipelineManager = (FacePipelineManager)RuntimeHelpers
             .GetUninitializedObject(typeof(FacePipelineManager));
 
-        var pipeline = new FaceProcessingPipeline(new Baballonia.Services.FacePipelineEventBus());
+        var pipeline = new FaceProcessingPipeline(new Baballonia.Services.FacePipelineEventBus(), new Baballonia.Services.PipelineMetrics());
         typeof(FacePipelineManager)
             .GetField("_pipeline", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(pipelineManager, pipeline);

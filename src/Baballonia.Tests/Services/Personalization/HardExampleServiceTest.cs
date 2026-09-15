@@ -74,7 +74,7 @@ public class HardExampleServiceTest
 
         typeof(FacePipelineManager)
             .GetField("_pipeline", BindingFlags.NonPublic | BindingFlags.Instance)!
-            .SetValue(pipelineManager, new FaceProcessingPipeline(new FacePipelineEventBus()));
+            .SetValue(pipelineManager, new FaceProcessingPipeline(new FacePipelineEventBus(), new PipelineMetrics()));
 
         var settings = new Mock<ILocalSettingsService>();
         settings.Setup(s => s.ReadSetting<float>(PersonalModelManager.BlendSetting, It.IsAny<float>(), It.IsAny<bool>()))

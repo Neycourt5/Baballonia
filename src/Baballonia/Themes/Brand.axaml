@@ -1,0 +1,91 @@
+<!--
+  The Alexallonia brand palette: a gentle pastel lavender, cool and soft rather than neon.
+
+  The accent ramp is stated EXPLICITLY rather than derived, and that is the whole lesson of the
+  first attempt. Fluent picks its accent fill from this ramp - dark theme uses
+  SystemAccentColorLight2, light theme uses SystemAccentColorDark1 - so setting only `Accent` to an
+  already-light lavender produced a *lightened light colour* as the dark-theme fill. Buttons,
+  toggles and sliders washed out, and white text on that fill measured 1.46:1. Choosing all seven
+  stops removes the guesswork.
+
+  The two themes want opposite things from the fill, which is why one pastel cannot serve both:
+
+  * Dark theme paints BLACK text on the accent, so the fill can be a genuine pastel.
+    #B9B4F0 with black text is 10.85:1.
+  * Light theme paints WHITE text on the accent, so the fill must be deep.
+    #6B61DB with white text is 4.82:1.
+
+  Semantic state colours are NOT brand colours and are deliberately untouched: success green, error
+  red, warning amber, the alpha-branch banner. A rebrand that turns errors lavender has destroyed
+  information.
+
+  Gradients exist here for large branded surfaces only. They are never used on small text: the
+  near-white stops measure about 1.05:1 against a light background, which is invisible, and muddy at
+  12px even on dark. The app title uses a solid token for exactly that reason.
+-->
+<ResourceDictionary
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!--
+    The seven accent stops. Overriding these overrides what FluentTheme would otherwise derive, and
+    it is what drives navigation selection, buttons, toggles, sliders, progress and focus - which is
+    why those controls needed no individual edits.
+  -->
+  <Color x:Key="SystemAccentColor">#8F87EE</Color>
+  <Color x:Key="SystemAccentColorLight1">#A49DF4</Color>
+  <Color x:Key="SystemAccentColorLight2">#B9B4F0</Color>
+  <Color x:Key="SystemAccentColorLight3">#CFCBF7</Color>
+  <Color x:Key="SystemAccentColorDark1">#6B61DB</Color>
+  <Color x:Key="SystemAccentColorDark2">#574DBE</Color>
+  <Color x:Key="SystemAccentColorDark3">#4A41A8</Color>
+
+  <ResourceDictionary.ThemeDictionaries>
+
+    <!--  Light: every brand token has to survive being placed on white.  -->
+    <ResourceDictionary x:Key="Light">
+      <SolidColorBrush x:Key="BrandPrimary" Color="#6B61DB" />
+      <SolidColorBrush x:Key="BrandPrimaryHover" Color="#7B72E8" />
+      <SolidColorBrush x:Key="BrandPrimaryPressed" Color="#5E54D0" />
+      <SolidColorBrush x:Key="BrandSoft" Color="#F1EFFF" />
+      <SolidColorBrush x:Key="BrandBorder" Color="#B8B1EA" />
+      <SolidColorBrush x:Key="BrandFocus" Color="#5E54D0" />
+      <SolidColorBrush x:Key="BrandTextAccent" Color="#5E54D0" />
+      <SolidColorBrush x:Key="BrandSurface" Color="#F8F7FF" />
+    </ResourceDictionary>
+
+    <!--  Dark: the app's default. Tints stay deep so large areas never glow.  -->
+    <ResourceDictionary x:Key="Dark">
+      <SolidColorBrush x:Key="BrandPrimary" Color="#B9B4F0" />
+      <SolidColorBrush x:Key="BrandPrimaryHover" Color="#CFCBF7" />
+      <SolidColorBrush x:Key="BrandPrimaryPressed" Color="#A49DF4" />
+      <SolidColorBrush x:Key="BrandSoft" Color="#2A2740" />
+      <SolidColorBrush x:Key="BrandBorder" Color="#4A4570" />
+      <SolidColorBrush x:Key="BrandFocus" Color="#CFCBF7" />
+      <SolidColorBrush x:Key="BrandTextAccent" Color="#B3AEFF" />
+      <SolidColorBrush x:Key="BrandSurface" Color="#211F2E" />
+    </ResourceDictionary>
+
+  </ResourceDictionary.ThemeDictionaries>
+
+  <!--
+    Large branded surfaces only. Both keep their near-white middle, which is what makes them read as
+    the brand rather than as a flat wash - and is exactly why they must stay off small text.
+  -->
+  <LinearGradientBrush x:Key="BrandGradientPrimary" StartPoint="0%,0%" EndPoint="100%,0%">
+    <GradientStop Offset="0.00" Color="#9E98FF" />
+    <GradientStop Offset="0.25" Color="#CCC8FF" />
+    <GradientStop Offset="0.50" Color="#F7F7FF" />
+    <GradientStop Offset="0.75" Color="#D6D2FF" />
+    <GradientStop Offset="1.00" Color="#ACA6FF" />
+  </LinearGradientBrush>
+
+  <LinearGradientBrush x:Key="BrandGradientSecondary" StartPoint="0%,0%" EndPoint="100%,0%">
+    <GradientStop Offset="0.00" Color="#A98BFF" />
+    <GradientStop Offset="0.25" Color="#D7C5FF" />
+    <GradientStop Offset="0.50" Color="#F8F5FF" />
+    <GradientStop Offset="0.75" Color="#DCCBFF" />
+    <GradientStop Offset="1.00" Color="#B49BFF" />
+  </LinearGradientBrush>
+
+</ResourceDictionary>

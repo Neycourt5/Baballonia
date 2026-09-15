@@ -4,8 +4,6 @@
         <!--If you are willing to use Windows/MacOS native APIs you will need to create 3 projects.
         One for Windows with net10.0-windows TFM, one for MacOS with net10.0-macos and one with net10.0 TFM for Linux.-->
         <TargetFramework>net10.0</TargetFramework>
-        <!-- Guards the Windows-only microphone capture backend; see Audio/MicrophoneFeatureSource.cs -->
-        <DefineConstants Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(DefineConstants);WINDOWS</DefineConstants>
         <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
         <ApplicationIcon>Assets\IconOpaque.ico</ApplicationIcon>
         <Company>Paradigm Reality Enhancement Labs</Company>
@@ -24,8 +22,8 @@
 
     <ItemGroup>
         <PackageReference Include="Avalonia.Desktop" Version="11.3.12" />
-        <PackageReference Include="System.Net.Http" Version="4.3.4" />
-        <PackageReference Include="System.Text.RegularExpressions" Version="4.3.1" />
+        <!-- Override Avalonia's transitive Tmds.DBus.Protocol 0.21.2 (GHSA-xrw6-gwf8-vvr9). 0.21.3 is the backported fix. -->
+        <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
         <PackageReference Include="Velopack" Version="0.0.1298" />
 
         <!--Condition below is needed to remove Avalonia.Diagnostics package from build output in Release configuration.-->
@@ -48,13 +46,21 @@
         <PackageReference Include="SkiaSharp.NativeAssets.macOS" Version="3.119.0" Condition="$([MSBuild]::IsOSPlatform('OSX'))" />
 
         <!-- Linux-specific -->
-        <PackageReference Include="Project-Babble.OpenCvSharp4.mini.runtime.ubuntu.22.04-x64" Version="4.11.0.1" Condition="$([MSBuild]::IsOSPlatform('Linux')) And
+        <PackageReference Include="Project-Babble.OpenCvSharp4.mini.runtime.ubuntu.22.04-x64" Version="4.11.0.2" Condition="$([MSBuild]::IsOSPlatform('Linux')) And
              !($([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().Contains('Arm')))" />
 
-        <PackageReference Include="Project-Babble.OpenCvSharp4.mini.runtime.ubuntu.22.04-arm64" Version="4.11.0.1" Condition="$([MSBuild]::IsOSPlatform('Linux')) And
+        <PackageReference Include="Project-Babble.OpenCvSharp4.mini.runtime.ubuntu.22.04-arm64" Version="4.11.0.2" Condition="$([MSBuild]::IsOSPlatform('Linux')) And
              $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().Contains('Arm'))" />
 	    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.22.0" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
         <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.119.0" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
+
+        <!-- App-local ICU (Linux only). .NET uses system ICU on Linux by default, but Steam Linux
+             Runtime 4.0 ships no libicui18n, so globalization init FailFasts/SIGABRTs at startup
+             before any app code runs. Bundle ICU and point the runtime at it (value must match the
+             package's .so version suffix, e.g. libicudata.so.72.1.0.3). macOS uses system ICU (this
+             metapackage has no osx runtime) and Windows ships ICU in-box, so this is Linux-scoped. -->
+        <PackageReference Include="Microsoft.ICU.ICU4C.Runtime" Version="72.1.0.3" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
+        <RuntimeHostConfigurationOption Include="System.Globalization.AppLocalIcu" Value="72.1.0.3" Trim="false" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
         <PackageReference Include="Xaml.Behaviors.Interactions.Draggable" Version="11.3.9.5" />
         <ProjectReference Include="..\Baballonia.LibV4L2Capture\Baballonia.LibV4L2Capture.csproj" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
     </ItemGroup>
@@ -66,12 +72,6 @@
         <ProjectReference Include="..\Baballonia.IPCameraCapture\Baballonia.IPCameraCapture.csproj" />
         <ProjectReference Include="..\Baballonia.VFTCapture\Baballonia.VFTCapture.csproj" />
         <ProjectReference Include="..\Baballonia\Baballonia.csproj" />
-    </ItemGroup>
-
-    <ItemGroup>
-      <Reference Include="OpenCvSharp">
-        <HintPath>..\..\..\opencvsharp\src\OpenCvSharp\bin\Debug\net6.0\OpenCvSharp.dll</HintPath>
-      </Reference>
     </ItemGroup>
 
     <ItemGroup>
@@ -111,12 +111,20 @@
       <None Update="baseline_R.pth">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       </None>
-      <None Update="Calibration\Linux\**" Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+      <None Update="Calibration\Linux\**\*" Condition="$([MSBuild]::IsOSPlatform('Linux'))">
           <Link>%(RecursiveDir)\%(Filename)%(Extension)</Link>
           <TargetPath>%(RecursiveDir)\%(Filename)%(Extension)</TargetPath>
           <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       </None>
-      <None Update="Calibration\Windows\**" Condition="$([MSBuild]::IsOSPlatform('Windows'))">
+      <!-- _internal is a local CUDA PyInstaller bundle (~7.8GB) that must never ship (CI builds
+           contain only the single BabbleTrainer file). It is a SYMLINK-to-directory, which MSBuild
+           enumerates as a file-like item; copying it raises MSB3024. Remove both the symlink item
+           itself AND anything under it. -->
+      <None Remove="Calibration\Linux\Trainer\_internal" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
+      <None Remove="Calibration\Linux\Trainer\_internal\**" Condition="$([MSBuild]::IsOSPlatform('Linux'))" />
+      <!-- The public 1.5.2 trainer is self-contained. Legacy NPZ/PT training assets stay
+           in source; the distribution only needs its executable and the overlay runtime. -->
+      <None Update="Calibration\Windows\Trainer\BabbleTrainer.exe;Calibration\Windows\Overlay\**\*" Condition="$([MSBuild]::IsOSPlatform('Windows'))">
           <Link>%(RecursiveDir)\%(Filename)%(Extension)</Link>
           <TargetPath>%(RecursiveDir)\%(Filename)%(Extension)</TargetPath>
           <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -145,27 +153,22 @@
     </ItemGroup>
 
     <Target Name="CopyModulesToFolder" AfterTargets="AfterBuild">
+        <!-- TargetDir has a trailing separator even when building to a custom output directory. -->
         <ItemGroup>
-            <ModuleDlls Condition="Exists('$(OutputPath)Baballonia.LibV4L2Capture.dll')" Include="$(OutputPath)Baballonia.LibV4L2Capture.dll" />
-            <ModuleDlls Condition="Exists('$(OutputPath)Baballonia.SerialCameraCapture.dll')" Include="$(OutputPath)Baballonia.SerialCameraCapture.dll" />
-            <ModuleDlls Condition="Exists('$(OutputPath)Baballonia.OpenCVCapture.dll')" Include="$(OutputPath)Baballonia.OpenCVCapture.dll" />
-            <ModuleDlls Condition="Exists('$(OutputPath)Baballonia.IPCameraCapture.dll')" Include="$(OutputPath)Baballonia.IPCameraCapture.dll" />
-            <ModuleDlls Condition="Exists('$(OutputPath)Baballonia.VFTCapture.dll')" Include="$(OutputPath)Baballonia.VFTCapture.dll" />
-            <ModuleDlls Condition="Exists('$(OutputPath)Baballonia.LibV4L2Capture.pdb')" Include="$(OutputPath)Baballonia.LibV4L2Capture.pdb" />
-            <ModuleDlls Condition="Exists('$(OutputPath)Baballonia.SerialCameraCapture.pdb')" Include="$(OutputPath)Baballonia.SerialCameraCapture.pdb" />
-            <ModuleDlls Condition="Exists('$(OutputPath)Baballonia.OpenCVCapture.pdb')" Include="$(OutputPath)Baballonia.OpenCVCapture.pdb" />
-            <ModuleDlls Condition="Exists('$(OutputPath)Baballonia.IPCameraCapture.pdb')" Include="$(OutputPath)Baballonia.IPCameraCapture.pdb" />
-            <ModuleDlls Condition="Exists('$(OutputPath)Baballonia.VFTCapture.pdb')" Include="$(OutputPath)Baballonia.VFTCapture.pdb" />
+            <ModuleDlls Condition="Exists('$(TargetDir)Baballonia.LibV4L2Capture.dll')" Include="$(TargetDir)Baballonia.LibV4L2Capture.dll" />
+            <ModuleDlls Condition="Exists('$(TargetDir)Baballonia.SerialCameraCapture.dll')" Include="$(TargetDir)Baballonia.SerialCameraCapture.dll" />
+            <ModuleDlls Condition="Exists('$(TargetDir)Baballonia.OpenCVCapture.dll')" Include="$(TargetDir)Baballonia.OpenCVCapture.dll" />
+            <ModuleDlls Condition="Exists('$(TargetDir)Baballonia.IPCameraCapture.dll')" Include="$(TargetDir)Baballonia.IPCameraCapture.dll" />
+            <ModuleDlls Condition="Exists('$(TargetDir)Baballonia.VFTCapture.dll')" Include="$(TargetDir)Baballonia.VFTCapture.dll" />
+            <ModuleDlls Condition="Exists('$(TargetDir)Baballonia.LibV4L2Capture.pdb')" Include="$(TargetDir)Baballonia.LibV4L2Capture.pdb" />
+            <ModuleDlls Condition="Exists('$(TargetDir)Baballonia.SerialCameraCapture.pdb')" Include="$(TargetDir)Baballonia.SerialCameraCapture.pdb" />
+            <ModuleDlls Condition="Exists('$(TargetDir)Baballonia.OpenCVCapture.pdb')" Include="$(TargetDir)Baballonia.OpenCVCapture.pdb" />
+            <ModuleDlls Condition="Exists('$(TargetDir)Baballonia.IPCameraCapture.pdb')" Include="$(TargetDir)Baballonia.IPCameraCapture.pdb" />
+            <ModuleDlls Condition="Exists('$(TargetDir)Baballonia.VFTCapture.pdb')" Include="$(TargetDir)Baballonia.VFTCapture.pdb" />
         </ItemGroup>
-        <Move SourceFiles="@(ModuleDlls)" DestinationFolder="$(OutputPath)Modules\" />
+        <Move SourceFiles="@(ModuleDlls)" DestinationFolder="$(TargetDir)Modules\" />
     </Target>
-    <!-- TODO: this sucks -->
-    <!--
-        Uses $(PublishDir) rather than a hardcoded "$(OutputPath)\publish\". The old path is only
-        correct for a default publish; with "dotnet publish -o <dir>" the capture backends were left
-        in the publish root, where the module loader (which scans Modules\) never finds them - so the
-        published app started with no cameras at all. $(PublishDir) is right in both cases.
-    -->
+    <!-- Use PublishDir so explicit output directories retain discoverable camera modules. -->
     <Target Name="CopyModulesToFolderPublish" AfterTargets="Publish">
         <ItemGroup>
             <PublishModuleDlls Condition="Exists('$(PublishDir)Baballonia.SerialCameraCapture.dll')" Include="$(PublishDir)Baballonia.SerialCameraCapture.dll" />
@@ -188,13 +191,17 @@
     -->
     <Target Name="CopyPersonalizationTrainingScripts" AfterTargets="Publish">
         <ItemGroup>
-            <PersonalizationTrainingFiles Include="$(MSBuildThisFileDirectory)..\..\training\**\*"
-                                          Exclude="$(MSBuildThisFileDirectory)..\..\training\**\__pycache__\**;$(MSBuildThisFileDirectory)..\..\training\runs\**;$(MSBuildThisFileDirectory)..\..\training\.venv\**" />
+            <PersonalizationPythonFiles Include="$(MSBuildThisFileDirectory)..\..\training\babble_personal\**\*.py" />
+            <PersonalizationSupportingFiles Include="$(MSBuildThisFileDirectory)..\..\training\requirements.txt;$(MSBuildThisFileDirectory)..\..\training\README.md" />
         </ItemGroup>
-        <Copy SourceFiles="@(PersonalizationTrainingFiles)"
-              DestinationFiles="@(PersonalizationTrainingFiles->'$(PublishDir)training\%(RecursiveDir)%(Filename)%(Extension)')"
+        <Copy SourceFiles="@(PersonalizationPythonFiles)"
+              DestinationFiles="@(PersonalizationPythonFiles->'$(PublishDir)training\babble_personal\%(RecursiveDir)%(Filename)%(Extension)')"
               SkipUnchangedFiles="true"
-              Condition="'@(PersonalizationTrainingFiles)' != ''" />
+              Condition="'@(PersonalizationPythonFiles)' != ''" />
+        <Copy SourceFiles="@(PersonalizationSupportingFiles)"
+              DestinationFiles="@(PersonalizationSupportingFiles->'$(PublishDir)training\%(Filename)%(Extension)')"
+              SkipUnchangedFiles="true"
+              Condition="'@(PersonalizationSupportingFiles)' != ''" />
     </Target>
 
     <!-- SkiaSharp is currently broken on ARM for some reason -->
@@ -208,4 +215,3 @@
     </Target>
 
 </Project>
-

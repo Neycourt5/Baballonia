@@ -1,4 +1,4 @@
-<UserControl
+﻿<UserControl
   x:Class="Baballonia.Views.CalibrationView"
   xmlns="https://github.com/avaloniaui"
   xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -15,6 +15,8 @@
 
   <ScrollViewer>
     <StackPanel Classes="Page">
+      <TextBlock Text="Calibrate tracking: Quick Eye Setup changes only the saved eye calibration. The expression sliders adjust output ranges. To record examples and compare a personal face model, open Personalization → C2 — Experimental."
+                 TextWrapping="Wrap" Margin="0,0,0,8" />
       <Grid ColumnDefinitions="*,Auto">
         <TextBlock
           Grid.Column="0"
@@ -55,6 +57,81 @@
           <Button Command="{Binding ResetMaximumsCommand}" Content="{x:Static assets:Resources.Calibration_Reset_Maximums}" />
         </StackPanel>
       </StackPanel>
+
+      <!--  Guided per-eye calibration  -->
+      <Expander Margin="0,12,0,0" HorizontalAlignment="Stretch">
+        <Expander.Header>
+          <TextBlock FontWeight="SemiBold" Text="Quick Eye Setup" />
+        </Expander.Header>
+        <Border
+          Margin="0,5"
+          Padding="16"
+          Background="{DynamicResource SystemChromeMediumLowColor}"
+          CornerRadius="8">
+          <StackPanel Spacing="12">
+            <TextBlock TextWrapping="Wrap"
+                       Text="Record each pose once. The first half-second is ignored, then robust percentiles set each eye independently. You can repeat any step before saving. This is separate from the Lower/Upper sliders below, which stay as your manual trim." />
+
+            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+              <TextBlock Grid.Column="0" VerticalAlignment="Center" Text="Active calibration" />
+              <ComboBox Grid.Column="1" HorizontalAlignment="Stretch"
+                        ItemsSource="{Binding EyeCalibrationChoices}"
+                        SelectedItem="{Binding SelectedEyeCalibration, Mode=TwoWay}" />
+              <Button Grid.Column="2"
+                      Command="{Binding DeleteEyeCalibrationCommand}"
+                      IsEnabled="{Binding CanDeleteEyeCalibration}"
+                      Content="Delete" />
+            </Grid>
+
+            <TextBlock TextWrapping="Wrap" FontSize="12" Opacity="0.75"
+                       Text="{Binding ActiveEyeCalibrationSummary}" />
+
+            <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto" ColumnSpacing="12" RowSpacing="8">
+              <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Text="Left openness" />
+              <ProgressBar Grid.Row="0" Grid.Column="1" Minimum="0" Maximum="1"
+                           Value="{Binding QuickLeftOpenness}" Height="14" />
+              <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Text="Right openness" />
+              <ProgressBar Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="1"
+                           Value="{Binding QuickRightOpenness}" Height="14" />
+            </Grid>
+
+            <WrapPanel Orientation="Horizontal">
+              <Button Margin="0,0,8,8"
+                      Command="{Binding CaptureRelaxedEyeCalibrationCommand}"
+                      IsEnabled="{Binding CanCaptureEyeCalibration}"
+                      Content="1. Relax + look center (5s)" />
+              <Button Margin="0,0,8,8"
+                      Command="{Binding CaptureClosedEyeCalibrationCommand}"
+                      IsEnabled="{Binding CanCaptureEyeCalibration}"
+                      Content="2. Close gently (3s)" />
+              <Button Margin="0,0,8,8"
+                      Command="{Binding CaptureWideEyeCalibrationCommand}"
+                      IsEnabled="{Binding CanCaptureEyeCalibration}"
+                      Content="3. Open wide (4s)" />
+              <Button Margin="0,0,0,8"
+                      Command="{Binding SaveEyeCalibrationCommand}"
+                      IsEnabled="{Binding CanSaveEyeCalibration}"
+                      Content="Save and apply" />
+            </WrapPanel>
+
+            <TextBlock TextWrapping="Wrap" Text="{Binding EyeCalibrationStatus}" />
+          </StackPanel>
+        </Border>
+      </Expander>
+
+      <!--  Personalized eye correction  -->
+      <Expander Margin="0,12,0,0" HorizontalAlignment="Stretch">
+        <Expander.Header>
+          <TextBlock FontWeight="SemiBold" Text="Personalized Eye Correction" />
+        </Expander.Header>
+        <Border
+          Margin="0,5"
+          Padding="16"
+          Background="{DynamicResource SystemChromeMediumLowColor}"
+          CornerRadius="8">
+          <ContentControl Content="{Binding EyePersonalization}" />
+        </Border>
+      </Expander>
 
       <!--  Eye Expressions Expander  -->
       <Expander Margin="0,12,0,0" HorizontalAlignment="Stretch">

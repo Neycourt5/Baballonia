@@ -5,8 +5,10 @@ using Baballonia.Services.Inference.VideoSources;
 using Baballonia.Services.Personalization;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Baballonia.Services.Inference;
@@ -14,13 +16,15 @@ namespace Baballonia.Services.Inference;
 /// <summary>
 /// This class should be the only place where direct Pipeline modifications happen
 /// </summary>
-public class FacePipelineManager
+public class FacePipelineManager : IRecoverableCameraSlot, ICameraSlotHost
 {
     private readonly ILogger<FacePipelineManager> _logger;
     private readonly FaceProcessingPipeline _pipeline;
     private readonly ILocalSettingsService _localSettings;
     private readonly InferenceFactory _inferenceFactory;
     private readonly SingleCameraSourceFactory _singleCameraSourceFactory;
+    private readonly IReadOnlyList<IRecoverableCameraSlot> _slots;
+    private Task _initialInferenceLoad = Task.CompletedTask;
 
     public FacePipelineManager(ILogger<FacePipelineManager> logger, FaceProcessingPipeline pipeline,
         ILocalSettingsService localSettings, InferenceFactory inferenceFactory,
@@ -31,6 +35,7 @@ public class FacePipelineManager
         _localSettings = localSettings;
         _inferenceFactory = inferenceFactory;
         _singleCameraSourceFactory = singleCameraSourceFactory;
+        _slots = [this];
 
         InitializePipeline();
     }
@@ -40,19 +45,39 @@ public class FacePipelineManager
         _pipeline.ImageConverter = new MatToFloatTensorConverter();
         _pipeline.ImageTransformer = new ImageTransformer();
 
-        _ = LoadInferenceAsync();
+        // Keep the task so startup services can order dependent model loading after the stock
+        // runner is actually installed. Fire-and-forget made embedding adapters race this load.
+        _initialInferenceLoad = LoadInferenceAsync();
         LoadFilter();
     }
+
+    /// <summary>
+    /// Completes when the constructor-triggered stock (or embedding-enabled) runner is installed.
+    /// A personal adapter that consumes that runner's embedding must not validate before this task.
+    /// </summary>
+    public Task InitialInferenceLoad => _initialInferenceLoad;
 
     public async Task LoadInferenceAsync()
     {
         var inf = await Task.Run(CreateInference);
-        _pipeline.InferenceService = inf;
+        DisposeReplacedInference(_pipeline.SwapInferenceService(inf));
     }
 
     public void LoadInference()
     {
-        _pipeline.InferenceService = CreateInference();
+        DisposeReplacedInference(_pipeline.SwapInferenceService(CreateInference()));
+    }
+
+    private void DisposeReplacedInference(IInferenceRunner? previous)
+    {
+        try
+        {
+            (previous as IDisposable)?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not dispose the replaced face inference session");
+        }
     }
 
     /// <summary>
@@ -63,9 +88,20 @@ public class FacePipelineManager
     /// adapter that needs features from a runner that is not producing them would run as a slow
     /// passthrough while appearing to work, so it is refused at load instead.
     /// </remarks>
-    public bool EmbeddingAvailable => _pipeline.InferenceService is IEmbeddingSource;
+    public bool EmbeddingAvailable =>
+        (_pipeline.InferenceService as DefaultInferenceRunner)?.GetEmbedding() != null;
+
     public string InferenceProvider =>
         (_pipeline.InferenceService as DefaultInferenceRunner)?.ExecutionProvider ?? "Unknown";
+
+    /// <summary>
+    /// Installs (or removes) the personal correction stage. The pipeline's own lock makes the swap
+    /// wait for any in-flight frame, so the caller may dispose the outgoing corrector on return.
+    /// </summary>
+    public void SetCorrector(IExpressionCorrector? corrector)
+    {
+        _pipeline.Corrector = corrector;
+    }
 
     public DefaultInferenceRunner CreateInference()
     {
@@ -112,35 +148,131 @@ public class FacePipelineManager
         var cutoff = _localSettings.ReadSetting<float>("AppSettings_OneEuroMinFreqCutoff");
         var speedCutoff = _localSettings.ReadSetting<float>("AppSettings_OneEuroSpeedCutoff");
 
-        if (!enabled)
+        lock (_pipeline.SyncRoot)
+        {
+            _pipeline.Filter = enabled
+                ? new OneEuroFilter(minCutoff: cutoff, beta: speedCutoff)
+                : null;
+        }
+    }
+
+    public Personalization.C2.C2CandidateCorrector? SwapC2(Personalization.C2.C2CandidateCorrector? candidate,
+        Func<bool>? contextMatches = null) => _pipeline.SwapC2(candidate, contextMatches);
+
+    public CameraSettings? ActiveTransformation => (_pipeline.ImageTransformer as ImageTransformer)?.Transformation;
+
+    // ---- camera lifecycle -----------------------------------------------------------------------
+
+    private readonly SemaphoreSlim _lifecycle = new(1, 1);
+    private int _generation;
+    private CameraTarget? _target;
+    private volatile CameraState _state = CameraState.Stopped;
+
+    public string Name => "Face";
+    public CameraTarget? Target => _target;
+    public CameraState State => _state;
+    public event Action<CameraState>? StateChanged;
+    public DateTime? SourceInstalledAtUtc { get; private set; }
+    public IReadOnlyList<IRecoverableCameraSlot> Slots => _slots;
+
+    public TimeSpan? TimeSinceLastFrame
+    {
+        get
+        {
+            lock (_pipeline.SyncRoot)
+                return (_pipeline.VideoSource as SingleCameraSource)?.TimeSinceLastHealthyFrame;
+        }
+    }
+
+    public bool IsTargetPresent(string address) => _singleCameraSourceFactory.IsDevicePresent(address);
+
+    private void SetState(CameraState state)
+    {
+        if (_state == state)
             return;
+        _state = state;
+        StateChanged?.Invoke(state);
+    }
 
-        var faceArray = new float[Utils.FaceRawExpressions];
-        var faceFilter = new OneEuroFilter(
-            faceArray,
-            minCutoff: cutoff,
-            beta: speedCutoff
-        );
-
-        _pipeline.Filter = faceFilter;
+    public void FaultCamera()
+    {
+        Interlocked.Increment(ref _generation);
+        lock (_pipeline.SyncRoot)
+        {
+            _pipeline.VideoSource?.Dispose();
+            _pipeline.VideoSource = null;
+            SourceInstalledAtUtc = null;
+        }
+        SetState(_target is null ? CameraState.Stopped : CameraState.Reconnecting);
     }
 
     public void StopCamera()
     {
-        _pipeline.VideoSource?.Dispose();
-        _pipeline.VideoSource = null;
+        Interlocked.Increment(ref _generation);
+        _target = null;
+        lock (_pipeline.SyncRoot)
+        {
+            _pipeline.VideoSource?.Dispose();
+            _pipeline.VideoSource = null;
+            SourceInstalledAtUtc = null;
+        }
+        SetState(CameraState.Stopped);
+    }
+
+    /// <summary>
+    /// Stops the running video source ONLY if it is backed by a serial camera (its capture
+    /// address looks like a COM/tty serial port), releasing the exclusive serial handle so the
+    /// firmware page can open it. UVC (/dev/videoN) and IP feeds are left running.
+    /// </summary>
+    public bool StopSerialCameras()
+    {
+        var isSerial = IsSerialAddress(_target?.Address);
+        if (!isSerial)
+        {
+            lock (_pipeline.SyncRoot)
+                isSerial = _pipeline.VideoSource is SingleCameraSource single &&
+                    IsSerialAddress(single.Capture?.Source);
+        }
+        if (!isSerial) return false;
+
+        Interlocked.Increment(ref _generation);
+        _target = null;
+        lock (_pipeline.SyncRoot)
+        {
+            _pipeline.VideoSource?.Dispose();
+            _pipeline.VideoSource = null;
+            SourceInstalledAtUtc = null;
+        }
+        SetState(CameraState.Stopped);
+        return true;
+    }
+
+    // Mirrors SerialCameraCaptureFactory.CanConnect (the main project can't reference that type):
+    // serial camera addresses are COM* / /dev/tty* / /dev/cu*.
+    internal static bool IsSerialAddress(string? address)
+    {
+        if (string.IsNullOrEmpty(address)) return false;
+        var a = address.ToLowerInvariant();
+        return a.StartsWith("com") || a.StartsWith("/dev/tty") || a.StartsWith("/dev/cu");
     }
 
     public void SetVideoSource(IVideoSource videoSource)
     {
-        _pipeline.VideoSource = videoSource;
+        lock (_pipeline.SyncRoot)
+        {
+            _pipeline.VideoSource = videoSource;
+            SourceInstalledAtUtc = DateTime.UtcNow;
+        }
     }
 
     public void SetTransformation(CameraSettings cameraSettings)
     {
-        if (_pipeline.ImageTransformer is ImageTransformer dualImageTransformer)
+        lock (_pipeline.SyncRoot)
         {
-            dualImageTransformer.Transformation = cameraSettings;
+            if (_pipeline.ImageTransformer is ImageTransformer dualImageTransformer)
+            {
+                dualImageTransformer.Transformation = cameraSettings;
+            }
         }
     }
 
@@ -149,46 +281,135 @@ public class FacePipelineManager
         if (string.IsNullOrEmpty(cameraAddress))
             return false;
 
-        if (_pipeline.VideoSource != null)
+        var generation = Interlocked.Increment(ref _generation);
+        _target = new CameraTarget(cameraAddress, preferredBackend);
+
+        await _lifecycle.WaitAsync().ConfigureAwait(false);
+        try
         {
-            _pipeline.VideoSource.Dispose();
+            SetState(CameraState.Starting);
+            var opened = await OpenLocked(
+                cameraAddress, preferredBackend, generation,
+                SingleCameraSourceFactory.DefaultFirstFrameTimeout,
+                CancellationToken.None).ConfigureAwait(false);
+
+            if (Volatile.Read(ref _generation) == generation && _target is not null)
+                SetState(opened ? CameraState.Running : CameraState.Reconnecting);
+            return opened;
+        }
+        finally
+        {
+            _lifecycle.Release();
+        }
+    }
+
+    private async Task<bool> OpenLocked(
+        string cameraAddress,
+        string preferredBackend,
+        int generation,
+        TimeSpan firstFrameTimeout,
+        CancellationToken cancellationToken,
+        bool quiet = false)
+    {
+        lock (_pipeline.SyncRoot)
+        {
+            _pipeline.VideoSource?.Dispose();
             _pipeline.VideoSource = null;
+            SourceInstalledAtUtc = null;
         }
 
-        SingleCameraSource cam;
-        if (string.IsNullOrEmpty(preferredBackend))
-            cam = await _singleCameraSourceFactory.CreateStart(cameraAddress);
-        else
-            cam = await _singleCameraSourceFactory.CreateStart(cameraAddress, preferredBackend);
+        SingleCameraSource? cam;
+        try
+        {
+            cam = string.IsNullOrEmpty(preferredBackend)
+                ? await _singleCameraSourceFactory.CreateStart(
+                    cameraAddress, firstFrameTimeout, cancellationToken, quiet).ConfigureAwait(false)
+                : await _singleCameraSourceFactory.CreateStart(
+                    cameraAddress, preferredBackend, firstFrameTimeout, cancellationToken, quiet).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
 
         if (cam == null)
             return false;
 
-        _pipeline.VideoSource = cam;
+        lock (_pipeline.SyncRoot)
+        {
+            if (Volatile.Read(ref _generation) != generation || _target is null)
+            {
+                _logger.LogDebug("Discarding a face camera opened for a superseded request");
+                cam.Dispose();
+                return false;
+            }
+
+            _pipeline.VideoSource = cam;
+            SourceInstalledAtUtc = DateTime.UtcNow;
+        }
         return true;
+    }
+
+    public async Task<bool> RecoverAsync(
+        TimeSpan firstFrameTimeout,
+        CancellationToken cancellationToken)
+    {
+        var target = _target;
+        if (target is null)
+            return false;
+        var generation = Volatile.Read(ref _generation);
+
+        await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (Volatile.Read(ref _generation) != generation || _target is null)
+                return false;
+
+            SetState(CameraState.Reconnecting);
+            lock (_pipeline.SyncRoot)
+            {
+                _pipeline.VideoSource?.Dispose();
+                _pipeline.VideoSource = null;
+                SourceInstalledAtUtc = null;
+            }
+
+            if (!_singleCameraSourceFactory.IsDevicePresent(target.Address))
+                return false;
+
+            var opened = await OpenLocked(
+                target.Address, target.Backend, generation, firstFrameTimeout,
+                cancellationToken, quiet: true).ConfigureAwait(false);
+            if (opened)
+                SetState(CameraState.Running);
+            return opened;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        finally
+        {
+            _lifecycle.Release();
+        }
     }
 
     public async Task<bool> TryStartIfNotRunning(string cameraAddress, string preferredBackend)
     {
-        if (_pipeline.VideoSource != null)
-            return true;
+        lock (_pipeline.SyncRoot)
+        {
+            if (_pipeline.VideoSource != null &&
+                State == CameraState.Running &&
+                string.Equals(_target?.Address, cameraAddress, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
 
         return await StartVideoSource(cameraAddress, preferredBackend);
     }
 
     public void SetFilter(IFilter? filter)
     {
-        _pipeline.Filter = filter;
-    }
-
-    /// <summary>
-    /// Installs (or, with null, removes) the personal correction stage. Passing null must restore
-    /// stock behavior immediately - unlike <see cref="LoadFilter"/>, which historically returns
-    /// early when disabled and leaves a previously installed filter in place.
-    /// </summary>
-    public void SetCorrector(IExpressionCorrector? corrector)
-    {
-        _pipeline.Corrector = corrector;
+        lock (_pipeline.SyncRoot)
+            _pipeline.Filter = filter;
     }
 
     public static string GenerateMD5(string filepath)

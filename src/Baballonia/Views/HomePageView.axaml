@@ -244,6 +244,13 @@
                   </Grid>
                 </Grid>
 
+                <TextBlock
+                    FontSize="12"
+                    IsVisible="{Binding LeftCamera.StatusText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                    Opacity="0.75"
+                    Text="{Binding LeftCamera.StatusText}"
+                    TextWrapping="Wrap" />
+
                 <StackPanel Orientation="Horizontal" Spacing="8">
                   <RadioButton
                       Content="{x:Static assets:Resources.Home_Cameras_Tracking_Mode}"
@@ -513,6 +520,13 @@
                   </Grid>
                 </Grid>
 
+                <TextBlock
+                    FontSize="12"
+                    IsVisible="{Binding RightCamera.StatusText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                    Opacity="0.75"
+                    Text="{Binding RightCamera.StatusText}"
+                    TextWrapping="Wrap" />
+
                 <StackPanel Orientation="Horizontal" Spacing="8">
                   <RadioButton
                       Content="{x:Static assets:Resources.Home_Cameras_Tracking_Mode}"
@@ -777,6 +791,13 @@
                       Padding="12,8" />
                 </Grid>
               </Grid>
+
+              <TextBlock
+                  FontSize="12"
+                  IsVisible="{Binding FaceCamera.StatusText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                  Opacity="0.75"
+                  Text="{Binding FaceCamera.StatusText}"
+                  TextWrapping="Wrap" />
 
               <StackPanel Orientation="Horizontal" Spacing="8">
                 <RadioButton

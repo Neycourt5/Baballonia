@@ -1,240 +1,389 @@
-﻿using Baballonia.Contracts;
+﻿using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using Baballonia.Services.events;
 using Baballonia.Services.Inference.Enums;
-using OpenCvSharp;
-using System;
-using System.Collections.Generic;
+using Baballonia.Services.Personalization;
+using Baballonia.Services.Personalization.Eye;
 
 namespace Baballonia.Services.Inference;
 
-public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus) : DefaultProcessingPipeline, IDisposable
+public class EyeProcessingPipeline(IEyePipelineEventBus eyePipelineEventBus, PipelineMetrics metrics,
+    EyeStageTrace? stageTrace = null) : DefaultProcessingPipeline, IDisposable
 {
+    private long _traceFrame;
     private readonly FastCorruptionDetector.FastCorruptionDetector _fastCorruptionDetector = new();
     private readonly ImageCollector _imageCollector = new();
+    private float _lastEyeY;
+    private long _lastPostProcessTimestamp;
+
+    private IExpressionCorrector? _corrector;
+    private float[]? _stockVector;
+    private float[]? _correctedScratch;
+    private OrderedFloatMap? _boundMap;
+    private bool _bindingUsable;
+    private string? _reportedBindingError;
+
+    /// <summary>
+    /// Optional personalized correction, applied to the model's own output before filtering and
+    /// geometry. Null (the default) is exactly stock behaviour.
+    /// </summary>
+    /// <remarks>
+    /// Raw model space is the only place per-eye correction is meaningful: the geometry pass
+    /// downstream shares one vertical gaze between the eyes and cross-blends horizontal by lid
+    /// openness, so a per-eye correction applied there could not be inverted back to one eye.
+    ///
+    /// Assignment takes <see cref="DefaultProcessingPipeline.SyncRoot"/>, which the inference worker
+    /// holds for the whole tick, so the caller may dispose the outgoing corrector once the setter
+    /// returns.
+    /// </remarks>
+    public IExpressionCorrector? Corrector
+    {
+        get { lock (SyncRoot) return _corrector; }
+        set { lock (SyncRoot) _corrector = value; }
+    }
 
     public bool StabilizeEyes { get; set; } = true;
 
     /// <summary>
-    /// Optional V2 stage. Null is intentionally the exact pre-V2 path; no copy, allocation or
-    /// alternate postprocessing occurs in that case.
+    /// How strongly the two eyes are forced to point the same way, 0..1. Zero preserves whatever
+    /// vergence survives <see cref="StabilizeEyes"/>; one makes them fully conjugate. Only has an
+    /// effect while <see cref="StabilizeEyes"/> is on, since that is where vergence is computed.
     /// </summary>
+    public float GazeConjugateAmount { get; set; }
+    public EyeOutputPostProcessor? PostProcessor { get; set; }
 
     /// <summary>
-    /// Runs one eye inference tick.
+    /// For single-camera (split) eye feeds, swap which half drives which eye. Off by default — most
+    /// split devices (e.g. BSB2E) want the unswapped orientation. User-controlled via the
+    /// "Split Eye Video Swap" advanced setting; has no effect on dual-camera setups.
     /// </summary>
-    /// <remarks>
-    /// Every native buffer this method creates is released in the finally block. It previously
-    /// leaked the 8-channel temporal stack on every tick and disposed the transformed frame twice,
-    /// while returning early on six paths without releasing the camera frame at all - which at
-    /// ~100 ticks a second is a large amount of native memory churn for a method that is supposed
-    /// to be the cheap half of the pipeline.
-    /// </remarks>
-    public float[]? RunUpdate()
+    public bool SwapSplitEyes { get; set; }
+
+    /// <summary>
+    /// The raw (un-smoothed) result of the most recent <see cref="RunUpdate"/> — geometry-corrected
+    /// exactly like the returned map but with the OneEuroFilter skipped. Native eye tracking (DFR /
+    /// VRChat native) reads this for lowest latency. Shares RunUpdate's reused-buffer lifetime: only
+    /// valid until the next RunUpdate on this pipeline.
+    /// </summary>
+    public OrderedFloatMap? RawEyeResult { get; private set; }
+
+    /// <summary>Drops temporal frames whenever the camera source or eye assignment changes.</summary>
+    public void ResetTemporalHistory()
     {
-        var frame = VideoSource?.GetFrame(ColorType.Gray8);
-        if (frame == null)
+        _imageCollector.Reset();
+        RawEyeResult = null;
+        _lastEyeY = 0f;
+        _lastPostProcessTimestamp = 0;
+        PostProcessor?.Reset();
+        _boundMap = null;
+    }
+
+    public OrderedFloatMap? RunUpdate()
+    {
+        var sw = Stopwatch.StartNew();
+
+        // `frame` is owned by us (AcquireRawMat contract); `using` frees it on every exit path.
+        // Subscribers to the published events copy the Mat synchronously during Publish, so it is
+        // safe to dispose afterwards.
+        using var frame = VideoSource?.GetFrame(ColorType.Gray8);
+        if(frame == null)
             return null;
 
-        Mat? transformed = null;
-        Mat? collected = null;
-
-        try
+        if (_fastCorruptionDetector.IsCorrupted(frame).isCorrupted)
         {
-            if (_fastCorruptionDetector.IsCorrupted(frame).isCorrupted)
-                return null;
+            // Counted rather than dropped silently, so "tracking went quiet in dim light" can be
+            // told apart from "the camera stalled" on the Debug page.
+            System.Threading.Interlocked.Increment(ref metrics.EyeCorruptFrames);
+            return null;
+        }
 
-            eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
+        eyePipelineEventBus.Publish(new EyePipelineEvents.NewFrameEvent(frame));
+        metrics.EyeCaptureMs = PipelineMetrics.Ewma(metrics.EyeCaptureMs, sw.Elapsed.TotalMilliseconds);
 
-            transformed = ImageTransformer?.Apply(frame);
-            if (transformed == null)
-                return null;
+        // A single-camera (split-eye) feed drives both eyes from one sensor. Whether to swap which
+        // half feeds which eye is user-controlled (SwapSplitEyes / "Split Eye Video Swap"), defaulting
+        // to unswapped. Dual-camera setups assign each eye explicitly, so they are always left as-is.
+        if (ImageTransformer is DualImageTransformer splitTransformer)
+            splitTransformer.SwapEyes = VideoSource is VideoSources.SingleCameraSource && SwapSplitEyes;
 
-            eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
+        sw.Restart();
+        using var transformed = ImageTransformer?.Apply(frame);
+        if(transformed == null)
+            return null;
 
-            var timestampTicks = DateTime.UtcNow.Ticks;
+        eyePipelineEventBus.Publish(new EyePipelineEvents.NewTransformedFrameEvent(transformed));
 
-            collected = _imageCollector.Apply(transformed);
-            if (collected == null)
-                return null;   // still filling the temporal queue
+        // `collected` (the 8-channel temporal stack) is owned by us; `using` frees it on all paths.
+        using var collected = _imageCollector.Apply(transformed);
+        if (collected == null)
+            return null;
+        metrics.EyeTransformMs = PipelineMetrics.Ewma(metrics.EyeTransformMs, sw.Elapsed.TotalMilliseconds);
 
-            if (InferenceService == null)
-                return null;
+        if (InferenceService == null)
+            return null;
 
-            ImageConverter?.Convert(collected, InferenceService.GetInputTensor());
+        sw.Restart();
+        ImageConverter?.Convert(collected, InferenceService.GetInputTensor());
 
-            var modelResult = InferenceService.Run();
-            if (modelResult == null)
-                return null;
+        var inferenceResult = InferenceService?.Run();
+        if(inferenceResult == null)
+            return null;
+        metrics.EyeInferenceMs = PipelineMetrics.Ewma(metrics.EyeInferenceMs, sw.Elapsed.TotalMilliseconds);
 
-            // This detached snapshot is intentionally published before the compatibility
-            // projection. Diagnostics can therefore see every native output (including the
-            // current temporal model's widen/squint/brow channels) without changing the stable
-            // six-value event consumed by calibration and V2.
-            eyePipelineEventBus.Publish(new EyePipelineEvents.NewRawModelOutputEvent(
-                ResolveModelOutputNames(modelResult, InferenceService),
-                Array.AsReadOnly((float[])modelResult.Clone()),
-                timestampTicks));
+        var traceFrame = ++_traceFrame;
+        var sourceIdentity = VideoSource?.LastFrameIdentity;
+        if (stageTrace?.Enabled == true)
+            stageTrace.Add(traceFrame, "alpha_raw", inferenceResult, sourceIdentity,
+                $"split_swap={SwapSplitEyes}; stabilize={StabilizeEyes}; conjugate={GazeConjugateAmount}");
+        Personalize(inferenceResult);
+        stageTrace?.Add(traceFrame, "personal_raw", inferenceResult, sourceIdentity);
 
-            // Newer trained eye models may expose expression values in addition to gaze/lid. Their
-            // metadata describes a 12-value right-eye-first layout, while the rest of Baballonia
-            // intentionally retains the six-value legacy contract. Project by name before the
-            // six-slot OneEuro filter and stock post-processing; simply truncating would mistake
-            // right-eye widen/squint/brow for the left eye and used to crash when filtering was on.
-            var inferenceResult = ProjectLegacyEyeOutput(modelResult, InferenceService);
-
-            // Published before the filter and before ProcessExpressions, so subscribers see the
-            // model's raw gaze/lid values in the stable legacy order. The processing below is
-            // deliberately lossy - it fuses the two eyes' vertical gaze into one value and lets a
-            // closed eye borrow the other's yaw, none of which can be undone from the outside.
-            eyePipelineEventBus.Publish(new EyePipelineEvents.NewRawExpressionsEvent(
-                transformed, inferenceResult, timestampTicks));
-
-            if (Filter != null)
-            {
-                inferenceResult = Filter.Filter(inferenceResult);
-            }
-
+        sw.Restart();
+        // OneEuroFilter returns its own buffer and leaves the input untouched, so the runner's map
+        // still holds the raw values. Process both: the raw map feeds native eye tracking (DFR), the
+        // filtered map feeds VRCFT/UI as before.
+        OrderedFloatMap? rawForDfr = null;
+        if (Filter != null)
+        {
+            var filtered = Filter.Filter(inferenceResult);
+            stageTrace?.Add(traceFrame, "filtered_raw", filtered, sourceIdentity);
             ProcessExpressions(ref inferenceResult);
-
-            eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
-
-            return inferenceResult;
+            rawForDfr = inferenceResult;
+            inferenceResult = filtered;
         }
-        finally
+
+        ProcessExpressions(ref inferenceResult);
+        stageTrace?.Add(traceFrame, "geometry", inferenceResult, sourceIdentity);
+
+        // The post-processor belongs only to the filtered VRCFT/UI path. When filtering is disabled,
+        // preserve a snapshot for native/DFR before sanitizing the same runner-owned map in place.
+        if (PostProcessor != null)
         {
-            frame.Dispose();
-            transformed?.Dispose();
-            collected?.Dispose();
+            RawEyeResult = rawForDfr ?? Clone(inferenceResult);
+            // Apply may return a wider map than it was given: a model with no widen/squint channels
+            // gets them derived and appended. The raw/DFR snapshot above is taken first and is
+            // deliberately never widened - native tracking wants the model, not our inference.
+            PostProcessor.Trace = stageTrace;
+            PostProcessor.TraceFrame = traceFrame;
+            inferenceResult = PostProcessor.Apply(inferenceResult, NextPostProcessDeltaSeconds());
+            stageTrace?.Add(traceFrame, "post_processing", inferenceResult, sourceIdentity);
+            PublishEyeDiagnostics(inferenceResult, PostProcessor);
         }
+        else
+        {
+            RawEyeResult = rawForDfr ?? inferenceResult; // filter off: raw == filtered
+            _lastPostProcessTimestamp = 0;
+        }
+
+        eyePipelineEventBus.Publish(new EyePipelineEvents.NewFilteredResultEvent(inferenceResult));
+        metrics.EyePostMs = PipelineMetrics.Ewma(metrics.EyePostMs, sw.Elapsed.TotalMilliseconds);
+
+        return inferenceResult;
     }
 
     /// <summary>
-    /// Drops the temporal frame history. Call when the camera changes.
+    /// Publishes the model's own output and applies the personalized corrector, in place.
     /// </summary>
     /// <remarks>
-    /// Without this, frames from the previous camera stay in the queue and get stacked with new
-    /// ones, so the model is handed four "consecutive" frames spanning a camera switch.
+    /// Runs before the filter so smoothing sees the corrected signal and a correction can never put
+    /// a step on the wire, and before the geometry pass because that pass couples the two eyes.
+    /// Nothing here may throw: this is inside the worker's try, whose catch tears down every eye
+    /// camera.
     /// </remarks>
-    public void ResetTemporalState() => _imageCollector.Reset();
-
-    private static IReadOnlyList<string> ResolveModelOutputNames(
-        float[] modelResult,
-        IInferenceRunner runner)
+    private void Personalize(OrderedFloatMap result)
     {
-        if (runner is INamedInferenceOutput { OutputNames: { } names } &&
-            names.Count == modelResult.Length)
-        {
-            var snapshot = new string[names.Count];
-            for (var i = 0; i < snapshot.Length; i++)
-                snapshot[i] = names[i];
+        var corrector = _corrector;
 
-            return Array.AsReadOnly(snapshot);
-        }
-
-        if (modelResult.Length == Utils.EyeRawExpressions)
+        if (!ReferenceEquals(_boundMap, result))
         {
-            return Array.AsReadOnly(new[]
+            _boundMap = result;
+            _bindingUsable = EyePersonalizationSchemaBinding.TryBind(result, out var error);
+            _stockVector = _bindingUsable ? new float[EyePersonalizationSchema.ExpressionCount] : null;
+            _correctedScratch = null;
+
+            // Once per model, not once per frame: the stock six-output model is a normal thing to
+            // be running and must not fill the log.
+            if (!_bindingUsable && error is not null && error != _reportedBindingError)
             {
-                "rightEyeY", "rightEyeX", "rightEyeLid",
-                "leftEyeY", "leftEyeX", "leftEyeLid",
-            });
+                _reportedBindingError = error;
+                eyePipelineEventBus.Publish(new EyePipelineEvents.ExceptionEvent(
+                    new InvalidOperationException(error)));
+            }
         }
 
-        var fallback = new string[modelResult.Length];
-        for (var i = 0; i < fallback.Length; i++)
-            fallback[i] = $"output[{i}]";
+        if (!_bindingUsable || _stockVector is null)
+            return;
 
-        return Array.AsReadOnly(fallback);
-    }
+        var stock = _stockVector;
+        result.ValuesSpan.CopyTo(stock);
+        eyePipelineEventBus.Publish(
+            new EyePipelineEvents.NewRawEyeExpressionsEvent(stock, DateTime.UtcNow.Ticks));
 
-    private static float[] ProjectLegacyEyeOutput(float[] modelResult, IInferenceRunner runner)
-    {
-        if (modelResult.Length == Utils.EyeRawExpressions)
-            return modelResult;
-
-        if (runner is not INamedInferenceOutput { OutputNames: { } outputNames } ||
-            outputNames.Count != modelResult.Length)
+        if (corrector is null)
         {
-            throw new InvalidOperationException(
-                $"Eye model emits {modelResult.Length} values, but has no matching named output layout.");
+            metrics.EyeCorrectorDelta = 0f;
+            return;
         }
 
-        var indices = new[]
+        var sw = Stopwatch.StartNew();
+        float[] corrected;
+        try
         {
-            FindOutput(outputNames, "rightEyeY", "rightEyePitch"),
-            FindOutput(outputNames, "rightEyeX", "rightEyeYaw"),
-            FindOutput(outputNames, "rightEyeLid"),
-            FindOutput(outputNames, "leftEyeY", "leftEyePitch"),
-            FindOutput(outputNames, "leftEyeX", "leftEyeYaw"),
-            FindOutput(outputNames, "leftEyeLid"),
-        };
-
-        var projected = new float[Utils.EyeRawExpressions];
-        for (var i = 0; i < projected.Length; i++)
-            projected[i] = modelResult[indices[i]];
-
-        return projected;
-    }
-
-    private static int FindOutput(IReadOnlyList<string> outputNames, params string[] candidates)
-    {
-        for (var i = 0; i < outputNames.Count; i++)
+            corrected = corrector.Correct(InferenceService!.GetInputTensor(), stock);
+        }
+        catch
         {
-            var actual = outputNames[i].TrimStart('/');
-            foreach (var candidate in candidates)
-                if (string.Equals(actual, candidate, StringComparison.OrdinalIgnoreCase))
-                    return i;
+            // A corrector that throws is a corrector that stops existing, not a camera fault.
+            _corrector = null;
+            metrics.EyeCorrectorDelta = 0f;
+            return;
         }
 
-        throw new InvalidOperationException(
-            $"Eye model output metadata is missing '{string.Join("' or '", candidates)}'.");
+        if (corrected is null || corrected.Length != stock.Length)
+        {
+            _corrector = null;
+            metrics.EyeCorrectorDelta = 0f;
+            return;
+        }
+
+        var delta = 0f;
+        for (var i = 0; i < corrected.Length; i++)
+        {
+            if (!float.IsFinite(corrected[i]))
+                return; // Leave the stock values in place; publish nothing that is not real.
+            delta += Math.Abs(corrected[i] - stock[i]);
+        }
+
+        _correctedScratch ??= new float[stock.Length];
+        corrected.AsSpan().CopyTo(_correctedScratch);
+        eyePipelineEventBus.Publish(
+            new EyePipelineEvents.NewCorrectedEyeExpressionsEvent(stock, _correctedScratch));
+
+        corrected.AsSpan().CopyTo(result.ValuesSpan);
+        metrics.EyeCorrectorDelta = delta / corrected.Length;
+        metrics.EyeCorrectMs = PipelineMetrics.Ewma(metrics.EyeCorrectMs, sw.Elapsed.TotalMilliseconds);
     }
 
-    private bool ProcessExpressions(ref float[] arKitExpressions)
+    private bool ProcessExpressions(ref OrderedFloatMap arKitExpressions)
     {
-        if (arKitExpressions.Length < Utils.EyeRawExpressions)
-            return false;
 
+        
         const float mulV = 2.0f;
         const float mulY = 2.0f;
 
-        var leftPitch = arKitExpressions[0] * mulY - mulY / 2;
-        var leftYaw = arKitExpressions[1] * mulV - mulV / 2;
-        var leftLid = 1 - arKitExpressions[2];
+        var leftX = arKitExpressions["/leftEyeX"] * mulY - mulY / 2;
+        var leftY = arKitExpressions["/leftEyeY"] * mulV - mulV / 2;
+        var leftLid = 1 - arKitExpressions["/leftEyeLid"];
 
-        var rightPitch = arKitExpressions[3] * mulY - mulY / 2;
-        var rightYaw = arKitExpressions[4] * mulV - mulV / 2;
-        var rightLid = 1 - arKitExpressions[5];
+        var rightX = arKitExpressions["/rightEyeX"] * mulY - mulY / 2;
+        var rightY = arKitExpressions["/rightEyeY"] * mulV - mulV / 2;
+        var rightLid = 1 - arKitExpressions["/rightEyeLid"];
 
-        var eyeY = (leftPitch * leftLid + rightPitch * rightLid) / (leftLid + rightLid);
+        var lidSum = leftLid + rightLid;
+        var eyeY = _lastEyeY;
+        if (lidSum > 0.02f)
+        {
+            var weightedEyeY = (leftY * leftLid + rightY * rightLid) / lidSum;
+            if (float.IsFinite(weightedEyeY))
+                eyeY = weightedEyeY;
+        }
+        if (float.IsFinite(eyeY))
+            _lastEyeY = eyeY;
 
-        var leftEyeYawCorrected = rightYaw * (1 - leftLid) + leftYaw * leftLid;
-        var rightEyeYawCorrected = leftYaw * (1 - rightLid) + rightYaw * rightLid;
+        var leftEyeXCorrected = rightX * (1 - leftLid) + leftX * leftLid;
+        var rightEyeXCorrected = leftX * (1 - rightLid) + rightX * rightLid;
 
         if (StabilizeEyes)
         {
-            var rawConvergence = (rightEyeYawCorrected - leftEyeYawCorrected) / 2.0f;
+            var rawConvergence = (leftEyeXCorrected - rightEyeXCorrected) / 2.0f;
             var convergence = Math.Max(rawConvergence, 0.0f); // We clamp the value here to avoid accidental divergence, as the model sometimes decides that's a thing
 
-            var averagedYaw = (rightEyeYawCorrected + leftEyeYawCorrected) / 2.0f;
+            // How much of the remaining left/right disagreement to keep. The eyes are already
+            // averaged and prevented from diverging; what is left is vergence, which is real when
+            // you look at something close and noise when the two cameras merely disagree. Zero
+            // keeps all of it (the long-standing behaviour); one makes the eyes fully conjugate.
+            convergence *= 1f - GazeConjugateAmount;
 
-            leftEyeYawCorrected = averagedYaw - convergence;
-            rightEyeYawCorrected = averagedYaw + convergence;
+            var averagedX = (rightEyeXCorrected + leftEyeXCorrected) / 2.0f;
+
+            leftEyeXCorrected = averagedX + convergence;
+            rightEyeXCorrected = averagedX - convergence;
         }
 
-        // [left pitch, left yaw, left lid...
-        float[] convertedExpressions = new float[Utils.EyeRawExpressions];
+        // update the dict
+        arKitExpressions["/leftEyeX"] = leftEyeXCorrected;
+        arKitExpressions["/leftEyeY"] = eyeY;
 
-        convertedExpressions[0] = rightEyeYawCorrected; // left pitch
-        convertedExpressions[1] = eyeY;                   // left yaw
-        convertedExpressions[2] = rightLid;               // left lid
-        convertedExpressions[3] = leftEyeYawCorrected;  // right pitch
-        convertedExpressions[4] = eyeY;                   // right yaw
-        convertedExpressions[5] = leftLid;                // right lid
+        arKitExpressions["/rightEyeX"] = rightEyeXCorrected;
+        arKitExpressions["/rightEyeY"] = eyeY;
 
-        arKitExpressions = convertedExpressions;
+        arKitExpressions["/leftEyeLid"] = leftLid;
+        arKitExpressions["/rightEyeLid"] = rightLid;
+
+        //try{
+
+        //arKitExpressions["/leftEyeWiden"] = arKitExpressions["/rightEyeWiden"] = (arKitExpressions["/leftEyeWiden"] = arKitExpressions["/rightEyeWiden"]) / 2;
+        //arKitExpressions["/leftEyeSquint"] = arKitExpressions["/rightEyeSquint"] = (arKitExpressions["/leftEyeSquint"] = arKitExpressions["/rightEyeSquint"]) / 2;
+
+        //}catch{}
 
         return true;
+    }
+
+    /// <summary>
+    /// Copies the frame's final eye values into the shared metrics for the Debug page. Cheap enough
+    /// to run unconditionally: twelve float stores and no allocation.
+    /// </summary>
+    private void PublishEyeDiagnostics(OrderedFloatMap map, EyeOutputPostProcessor post)
+    {
+        static float Read(OrderedFloatMap m, string key) => m.TryGetValue(key, out var v) ? v : 0f;
+
+        metrics.EyeLeftRawOpenness = post.LeftRawOpenness;
+        metrics.EyeLeftOpenness = Read(map, "/leftEyeLid");
+        metrics.EyeLeftWiden = Read(map, "/leftEyeWiden");
+        metrics.EyeLeftSquint = Read(map, "/leftEyeSquint");
+        metrics.EyeLeftGazeX = Read(map, "/leftEyeX");
+        metrics.EyeLeftGazeY = Read(map, "/leftEyeY");
+
+        metrics.EyeRightRawOpenness = post.RightRawOpenness;
+        metrics.EyeRightOpenness = Read(map, "/rightEyeLid");
+        metrics.EyeRightWiden = Read(map, "/rightEyeWiden");
+        metrics.EyeRightSquint = Read(map, "/rightEyeSquint");
+        metrics.EyeRightGazeX = Read(map, "/rightEyeX");
+        metrics.EyeRightGazeY = Read(map, "/rightEyeY");
+
+        metrics.EyeWidenSquintDerived = post.IsDerivingWidenSquint;
+        metrics.EyeSyncReleased = post.IsWinking;
+
+        if (post.BlinkGuard is { } guard)
+        {
+            metrics.EyeBlinkGuardEnabled = guard.Settings.Enabled;
+            metrics.EyeBlinkGuardIntervening = guard.IsIntervening;
+            metrics.EyeBlinkGuardGlitches = guard.Diagnostics.Counters.GlitchesPrevented;
+        }
+    }
+
+    private float NextPostProcessDeltaSeconds()
+    {
+        var now = Stopwatch.GetTimestamp();
+        if (_lastPostProcessTimestamp == 0)
+        {
+            _lastPostProcessTimestamp = now;
+            return 0f;
+        }
+
+        var dt = (float)Stopwatch.GetElapsedTime(_lastPostProcessTimestamp, now).TotalSeconds;
+        _lastPostProcessTimestamp = now;
+        return Math.Max(dt, 0f);
+    }
+
+    private static OrderedFloatMap Clone(OrderedFloatMap source)
+    {
+        var result = new OrderedFloatMap(System.Linq.Enumerable.ToArray(source.Keys));
+        foreach (var pair in source)
+            result[pair.Key] = pair.Value;
+        return result;
     }
 
 

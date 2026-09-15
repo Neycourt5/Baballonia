@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Threading;
 using Baballonia.Contracts;
 using Baballonia.Helpers;
 using Baballonia.Services;
@@ -39,9 +40,20 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         public CameraSettings CameraSettings;
 
         [ObservableProperty] private WriteableBitmap? _bitmap;
+
+        // Off-screen buffer for the preview. We write into this, then swap it into Bitmap with a
+        // single reference change (see UpdateBitmap) instead of the old null->value round-trip.
+        private WriteableBitmap? _backBuffer;
+
+        // Gates preview blits. Set false while the Home page isn't on-screen so cameras can keep
+        // running without us doing per-frame bitmap work the user can't see. Read on the worker
+        // thread (DispatchImage), written on the UI thread -> volatile.
+        public volatile bool PreviewActive = true;
+
         [ObservableProperty] private bool _startButtonEnabled = true;
         [ObservableProperty] private bool _stopButtonEnabled = false;
         [ObservableProperty] private bool _hintEnabled = false;
+        [ObservableProperty] private string _statusText = string.Empty;
         [ObservableProperty] private Rect _overlayRectangle;
 
         // this particular property is used as event indicator lmao
@@ -181,16 +193,52 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
             Save();
         }
 
+        // Inference now runs on a background worker thread, so these pipeline events arrive off the
+        // UI thread. Preview is throttled to ~30 fps (independently of the inference rate) and the
+        // actual bitmap blit is marshalled to the UI thread. The source Mat is owned by the pipeline
+        // and freed as soon as this publish returns, so we clone it here — still synchronously on the
+        // worker thread while it is alive — before handing the copy to the dispatcher.
+        private const long PreviewMinIntervalMs = 33;
+        private long _lastPreviewTick;
+
+        private void DispatchImage(Mat? image, Action<Mat> handler)
+        {
+            if (image == null || image.Empty())
+            {
+                Dispatcher.UIThread.Post(() => handler(null!));
+                return;
+            }
+
+            if (!IsCameraRunning)
+                return;
+
+            // Skip preview work entirely when the Home page isn't visible.
+            if (!PreviewActive)
+                return;
+
+            var now = Environment.TickCount64;
+            if (now - _lastPreviewTick < PreviewMinIntervalMs)
+                return;
+            _lastPreviewTick = now;
+
+            var owned = image.Clone();
+            Dispatcher.UIThread.Post(() =>
+            {
+                try { handler(owned); }
+                finally { owned.Dispose(); }
+            });
+        }
+
         public void FaceNewImageUpdateEventHandler(FacePipelineEvents.NewFrameEvent e)
         {
             if (IsCropMode)
-                FaceImageUpdateHandler(e.image);
+                DispatchImage(e.image, FaceImageUpdateHandler);
         }
 
         public void FaceNewTransformedUpdateEventHandler(FacePipelineEvents.NewTransformedFrameEvent e)
         {
             if (!IsCropMode)
-                FaceImageUpdateHandler(e.image);
+                DispatchImage(e.image, FaceImageUpdateHandler);
         }
 
         private void FaceImageUpdateHandler(Mat image)
@@ -219,13 +267,13 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         public void EyeNewImageUpdateEventHandler(EyePipelineEvents.NewFrameEvent e)
         {
             if (IsCropMode)
-                EyeImageUpdateHandler(e.image);
+                DispatchImage(e.image, EyeImageUpdateHandler);
         }
 
         public void EyeNewTransformedUpdateEventHandler(EyePipelineEvents.NewTransformedFrameEvent e)
         {
             if (!IsCropMode)
-                EyeImageUpdateHandler(e.image);
+                DispatchImage(e.image, EyeImageUpdateHandler);
         }
 
         private void EyeImageUpdateHandler(Mat image)
@@ -253,16 +301,16 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
                     case Camera.Left:
                     {
                         var leftHalf = new OpenCvSharp.Rect(0, 0, width / 2, height);
-                        var leftRoi = new Mat(image, leftHalf);
-
-
+                        // ROI views are owned here; dispose them so they don't leak native
+                        // memory on the UI thread at preview rate.
+                        using var leftRoi = new Mat(image, leftHalf);
                         UpdateBitmap(leftRoi);
                         break;
                     }
                     case Camera.Right:
                     {
                         var rightHalf = new OpenCvSharp.Rect(width / 2, 0, width / 2, height);
-                        var rightRoi = new Mat(image, rightHalf);
+                        using var rightRoi = new Mat(image, rightHalf);
                         UpdateBitmap(rightRoi);
                         break;
                     }
@@ -270,51 +318,72 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
             }
             else if (channels == 2)
             {
+                // Split() allocates one Mat per channel; dispose both regardless of which we use.
                 var images = image.Split();
-
-                if (Camera == Camera.Left)
-                    UpdateBitmap(images[0]);
-                else if (Camera == Camera.Right)
-                    UpdateBitmap(images[1]);
+                try
+                {
+                    if (Camera == Camera.Left)
+                        UpdateBitmap(images[0]);
+                    else if (Camera == Camera.Right)
+                        UpdateBitmap(images[1]);
+                }
+                finally
+                {
+                    foreach (var split in images)
+                        split.Dispose();
+                }
             }
         }
 
         void UpdateBitmap(Mat image)
         {
-            if (_bitmap is null ||
-                _bitmap.PixelSize.Width != image.Width ||
-                _bitmap.PixelSize.Height != image.Height)
+            // Double-buffered: write into the off-screen back buffer, then present it by assigning
+            // a genuinely different reference into Bitmap. This raises one PropertyChanged and one
+            // clean re-render, replacing the old "Bitmap = null; Bitmap = tmp" hack that forced a
+            // 0-size relayout plus a second layout pass every frame. It also means the compositor
+            // never reads a buffer we're mid-write into.
+            if (_backBuffer is null ||
+                _backBuffer.PixelSize.Width != image.Width ||
+                _backBuffer.PixelSize.Height != image.Height)
             {
-                _bitmap = new WriteableBitmap(
+                _backBuffer = new WriteableBitmap(
                     new PixelSize(image.Width, image.Height),
                     new Vector(96, 96),
                     image.Channels() == 3 ? PixelFormats.Bgr24 : PixelFormats.Gray8,
                     AlphaFormat.Opaque);
             }
 
-            CropManager.MaxSize.Height = _bitmap.PixelSize.Height;
-            CropManager.MaxSize.Width = _bitmap.PixelSize.Width;
-
-            if (!image.IsContinuous()) image = image.Clone();
+            CropManager.MaxSize.Height = _backBuffer.PixelSize.Height;
+            CropManager.MaxSize.Width = _backBuffer.PixelSize.Width;
 
             // scope for "using" a lock hehe...
             {
-                using var frameBuffer = _bitmap.Lock();
+                using var frameBuffer = _backBuffer.Lock();
 
-                var srcPtr = image.Data;
-                var destPtr = frameBuffer.Address;
-                var size = image.Rows * image.Cols * image.ElemSize();
+                // Copy row by row honouring the source stride (image.Step()) and destination stride
+                // (frameBuffer.RowBytes). This handles non-continuous ROI views directly, so we no
+                // longer clone() them every frame.
+                var rows = image.Rows;
+                var srcStride = image.Step();
+                var dstStride = frameBuffer.RowBytes;
+                var rowBytes = (long)image.Cols * image.ElemSize();
 
                 unsafe
                 {
-                    Buffer.MemoryCopy(srcPtr.ToPointer(), destPtr.ToPointer(), size, size);
+                    var src = (byte*)image.Data.ToPointer();
+                    var dst = (byte*)frameBuffer.Address.ToPointer();
+                    for (var y = 0; y < rows; y++)
+                        Buffer.MemoryCopy(src + y * srcStride, dst + (long)y * dstStride, dstStride, rowBytes);
                 }
             }
 
             IsCameraRunning = true;
-            var tmp = Bitmap;
-            Bitmap = null;
-            Bitmap = tmp;
+
+            // Present the freshly written buffer and recycle the previously displayed one as the
+            // next back buffer (reallocated above only if the frame size changes).
+            var previous = _bitmap;
+            Bitmap = _backBuffer;
+            _backBuffer = previous;
         }
 
         partial void OnFlipHorizontallyChanged(bool value)
@@ -440,7 +509,7 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     private void Initialize()
     {
         var hasRead = _localSettings.ReadSetting<bool>("EyeDataOptInRead");
-        if (!hasRead)
+        if (!hasRead && DataUploadConfiguration.FromEnvironment().IsConfigured)
         {
             _dropOverlayService.Show();
         }
@@ -458,6 +527,9 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         FaceCamera.PropertyChanged += CameraControllerModel_PropertyChanged;
         LeftCamera.PropertyChanged += CameraControllerModel_PropertyChanged;
         RightCamera.PropertyChanged += CameraControllerModel_PropertyChanged;
+        _facePipelineManager.StateChanged += FaceCameraStateChanged;
+        _eyePipelineManager.LeftSlot.StateChanged += LeftCameraStateChanged;
+        _eyePipelineManager.RightSlot.StateChanged += RightCameraStateChanged;
 
         OnCameraModelUpdate(FaceCamera);
         OnCameraModelUpdate(LeftCamera);
@@ -481,6 +553,18 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         IsInitialized = true;
 
         _ = TryStartCamerasAsync();
+    }
+
+    /// <summary>
+    /// Enables/disables per-frame preview blitting for all camera tiles. Called by the view when the
+    /// Home page is attached to / detached from the visual tree so cameras keep tracking while the
+    /// page is off-screen, without spending UI-thread time on bitmaps nobody can see.
+    /// </summary>
+    public void SetPreviewActive(bool active)
+    {
+        if (LeftCamera != null) LeftCamera.PreviewActive = active;
+        if (RightCamera != null) RightCamera.PreviewActive = active;
+        if (FaceCamera != null) FaceCamera.PreviewActive = active;
     }
 
     private void CameraControllerModel_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -511,41 +595,82 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
     private void SetCameraRunning(CameraControllerModel model)
     {
         model.IsCameraRunning = true;
+        model.StatusText = string.Empty;
         SetButtons(model, false, true);
+    }
+
+    private void FaceCameraStateChanged(CameraState state) =>
+        Dispatcher.UIThread.Post(() => ShowCameraState(FaceCamera, state));
+
+    private void LeftCameraStateChanged(CameraState state) =>
+        Dispatcher.UIThread.Post(() => ShowCameraState(LeftCamera, state));
+
+    private void RightCameraStateChanged(CameraState state) =>
+        Dispatcher.UIThread.Post(() => ShowCameraState(RightCamera, state));
+
+    private void ShowCameraState(CameraControllerModel model, CameraState state)
+    {
+        model.StatusText = state switch
+        {
+            CameraState.Starting => "Starting...",
+            CameraState.Reconnecting => "Camera lost - reconnecting...",
+            _ => string.Empty,
+        };
+
+        switch (state)
+        {
+            case CameraState.Starting:
+            case CameraState.Reconnecting:
+                SetButtons(model, false, true);
+                break;
+            case CameraState.Running:
+                model.IsCameraRunning = true;
+                SetButtons(model, false, true);
+                break;
+            case CameraState.Stopped:
+                model.IsCameraRunning = false;
+                SetButtons(model, true, false);
+                break;
+        }
     }
 
     private async Task TryStartCamerasAsync()
     {
-        if (!FaceCamera.IsCameraRunning && FaceCamera.ShouldAutostart)
-            await StartCameraWithMaximization(FaceCamera, startMaximized: false);
-
+        // Start the eyes before the mouth to catch config conflicts.
         if (!LeftCamera.IsCameraRunning && LeftCamera.ShouldAutostart)
             await StartCameraWithMaximization(LeftCamera, startMaximized: false);
 
         if (!RightCamera.IsCameraRunning && RightCamera.ShouldAutostart)
             await StartCameraWithMaximization(RightCamera, startMaximized: false);
+
+        if (!FaceCamera.IsCameraRunning && FaceCamera.ShouldAutostart)
+            await StartCameraWithMaximization(FaceCamera, startMaximized: false);
+    }
+
+    private bool ConflictsAcrossPipelines(CameraControllerModel model)
+    {
+        var address = model.DisplayAddress;
+        if (string.IsNullOrEmpty(address))
+            return false;
+
+        bool SharesWith(CameraControllerModel? other) =>
+            other is { IsCameraRunning: true } &&
+            string.Equals(other.DisplayAddress, address, StringComparison.OrdinalIgnoreCase);
+
+        return model.Camera == Camera.Face
+            ? SharesWith(LeftCamera) || SharesWith(RightCamera)
+            : SharesWith(FaceCamera);
     }
 
     private void EyePipelineExceptionHandler(EyePipelineEvents.ExceptionEvent e)
     {
-        LeftCamera.StartButtonEnabled = true;
-        LeftCamera.StopButtonEnabled = false;
-        LeftCamera.Bitmap = null;
-        LeftCamera.IsCameraRunning = false;
-
-        RightCamera.StartButtonEnabled = true;
-        RightCamera.StopButtonEnabled = false;
-        RightCamera.Bitmap = null;
-        RightCamera.IsCameraRunning = false;
+        // Lifecycle state is driven by FaultEyeCameras and the watchdog. Do not mark the cameras
+        // manually stopped here or their recovered frames would be ignored by the preview.
     }
 
     private void FacePipelineExceptionHandler(FacePipelineEvents.ExceptionEvent e)
     {
-        FaceCamera.StartButtonEnabled = true;
-        FaceCamera.StopButtonEnabled = false;
-
-        FaceCamera.Bitmap = null;
-        FaceCamera.IsCameraRunning = false;
+        // FaultCamera's state event owns the reconnecting UI state.
     }
 
     [RelayCommand]
@@ -614,6 +739,18 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
         {
             SetButtons(model, false, false);
             var address = model.DisplayAddress;
+
+            if (ConflictsAcrossPipelines(model))
+            {
+                var inUseBy = model.Camera == Camera.Face ? "the eye tracker" : "the mouth tracker";
+                _logger.LogWarning(
+                    "Not starting the {} camera on '{}': that device is already in use by {}. Split eye cameras can share one video feed, but the mouth needs its own — pick a different camera for it.",
+                    model.Camera, address, inUseBy);
+                model.ShouldAutostart = false; // don't recreate this broken state on the next launch
+                SetButtons(model, true, false);
+                return;
+            }
+
             var backend = model.SelectedCaptureMethod;
             if (!model.CaptureMethodVisible || backend == Assets.Resources.Home_Backend_Default)
                 backend = "";
@@ -774,5 +911,8 @@ public partial class HomePageViewModel : ViewModelBase, IDisposable
 
         _facePipelineEventBus.Unsubscribe<FacePipelineEvents.ExceptionEvent>(FacePipelineExceptionHandler);
         _eyePipelineEventBus.Unsubscribe<EyePipelineEvents.ExceptionEvent>(EyePipelineExceptionHandler);
+        _facePipelineManager.StateChanged -= FaceCameraStateChanged;
+        _eyePipelineManager.LeftSlot.StateChanged -= LeftCameraStateChanged;
+        _eyePipelineManager.RightSlot.StateChanged -= RightCameraStateChanged;
     }
 }

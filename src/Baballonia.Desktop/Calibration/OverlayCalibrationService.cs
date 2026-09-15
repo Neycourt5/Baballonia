@@ -1,4 +1,4 @@
-﻿using Baballonia.Contracts;
+using Baballonia.Contracts;
 using Baballonia.Helpers;
 using Baballonia.Services;
 using Microsoft.Extensions.Logging;
@@ -75,10 +75,10 @@ public class OverlayTrainerService(
         localSettingsService.SaveSetting("EyeHome_EyeModel", destPath);
         await eyePipelineManager.LoadInferenceAsync();
 
-        if (localSettingsService.ReadSetting<bool>("AppSettings_ShareEyeData"))
+        if (dataUploaderService.IsConfigured && localSettingsService.ReadSetting<bool>("AppSettings_ShareEyeData"))
         {
             var userCal = Path.Combine(Utils.ModelDataDirectory, "user_cal.bin");
-            await dataUploaderService.UploadDataAsync(userCal);
+            await dataUploaderService.UploadDataAsync(userCal, hasConsent: true);
         }
 
         await overlayProgram.WaitForExitAsync();

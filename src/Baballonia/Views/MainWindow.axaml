@@ -1,4 +1,4 @@
-<Window
+﻿<Window
     x:Name="Window"
     x:Class="Baballonia.Views.MainWindow"
     xmlns="https://github.com/avaloniaui"
@@ -53,12 +53,16 @@
                         MaxHeight="24"
                         VerticalAlignment="Center"
                         Source="/Assets/IconOpaque_32x32.png" />
+                    <!--  Solid, deliberately. A gradient on 12px text is muddy on dark and its
+                          near-white middle stop is invisible on a light title bar.  -->
                     <TextBlock
                         x:Name="AppNameAndVersion"
                         Margin="10,0,0,0"
                         HorizontalAlignment="Left"
                         VerticalAlignment="Center"
                         FontSize="12"
+                        FontWeight="SemiBold"
+                        Foreground="{DynamicResource BrandTextAccent}"
                         IsHitTestVisible="False" />
                 </StackPanel>
             </Grid>

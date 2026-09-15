@@ -247,19 +247,22 @@ public class PersonalTrainingOrchestrationTest
         var pipelineManager = (FacePipelineManager)RuntimeHelpers
             .GetUninitializedObject(typeof(FacePipelineManager));
 
-        var pipeline = new FaceProcessingPipeline(new Baballonia.Services.FacePipelineEventBus());
+        var pipeline = new FaceProcessingPipeline(new Baballonia.Services.FacePipelineEventBus(), new Baballonia.Services.PipelineMetrics());
         typeof(FacePipelineManager)
             .GetField("_pipeline", BindingFlags.NonPublic | BindingFlags.Instance)!
             .SetValue(pipelineManager, pipeline);
 
         var enabled = false;
+        var selectedPath = "";
         var settings = new Mock<ILocalSettingsService>();
         settings.Setup(s => s.ReadSetting<bool>(PersonalModelManager.EnabledSetting, It.IsAny<bool>(), It.IsAny<bool>()))
             .Returns(() => enabled);
         settings.Setup(s => s.SaveSetting(PersonalModelManager.EnabledSetting, It.IsAny<bool>(), It.IsAny<bool>()))
             .Callback<string, bool, bool>((_, value, _) => enabled = value);
         settings.Setup(s => s.ReadSetting<string>(PersonalModelManager.PathSetting, It.IsAny<string>(), It.IsAny<bool>()))
-            .Returns("");
+            .Returns(() => selectedPath);
+        settings.Setup(s => s.SaveSetting(PersonalModelManager.PathSetting, It.IsAny<string>(), It.IsAny<bool>()))
+            .Callback<string, string, bool>((_, value, _) => selectedPath = value);
         settings.Setup(s => s.ReadSetting<float>(PersonalModelManager.BlendSetting, It.IsAny<float>(), It.IsAny<bool>()))
             .Returns(1f);
 

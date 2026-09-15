@@ -370,6 +370,10 @@ public sealed class PersonalModelManager : IDisposable
     public async Task<PersonalModelLoadResult> SetEmbeddingRunnerEnabledAsync(bool enabled)
     {
         _settings.SaveSetting(EmbeddingRunnerSetting, enabled);
+        // Remove model C before replacing the runner that owns its borrowed embedding. Without
+        // this ordering, processing ticks between the runner swap and ReloadAsync observe an
+        // embedding-aware corrector paired with a stock runner.
+        Uninstall();
         await _facePipelineManager.LoadInferenceAsync();
         return await ReloadAsync();
     }
@@ -538,8 +542,8 @@ public sealed class PersonalModelManager : IDisposable
         var fullPath = prepared.FullPath
             ?? throw new InvalidOperationException("A successful model preparation had no path.");
 
-        // Publish the replacement before disposing the old session. SetCorrector is a volatile
-        // assignment, so the next pipeline tick sees either complete corrector, never a stock gap.
+        // Publish the replacement before disposing the old session. SetCorrector waits for an
+        // in-flight tick, so no tick can retain the outgoing native session after it returns.
         var previous = _corrector;
         _facePipelineManager.SetCorrector(corrector);
         _corrector = corrector;

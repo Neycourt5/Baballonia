@@ -1,4 +1,4 @@
-<Application
+﻿<Application
     RequestedThemeVariant="Dark"
     x:Class="Baballonia.App"
     xmlns="https://github.com/avaloniaui"
@@ -10,7 +10,16 @@
     xmlns:assets="clr-namespace:Baballonia.Assets">
 
     <Application.Resources>
-      <converters:BooleanOrConverter x:Key="BooleanOrConverter"/>
+      <ResourceDictionary>
+        <ResourceDictionary.MergedDictionaries>
+          <!--  The brand palette, including the explicit accent ramp. Merged here rather than set
+                on FluentTheme.Palettes because the seven SystemAccentColor* stops must be chosen
+                outright: letting Fluent derive them from a single light accent is what washed the
+                controls out last time.  -->
+          <ResourceInclude Source="avares://Baballonia/Themes/Brand.axaml" />
+        </ResourceDictionary.MergedDictionaries>
+        <converters:BooleanOrConverter x:Key="BooleanOrConverter"/>
+      </ResourceDictionary>
     </Application.Resources>
 
     <Application.DataTemplates>

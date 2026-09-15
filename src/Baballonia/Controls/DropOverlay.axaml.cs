@@ -1,7 +1,8 @@
-﻿using Avalonia;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Baballonia.Contracts;
+using Baballonia.Services;
 using CommunityToolkit.Mvvm.DependencyInjection;
 
 namespace Baballonia.Controls;
@@ -14,7 +15,7 @@ public partial class DropOverlay : UserControl
     {
         _localSettingsService = Ioc.Default.GetRequiredService<ILocalSettingsService>();
         InitializeComponent(true);
-        IsOverlayVisible = true;
+        IsOverlayVisible = DataUploadConfiguration.FromEnvironment().IsConfigured;
     }
 
     public static readonly StyledProperty<bool> IsOverlayVisibleProperty =
@@ -28,7 +29,8 @@ public partial class DropOverlay : UserControl
 
     private void Changed(object? sender, RoutedEventArgs e)
     {
-        _localSettingsService.SaveSetting("AppSettings_ShareEyeData", EyeDataCheckbox.IsChecked);
+        if (DataUploadConfiguration.FromEnvironment().IsConfigured)
+            _localSettingsService.SaveSetting("AppSettings_ShareEyeData", EyeDataCheckbox.IsChecked);
     }
 
     private void EyeDataOptInRead(object? sender, RoutedEventArgs e)

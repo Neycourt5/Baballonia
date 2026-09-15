@@ -49,18 +49,45 @@ public static class Utils
 
     public static readonly bool HasAdmin = OperatingSystem.IsWindows() && new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
 
-    public static readonly string UserAccessibleDataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "ProjectBabble");
+    /// <summary>
+    /// An optional name that keeps this copy's settings and models to itself.
+    /// </summary>
+    /// <remarks>
+    /// Set with the BABALLONIA_PROFILE environment variable. Empty - the default - is the ordinary
+    /// installation and nothing changes, so an existing install keeps its settings exactly where it
+    /// left them.
+    ///
+    /// It exists so two copies can run side by side doing different jobs: one driving eyes, another
+    /// driving the face. Without it they share a settings file and each save overwrites the other's
+    /// camera choices, which reads as settings randomly reverting rather than as a conflict.
+    ///
+    /// Read once here rather than wherever it is needed, because these directories are static
+    /// readonly and must agree with each other for the whole run.
+    /// </remarks>
+    public static readonly string Profile =
+        (Environment.GetEnvironmentVariable("BABALLONIA_PROFILE") ?? string.Empty).Trim();
+
+    /// <summary>The data folder name, suffixed when a profile is named.</summary>
+    private static readonly string DataFolderName =
+        string.IsNullOrEmpty(Profile) ? "ProjectBabble" : $"ProjectBabble-{Profile}";
+
+    // Development/tests can keep every profile-owned write in an isolated workspace. Requiring
+    // a named profile prevents an accidental override of the ordinary installed app's data.
+    private static readonly string? IsolatedDataRoot = string.IsNullOrEmpty(Profile) ? null :
+        Environment.GetEnvironmentVariable("BABALLONIA_DATA_ROOT");
+
+    public static readonly string UserAccessibleDataDirectory = Path.Combine(IsolatedDataRoot ?? Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), DataFolderName);
 
     public static readonly string PersistentDataDirectory = IsSupportedDesktopOS
-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ProjectBabble")
+        ? Path.Combine(IsolatedDataRoot ?? Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), DataFolderName)
         : AppContext.BaseDirectory;
 
     public static readonly string ModelsDirectory = IsSupportedDesktopOS
-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ProjectBabble", "Models")
+        ? Path.Combine(PersistentDataDirectory, "Models")
         : AppContext.BaseDirectory;
 
     public static readonly string ModelDataDirectory = IsSupportedDesktopOS
-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ProjectBabble", "ModelData")
+        ? Path.Combine(PersistentDataDirectory, "ModelData")
         : AppContext.BaseDirectory;
 
     public static readonly string VrcftLibsDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),

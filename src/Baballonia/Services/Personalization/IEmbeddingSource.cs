@@ -54,5 +54,5 @@ public interface IEmbeddingAwareCorrector : IExpressionCorrector
     /// Corrects using the stock features. A null <paramref name="embedding"/> must return stock
     /// unchanged - no features means no opinion, which is the safe failure.
     /// </summary>
-    float[] Correct(DenseTensor<float> image, float[] stock, DenseTensor<float> embedding);
+    float[] Correct(DenseTensor<float> image, float[] stock, DenseTensor<float>? embedding);
 }

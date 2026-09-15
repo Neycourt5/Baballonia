@@ -111,6 +111,9 @@ public sealed class SessionMetadata
     /// <summary>Measured unique frames per second, for diagnosing camera rate vs tick rate.</summary>
     public double? EffectiveFps { get; set; }
 
+    /// <summary>Present only for separately stored experimental C2 recordings.</summary>
+    public C2.C2CaptureContext? C2 { get; init; }
+
     public sealed class CameraGeometry
     {
         public string? Address { get; init; }
@@ -145,6 +148,18 @@ public sealed class FrameLabel
     /// <summary>Raw pre-filter stock prediction: the adapter's runtime input, never a label by itself.</summary>
     [JsonPropertyName("stock")]
     public float[] Stock { get; init; } = [];
+
+    [JsonPropertyName("inference_timestamp")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public long InferenceTimestamp { get; init; }
+
+    [JsonPropertyName("embedding_row")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? EmbeddingRow { get; init; }
+
+    [JsonPropertyName("source_frame")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Inference.VideoFrameIdentity? SourceFrame { get; init; }
 
     /// <summary>
     /// What the personal model actually emitted for this frame, when one was active. Recorded only
@@ -212,9 +227,15 @@ public static class PersonalizationPaths
     public static string LabelsPath(string sessionId) => Path.Combine(SessionDirectory(sessionId), "labels.jsonl");
     public static string CorrectionPath(string sessionId) => Path.Combine(SessionDirectory(sessionId), "correction.json");
 
-    /// <summary>e.g. 20260813_193000_guided - sorts chronologically and says what it is at a glance.</summary>
-    public static string NewSessionId(SessionType type, DateTime utcNow) =>
-        $"{utcNow:yyyyMMdd_HHmmss}_{type.ToString().ToLowerInvariant()}";
+    /// <summary>
+    /// e.g. 20260813_193000_123_a1b2c3d4e5f60708_guided - sorts chronologically, says what it is at a
+    /// glance, and stays unique when two captures of the same type begin in one clock tick.
+    /// </summary>
+    public static string NewSessionId(SessionType type, DateTime utcNow)
+    {
+        var uniqueness = Guid.NewGuid().ToString("N")[..16];
+        return $"{utcNow:yyyyMMdd_HHmmss_fff}_{uniqueness}_{type.ToString().ToLowerInvariant()}";
+    }
 
     /// <summary>
     /// UTF-8 with no byte-order mark, for every personalization JSON file we write.

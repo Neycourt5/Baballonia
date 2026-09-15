@@ -3,6 +3,7 @@
     xmlns="https://github.com/avaloniaui"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="clr-namespace:Baballonia.Controls"
+    xmlns:views="clr-namespace:Baballonia.Views"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     xmlns:splitViewPane="clr-namespace:Baballonia.ViewModels.SplitViewPane"
@@ -24,7 +25,11 @@
           HorizontalAlignment="Left"
           Opacity="0.8"
           TextWrapping="Wrap"
-          Text="Teach Baballonia what your face looks like on your camera. Record a few short sessions, press Train, and compare the result against the stock tracker. Everything stays on this computer." />
+          Text="Improve face tracking with recordings and personal models. Calibration adjusts tracking ranges; the avatar preview tools test what your avatar can display. C2 keeps your working model selected while you collect and compare." />
+
+      <Expander Header="C2 — Experimental" HorizontalAlignment="Stretch">
+        <views:C2View DataContext="{Binding C2}" />
+      </Expander>
 
       <!-- ============================ SETUP ============================ -->
       <controls:ContentExample>
@@ -253,6 +258,60 @@
         </StackPanel>
       </controls:ContentExample>
 
+      <!-- ======================= SMILE LAB ========================== -->
+      <controls:ContentExample>
+        <StackPanel Spacing="10">
+          <TextBlock FontSize="16" FontWeight="SemiBold" Text="Smile candidate lab" />
+
+          <TextBlock
+              Opacity="0.75"
+              Text="For when an ordinary smile comes out as a huge open-mouthed grin. Preview each smile on your avatar in VR and confirm the one that looks like the smile you actually make. The candidates differ in how far the corners pull and how much the upper lip lifts; the jaw stays shut in all but the last."
+              TextWrapping="Wrap" />
+
+          <TextBlock
+              FontWeight="SemiBold"
+              Text="{Binding SmileConfirmationStatus}"
+              TextWrapping="Wrap" />
+
+          <StackPanel IsVisible="{Binding !IsSmilePreviewing}" Orientation="Horizontal" Spacing="8">
+            <Button
+                Command="{Binding BeginSmilePreviewCommand}"
+                Content="Preview Candidates in VR"
+                IsEnabled="{Binding CanStartSmilePreview}" />
+            <Button
+                Command="{Binding ClearSmileConfirmationCommand}"
+                Content="Clear Confirmation"
+                IsEnabled="{Binding HasConfirmedSmile}" />
+          </StackPanel>
+
+          <StackPanel IsVisible="{Binding IsSmilePreviewing}" Spacing="8">
+            <TextBlock
+                FontFamily="Consolas,Menlo,monospace"
+                Text="{Binding SmileCandidateDetails}"
+                TextWrapping="Wrap" />
+            <TextBlock
+                FontWeight="SemiBold"
+                Text="PREVIEW ONLY — the recorder is locked out and no cue label is published."
+                TextWrapping="Wrap" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <Button Command="{Binding PreviousSmileCandidateCommand}" Content="Previous" />
+              <Button Command="{Binding NextSmileCandidateCommand}" Content="Next" />
+              <Button
+                  Command="{Binding ConfirmSmileCandidateCommand}"
+                  Content="Confirm This Candidate"
+                  IsEnabled="{Binding CanConfirmSmile}" />
+              <Button Command="{Binding CancelSmilePreviewCommand}" Content="Cancel" />
+            </StackPanel>
+          </StackPanel>
+
+          <TextBlock Text="{Binding SmileStatus}" TextWrapping="Wrap" />
+          <TextBlock
+              Opacity="0.65"
+              Text="A confirmed candidate appears as its own Guided calibration choice; candidates A/B/C never enter Full pass or Combinations automatically. Re-preview after changing avatars."
+              TextWrapping="Wrap" />
+        </StackPanel>
+      </controls:ContentExample>
+
       <!-- ====================== GUIDED CALIBRATION ===================== -->
       <!--
         The only place the dataset gets a correct *non-zero* label. Neutral recordings teach the
@@ -266,7 +325,7 @@
           <TextBlock
               Opacity="0.7"
               TextWrapping="Wrap"
-              Text="Your avatar opens its jaw by a set amount and you copy it. Because the app chose the amount, it knows what your face should have been doing - which is the one thing plain recordings cannot tell it. Put your headset on and watch your avatar in a mirror before starting." />
+              Text="Your avatar demonstrates a movement for you to copy. The commanded amount is an approximate teaching cue, not a measurement of your face. Check that your avatar displays it correctly before recording. This uses the existing A/B/C label recipe; C2 has its own reviewed recording workflow above." />
 
           <StackPanel IsVisible="{Binding !IsGuidedRunning}" Spacing="8">
             <StackPanel Orientation="Horizontal" Spacing="12">

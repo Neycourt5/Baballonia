@@ -202,6 +202,35 @@ public class GrimacePreviewServiceTest
     }
 
     [TestMethod]
+    public void SmileCatalogueUsesSmileInstructionsRoutineAndSettingsEndToEnd()
+    {
+        var settings = new MemorySettings();
+        var fixture = CreateFixture(settings: settings, catalog: SmileCandidateCatalog.Catalog);
+        using var service = fixture.Service;
+
+        Assert.AreSame(SmileCandidateCatalog.Catalog, service.Catalog);
+        StringAssert.Contains(service.Status, "smile");
+        Assert.IsTrue(service.BeginPreview().Success);
+
+        var instruction = fixture.Presenter.Frames[^1].Instruction.ToLowerInvariant();
+        StringAssert.Contains(instruction, "smile");
+        Assert.IsFalse(instruction.Contains("grimace"),
+            "the shared preview service must not tell smile users to perform a grimace");
+
+        var chosen = SmileCandidateCatalog.All[0];
+        Assert.AreEqual(0f, chosen.CreateTarget()[Jaw]);
+        Assert.IsTrue(service.ConfirmCurrentCandidate().Success);
+
+        Assert.AreEqual("smile-confirmed", service.ConfirmedRoutineChoice!.Id);
+        CollectionAssert.Contains(service.ConfirmedCue!.Dims.ToArray(), Jaw);
+        CollectionAssert.Contains(service.ConfirmedCue.SuppressedDims.ToArray(), Jaw);
+        Assert.IsNotNull(settings.ReadSetting<GrimaceCandidateConfirmation?>(
+            SmileCandidateCatalog.Catalog.ConfirmationSetting));
+        Assert.IsNull(settings.ReadSetting<GrimaceCandidateConfirmation?>(
+            GrimaceCandidateCatalog.Catalog.ConfirmationSetting));
+    }
+
+    [TestMethod]
     public void StaleOrTamperedConfirmationCannotBecomeSupervision()
     {
         var settings = new MemorySettings();
@@ -294,7 +323,8 @@ public class GrimacePreviewServiceTest
     private static Fixture CreateFixture(
         TrainingCaptureGate? gate = null,
         MemorySettings? settings = null,
-        ExpressionOverrideService? expressionOverride = null)
+        ExpressionOverrideService? expressionOverride = null,
+        PoseCandidateCatalog? catalog = null)
     {
         gate ??= new TrainingCaptureGate();
         settings ??= new MemorySettings();
@@ -305,7 +335,8 @@ public class GrimacePreviewServiceTest
             gate,
             settings,
             presenter,
-            NullLogger<GrimacePreviewService>.Instance);
+            NullLogger<GrimacePreviewService>.Instance,
+            catalog);
         return new Fixture(service, expressionOverride, presenter, gate);
     }
 

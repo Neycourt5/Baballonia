@@ -1,7 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Runtime.CompilerServices;
+using System.Reflection;
 using Baballonia.Services;
 using Baballonia.Services.Personalization;
 using JetBrains.Annotations;
@@ -14,61 +14,99 @@ namespace Baballonia.Tests;
 /// personalization layer.
 ///
 /// The stock faceModel.onnx carries no output names; index meaning is defined solely by the
-/// insertion order of ParameterSenderService.FaceExpressionMap. PersonalizationSchema mirrors that
-/// order. If upstream reorders, renames, adds or removes an expression, every personal model
-/// trained against the old order becomes silently wrong: index 19 would stop meaning
-/// MouthSmileLeft. These tests turn that silent corruption into a loud build failure.
+/// insertion order of DefaultInferenceRunner's 45-entry "original prod FT layout" table, which is
+/// what the pipeline builds its OrderedFloatMap from. PersonalizationSchema mirrors that order. If
+/// upstream reorders, renames, adds or removes an expression, every personal model trained against
+/// the old order becomes silently wrong: index 19 would stop meaning MouthSmileLeft. These tests
+/// turn that silent corruption into a loud build failure.
+///
+/// (On the pre-merge fork the same table lived in ParameterSenderService.FaceExpressionMap; the
+/// Expressions Alpha base moved it into the inference runner. Same 45 names, same order - only the
+/// spelling differs, keys being "/cheekPuffLeft" rather than "CheekPuffLeft".)
 /// </summary>
 [TestClass]
 [TestSubject(typeof(PersonalizationSchema))]
 public class PersonalizationSchemaTests
 {
     /// <summary>
-    /// Reads the real FaceExpressionMap by constructing ParameterSenderService, since the map is an
-    /// instance field initializer and only runs as part of the constructor.
+    /// Reads the running model layout the pipeline actually keys its output map by: the 45-entry
+    /// face mapping inside <see cref="DefaultInferenceRunner"/>.
     ///
-    /// The constructor merely stores its dependencies and subscribes to one event, so nulls are
-    /// safe for everything except the loop service. That one is created uninitialized to skip its
-    /// constructor, which would otherwise start a 10 ms Avalonia DispatcherTimer and build the
-    /// whole inference graph; subscribing to its (null) event backing field is still valid.
-    /// If upstream ever makes the constructor do real work with these dependencies, this test will
-    /// fail loudly - which is the intent.
+    /// The table is a private instance field initializer, so an instance is needed - but the
+    /// constructor only captures its logger factory, so a null one is safe. If upstream ever makes
+    /// that constructor do real work, this test fails loudly, which is the intent.
     /// </summary>
-    private static IReadOnlyList<string> GetUpstreamFaceExpressionNames()
+    private static IReadOnlyList<string> GetUpstreamFaceExpressionKeys()
     {
-        var loopService = (ProcessingLoopService)RuntimeHelpers
-            .GetUninitializedObject(typeof(ProcessingLoopService));
+        var runner = new DefaultInferenceRunner(null!);
+        var field = typeof(DefaultInferenceRunner).GetField(
+            "_knownMappings", BindingFlags.Instance | BindingFlags.NonPublic);
 
-        var service = new ParameterSenderService(
-            vrcftModuleSendService: null!,
-            dfrSendService: null!,
-            localSettingsService: null!,
-            calibrationService: null!,
-            processingLoopService: loopService,
-            logger: null!);
+        Assert.IsNotNull(field,
+            "DefaultInferenceRunner._knownMappings is gone. The face model's positional output " +
+            "order is now defined somewhere else, and this guard must be pointed at it.");
 
-        return service.FaceExpressionMap.Keys.ToList();
+        var mappings = (List<List<string>>)field!.GetValue(runner)!;
+        var face = mappings.FirstOrDefault(m => m.Count == PersonalizationSchema.ExpressionCount);
+
+        Assert.IsNotNull(face,
+            $"No {PersonalizationSchema.ExpressionCount}-entry layout in DefaultInferenceRunner. " +
+            "The stock face model output length changed, which invalidates every trained personal " +
+            "model and every recorded dataset frame.");
+
+        return face!;
     }
 
     [TestMethod]
     public void Schema_MatchesFaceExpressionMapOrderExactly()
     {
-        var upstream = GetUpstreamFaceExpressionNames();
-        var schema = PersonalizationSchema.ExpressionNames;
+        var upstream = GetUpstreamFaceExpressionKeys();
+        var schema = PersonalizationSchemaBinding.ExpectedKeys;
 
         CollectionAssert.AreEqual(
             upstream.ToList(),
             schema.ToList(),
-            "PersonalizationSchema.ExpressionNames has drifted from ParameterSenderService.FaceExpressionMap. " +
-            "The stock model output is positional, so any reorder/rename invalidates previously trained " +
-            "personal models. Update PersonalizationSchema, bump PersonalizationSchema.Version, and retrain " +
-            "(or explicitly migrate) any existing personal model.");
+            "PersonalizationSchema.ExpressionNames has drifted from the face model layout in " +
+            "DefaultInferenceRunner. The stock model output is positional, so any reorder/rename " +
+            "invalidates previously trained personal models. Update PersonalizationSchema, bump " +
+            "PersonalizationSchema.Version, and retrain (or explicitly migrate) any existing " +
+            "personal model.");
+    }
+
+    /// <summary>
+    /// The runtime form of the same guard: the boundary adapter must accept a map built from the
+    /// real layout, and must refuse one whose order has been disturbed.
+    /// </summary>
+    [TestMethod]
+    public void Binding_AcceptsTheRealLayoutAndRejectsAReorderedOne()
+    {
+        var real = new OrderedFloatMap(GetUpstreamFaceExpressionKeys().ToArray());
+        PersonalizationSchemaBinding.Bind(real); // must not throw
+
+        var shuffled = GetUpstreamFaceExpressionKeys().ToArray();
+        (shuffled[19], shuffled[20]) = (shuffled[20], shuffled[19]);
+
+        Assert.IsFalse(
+            PersonalizationSchemaBinding.TryBind(new OrderedFloatMap(shuffled), out var error),
+            "A swapped pair must be refused; silently feeding MouthSmileLeft into the " +
+            "MouthSmileRight slot is exactly the failure this exists to prevent.");
+        StringAssert.Contains(error!, "/mouthSmileLeft");
+    }
+
+    [TestMethod]
+    public void Binding_RejectsAModelWithTooFewOutputs()
+    {
+        var tooShort = new OrderedFloatMap(
+            PersonalizationSchemaBinding.ExpectedKeys.Take(6).ToArray());
+
+        Assert.IsFalse(PersonalizationSchemaBinding.TryBind(tooShort, out var error));
+        StringAssert.Contains(error!, "6 values");
     }
 
     [TestMethod]
     public void Schema_CountMatchesUpstreamAndFaceRawExpressions()
     {
-        var upstream = GetUpstreamFaceExpressionNames();
+        var upstream = GetUpstreamFaceExpressionKeys();
 
         Assert.AreEqual(PersonalizationSchema.ExpressionCount, upstream.Count,
             "Upstream face expression count changed.");

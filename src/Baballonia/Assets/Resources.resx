@@ -330,6 +330,12 @@
   <data name="Firmware_Flashing_Complete" xml:space="preserve">
     <value>Done! You will need to restart your tracker</value>
   </data>
+  <data name="Firmware_Flashing_Failed" xml:space="preserve">
+    <value>Firmware flash failed. Your tracker was not updated.</value>
+  </data>
+  <data name="Firmware_Flashing_Failed_Detail" xml:space="preserve">
+    <value>Check the connection and try again.</value>
+  </data>
   <data name="Firmware_TrackerComboBox_Default" xml:space="preserve">
     <value>Click to see trackers...</value>
   </data>
@@ -598,7 +604,7 @@
     <value>Administrator Mode Warning</value>
   </data>
   <data name="AdminWarning_Message" xml:space="preserve">
-    <value>Do not run Baballonia as admin! There is no need, and it prevents eye tracking calibrations from working.</value>
+    <value>Do not run Alexallonia as admin! There is no need, and it prevents eye tracking calibrations from working.</value>
   </data>
   <data name="Aero_Overlay_NotFound" xml:space="preserve">
     <value>The gaze overlay program does not exist!</value>
@@ -739,7 +745,7 @@
     <value>Dismiss</value>
   </data>
   <data name="Settings_OSC_VRCFT_Warning" xml:space="preserve">
-    <value>If you are using Baballonia with VRCFaceTracking, there is no need to change these ports</value>
+    <value>If you are using Alexallonia with VRCFaceTracking, there is no need to change these ports</value>
   </data>
   <data name="Home_Preferred_Backend" xml:space="preserve">
     <value>This is a...</value>
@@ -781,7 +787,7 @@
     <value>Links to our Quickstart guide, Social Media, Documentation, etc.</value>
   </data>
   <data name="About_AboutBaballonia_Header" xml:space="preserve">
-    <value>About Baballonia</value>
+    <value>About Alexallonia</value>
   </data>
   <data name="About_AboutBaballonia_Description" xml:space="preserve">
     <value>Links for nerds (GitHub and so on)</value>
@@ -847,11 +853,12 @@ This is usually easy to fix! Just install the “Tracking Loss Fix” firmware b
   <data name="Common_Note" xml:space="preserve">
     <value>Note</value>
   </data>
-  <data name="Home_Cameras_Linux_Workarounds" xml:space="preserve">
+  <data name="Home_Cameras_Linux_Workarounds_SLR4" xml:space="preserve">
     <value>Workarounds:
-• Try the Steam scout 1.0 runtime (not sniper 3.0), installing libudev, building from source, or joining the plugdev group.
-• We only support Steam and tarball releases, not the AUR package.
-• Babble Boards do not support UVC/Serial on Linux, use a wireless configuration.</value>
+• Install from Steam and use Steam Linux Runtime 4.0. Do NOT force a tool if it's not listed.
+• Use tarball or build from source to use system local libraries. AUR not recommended.
+• Add your user to the video group for uvc, and dialout/uucp group for serial, then reboot.
+• Wired support of Babble Boards is experimental on Linux. Wireless may work better.</value>
   </data>
   <data name="Settings_ShareData_Header" xml:space="preserve">
     <value>Share eye/face data</value>
@@ -893,13 +900,13 @@ This is usually easy to fix! Just install the “Tracking Loss Fix” firmware b
     <value>Select Level...</value>
   </data>
   <data name="Tray_Show" xml:space="preserve">
-      <value>Show Baballonia</value>
+      <value>Show Alexallonia</value>
   </data>
   <data name="Tray_Hide" xml:space="preserve">
       <value>Minimize to Tray</value>
   </data>
   <data name="Tray_Tooltip" xml:space="preserve">
-      <value>Right click to see Baballonia options</value>
+      <value>Right click to see Alexallonia options</value>
   </data>
   <data name="Tray_Exit" xml:space="preserve">
       <value>Exit</value>

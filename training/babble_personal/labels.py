@@ -78,12 +78,28 @@ CO_ACTIVATION_EXCLUSIONS: dict[int, tuple[int, ...]] = {
         schema.INDEX_OF["MouthStretchLeft"],
         schema.INDEX_OF["MouthStretchRight"],
     ),
+    # A real smile parts the lips and shows teeth. Without the lip-opening dimensions here, every
+    # Smile hold taught "and the lips stayed together" - which is false at full smile intensity, and
+    # directly contradicts the confirmed toothy-smile cue on a visually near-identical frame. Smile
+    # appears in every core session at two levels; the toothy cue is one opt-in binary routine, so
+    # even at W_UNCUED_DIM the plain-Smile frames outnumbered it and the toothy label was averaged
+    # away. Excluding a dimension gives the cue NO OPINION about it - it drops out of the loss
+    # entirely rather than being trained toward zero. It does not teach teeth on during a plain
+    # smile; only the confirmed toothy cue does that.
     schema.INDEX_OF["MouthSmileLeft"]: (
         schema.INDEX_OF["MouthSmileRight"],
         schema.INDEX_OF["MouthDimpleLeft"],
         schema.INDEX_OF["MouthDimpleRight"],
         schema.INDEX_OF["CheekPuffLeft"],
         schema.INDEX_OF["CheekPuffRight"],
+        schema.INDEX_OF["MouthUpperUpLeft"],
+        schema.INDEX_OF["MouthUpperUpRight"],
+        schema.INDEX_OF["MouthLowerDownLeft"],
+        schema.INDEX_OF["MouthLowerDownRight"],
+        schema.INDEX_OF["MouthStretchLeft"],
+        schema.INDEX_OF["MouthStretchRight"],
+        schema.INDEX_OF["JawOpen"],
+        schema.INDEX_OF["MouthClose"],
     ),
     schema.INDEX_OF["MouthSmileRight"]: (
         schema.INDEX_OF["MouthSmileLeft"],
@@ -91,6 +107,14 @@ CO_ACTIVATION_EXCLUSIONS: dict[int, tuple[int, ...]] = {
         schema.INDEX_OF["MouthDimpleRight"],
         schema.INDEX_OF["CheekPuffLeft"],
         schema.INDEX_OF["CheekPuffRight"],
+        schema.INDEX_OF["MouthUpperUpLeft"],
+        schema.INDEX_OF["MouthUpperUpRight"],
+        schema.INDEX_OF["MouthLowerDownLeft"],
+        schema.INDEX_OF["MouthLowerDownRight"],
+        schema.INDEX_OF["MouthStretchLeft"],
+        schema.INDEX_OF["MouthStretchRight"],
+        schema.INDEX_OF["JawOpen"],
+        schema.INDEX_OF["MouthClose"],
     ),
     schema.INDEX_OF["MouthPucker"]: (
         schema.INDEX_OF["MouthFunnel"],

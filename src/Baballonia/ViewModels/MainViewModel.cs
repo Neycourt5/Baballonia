@@ -1,5 +1,6 @@
 ﻿using Avalonia.Controls;
 using Baballonia.Assets;
+using Baballonia.Contracts;
 using Baballonia.Models;
 using Baballonia.Services;
 using Baballonia.ViewModels.SplitViewPane;
@@ -7,6 +8,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.DependencyInjection;
 using CommunityToolkit.Mvvm.Input;
 using CommunityToolkit.Mvvm.Messaging;
+using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
@@ -28,6 +30,39 @@ public partial class MainViewModel : ViewModelBase
 
         _dropOverlayService = Ioc.Default.GetService<DropOverlayService>()!;
         _dropOverlayService.ShowOverlayChanged += SetOverlay;
+
+        // The Debug / Performance page is an advanced, opt-in entry: hidden by default and revealed
+        // via Settings > Advanced > "Show Debug menu". Seed from the saved setting, then stay in sync
+        // with the toggle live via the messenger.
+        if (Utils.IsSupportedDesktopOS)
+        {
+            var showDebug = Ioc.Default.GetService<ILocalSettingsService>()?
+                .ReadSetting<bool>("AppSettings_ShowDebugMenu") ?? false;
+            SetDebugMenuVisible(showDebug);
+
+            messenger.Register<MainViewModel, ShowDebugMenuChangedMessage>(this,
+                (recipient, message) => recipient.SetDebugMenuVisible(message.Value));
+        }
+    }
+
+    private static readonly ListItemTemplate DebugMenuItem =
+        new(typeof(DebugViewModel), "WindowDevToolsRegular", "Debug");
+
+    private void SetDebugMenuVisible(bool visible)
+    {
+        var existing = Items.FirstOrDefault(i => i.ModelType == typeof(DebugViewModel));
+        if (visible)
+        {
+            if (existing is null)
+                Items.Add(DebugMenuItem);
+        }
+        else if (existing is not null)
+        {
+            // Don't strand the selection on a page we're about to remove.
+            if (SelectedListItem == existing)
+                SelectedListItem = Items.First(i => i.ModelType == typeof(HomePageViewModel));
+            Items.Remove(existing);
+        }
     }
 
     private void SetOverlay(bool show)
@@ -45,6 +80,7 @@ public partial class MainViewModel : ViewModelBase
         new(typeof(OutputPageViewModel), "TextFirstLineRegular", Resources.Output_Title_Header), // Output
         new(typeof(AppSettingsViewModel), "SettingsRegular", Resources.Settings_Title_Header), // Settings
         new(typeof(AboutPageViewModel), "InfoRegular", Resources.About_Title_Header), // About
+        // Debug / Performance is added dynamically (opt-in via Settings > Advanced > Show Debug menu).
     ];
 
     private readonly List<ListItemTemplate> _mobileTemplates =
@@ -74,7 +110,7 @@ public partial class MainViewModel : ViewModelBase
 
         var vm = Design.IsDesignMode
             ? Activator.CreateInstance(value.ModelType)
-            : CreateInstance(value.ModelType); // Manual creation
+            : CreateInstance(ActivationServices(Ioc.Default), value.ModelType);
 
         if (vm is not ViewModelBase vmb) return;
 
@@ -84,16 +120,30 @@ public partial class MainViewModel : ViewModelBase
         if (tmp is IDisposable disposable)
             disposable.Dispose();
     }
-    private object CreateInstance(Type type)
-    {
-        // Manually resolve dependencies without container tracking
-        var constructors = type.GetConstructors();
-        var constructor = constructors.First();
-        var parameters = constructor.GetParameters()
-            .Select(p => Ioc.Default.GetService(p.ParameterType))
-            .ToArray();
-        return Activator.CreateInstance(type, parameters)!;
-    }
+    /// <summary>
+    /// The provider pages are activated through.
+    /// </summary>
+    /// <remarks>
+    /// <c>Ioc.Default</c> is a plain <see cref="IServiceProvider"/> wrapper and does not implement
+    /// <c>IKeyedServiceProvider</c>, so <see cref="ActivatorUtilities"/> cannot satisfy a
+    /// <c>[FromKeyedServices]</c> parameter through it - it throws, and the page simply fails to
+    /// open. Asking it for the container's own <see cref="IServiceProvider"/> gets the real one
+    /// back, which does.
+    ///
+    /// This is not paranoia about a hypothetical: the smile lab's keyed dependency made the
+    /// Personalization page unopenable, while the activation test kept passing because it handed
+    /// the activator a real provider rather than the one navigation uses.
+    /// </remarks>
+    public static IServiceProvider ActivationServices(IServiceProvider services) =>
+        services as IKeyedServiceProvider
+        ?? services.GetService<IServiceProvider>()
+        ?? services;
+
+    private static object CreateInstance(IServiceProvider services, Type type) =>
+        // ActivatorUtilities keeps transient pages out of the root container's disposal tracking,
+        // while still honoring constructor metadata such as [FromKeyedServices]. The old hand-rolled
+        // ParameterType lookup silently injected the unkeyed Grimace service into the Smile slot.
+        ActivatorUtilities.CreateInstance(services, type);
 
     public ObservableCollection<ListItemTemplate> Items { get; }
 

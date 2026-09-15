@@ -42,19 +42,19 @@ public static class TrainingModelChoice
             ImageConditionedIndex,
             "b",
             ImageConditionedAdapterType,
-            "B — Expressions + camera image (current best)",
+            "B — Expressions + camera image",
             "Model B (camera image)",
             "Learns its own small camera-image network alongside the 45 expression values. It " +
-            "takes longer to train, but it is the proven real-world baseline for the B-vs-C test.",
+            "takes longer to train. Compare compatible recordings before choosing a model.",
             false),
         new(
             SharedFeaturesIndex,
             "c",
             SharedFeaturesAdapterType,
-            "C — Shared visual features (experimental)",
+            "C — Shared visual features (existing recipe)",
             "Model C (shared visual features)",
             "Reuses visual features already computed inside the stock face model instead of " +
-            "running a second camera CNN. Experimental until it beats Model B in the home test.",
+            "running a second camera CNN. C2 is a separate experiment; this training recipe is unchanged.",
             true)
     ];
 
