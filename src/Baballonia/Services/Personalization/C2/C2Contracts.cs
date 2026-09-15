@@ -37,9 +37,9 @@ public sealed record C2OutputContext(float[][] Ranges, float EffectiveJawExponen
             var r = calibration.GetExpressionSettings(key);
             return new[] { r.Lower, r.Upper, r.Min, r.Max };
         }).ToArray();
-        // The current sender compares "JawOpen", whereas active schema keys are "/jawOpen".
-        // Preserve the real legacy path (effective exponent 1), not the UI's inert value.
-        return new C2OutputContext(ranges, 1f,
+        // The repair is opt-in: disabled preserves the identity mapping used by older C2
+        // candidates, even when their profile already contains a non-neutral slider value.
+        return new C2OutputContext(ranges, ParameterSenderService.ReadEffectiveJawOpenCurve(settings),
             settings.ReadSetting<bool>("AppSettings_OneEuroEnabled"),
             settings.ReadSetting<float>("AppSettings_OneEuroMinFreqCutoff"),
             settings.ReadSetting<float>("AppSettings_OneEuroSpeedCutoff"));

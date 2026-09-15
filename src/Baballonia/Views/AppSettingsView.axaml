@@ -626,9 +626,11 @@
         <Grid ColumnDefinitions="*,Auto" VerticalAlignment="Center">
           <StackPanel Grid.Column="0" Margin="0,5">
             <TextBlock FontSize="16" FontWeight="SemiBold" Margin="5,0" Text="Jaw Open Curve" />
+            <ToggleSwitch Margin="5,2" Content="Enable Jaw Open Curve"
+                          IsChecked="{Binding JawOpenCurveEnabled, Mode=TwoWay}" />
             <TextBlock FontSize="14" Margin="5,2" TextWrapping="Wrap"
                        Foreground="{DynamicResource SystemChromeGrayColor}"
-                       Text="Raise this if opening your mouth a little drops the avatar's whole jaw. It bends how fast jaw open climbs without changing where it ends: a small opening stays small, while opening wide still reaches full. Turning the jaw down with a normal limit would cap the wide opening too. 1.00 leaves it exactly as it is; try 1.50 to 2.00. Below 1 makes it more eager instead." />
+                       Text="Off preserves your current jaw motion and existing C2. Enable this only if small mouth movements open the avatar's jaw too far. It bends how fast jaw open climbs without changing where it ends: a small opening stays small, while opening wide still reaches full. Turning the jaw down with a normal limit would cap the wide opening too. 1.00 leaves it exactly as it is; try 1.50 to 2.00. Below 1 makes it more eager instead. Changing the effective curve makes an incompatible C2 fall back to Model C. Train and compare a new C2 with your chosen curve, or restore its original settings." />
           </StackPanel>
           <NumericUpDown
               Grid.Column="1"
@@ -638,6 +640,7 @@
               Increment="0.1"
               Maximum="3"
               Minimum="0.5"
+              IsEnabled="{Binding JawOpenCurveEnabled}"
               Value="{Binding JawOpenCurve, Mode=TwoWay}" />
         </Grid>
       </Border>

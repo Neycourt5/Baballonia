@@ -158,10 +158,12 @@ public partial class AppSettingsViewModel : ViewModelBase
     [property: SavedSetting("AppSettings_EyeGazeSyncAmount", 0f)]
     private float _eyeGazeSyncAmount;
 
-    /// <summary>
-    /// Exponent on jaw open. 1 is unchanged; the sender re-reads it once a second, so no pipeline
-    /// reload is needed.
-    /// </summary>
+    /// <summary>Explicitly opt into jaw shaping; off preserves existing models and saved curves.</summary>
+    [ObservableProperty]
+    [property: SavedSetting("AppSettings_JawOpenCurveEnabled", false)]
+    private bool _jawOpenCurveEnabled;
+
+    /// <summary>Exponent on jaw open when enabled. 1 is unchanged; applied on the next face batch.</summary>
     [ObservableProperty]
     [property: SavedSetting("AppSettings_JawOpenCurve", 1f)]
     private float _jawOpenCurve;

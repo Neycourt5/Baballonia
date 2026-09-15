@@ -15,6 +15,9 @@ public sealed class C2RuntimeContext(PersonalModelManager models, ICalibrationSe
     ILocalSettingsService settings, FacePipelineManager face)
 {
     private sealed record CameraContext(string? Address, string? Backend, CameraSettings? Transform);
+    private const string JawCurveChangedMessage =
+        "Jaw-open curve changed. Restore this candidate's recorded curve settings (leave the curve off for older C2 candidates), " +
+        "then choose Keep using this C2, or train a new candidate with the new curve.";
 
     public async Task<string> PrepareContractAsync(bool requireAudioOff = true)
     {
@@ -66,6 +69,8 @@ public sealed class C2RuntimeContext(PersonalModelManager models, ICalibrationSe
                 return "The reference Model C is no longer active. Select the Model C used to train this candidate, then choose Keep using this C2.";
             if (models.Blend != contract.ReferenceBlend)
                 return "Model C blend strength changed. Restore its training strength, then choose Keep using this C2.";
+            if (ParameterSenderService.ReadEffectiveJawOpenCurve(settings) != contract.Output.EffectiveJawExponent)
+                return JawCurveChangedMessage;
             if ((face.SourceInstalledAtUtc != null && face.ActiveTransformation != camera.Transform) ||
                 settings.ReadSetting<CameraSettings>("FaceCamera") != camera.Transform)
                 return "Face camera crop, rotation or image settings changed. Restore the recorded settings before using this C2.";
@@ -126,6 +131,8 @@ public sealed class C2RuntimeContext(PersonalModelManager models, ICalibrationSe
     {
         recorded.Output.Validate();
         current.Output.Validate();
+        if (recorded.Output.EffectiveJawExponent != current.Output.EffectiveJawExponent)
+            throw new InvalidOperationException(JawCurveChangedMessage);
         // Updating/moving the application can relocate the identical stock/feature files. Match
         // their content hashes while keeping the user's reference C, blend and settings exact.
         var relocated = current with { StockPath = recorded.StockPath, FeaturePath = recorded.FeaturePath };

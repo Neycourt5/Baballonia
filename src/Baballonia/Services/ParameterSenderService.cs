@@ -20,7 +20,6 @@ public class ParameterSenderService : BackgroundService
     private readonly VrcftModuleSendService _vrcftModuleSendService;
     private readonly DfrSendService _dfrSendService;
     private readonly ILocalSettingsService _localSettingsService;
-    private float _jawOpenCurve = 1f;
     private float _eyeSquintStrength = 1f;
     private readonly ICalibrationService _calibrationService;
     private readonly ILogger<ParameterSenderService> _logger;
@@ -88,8 +87,6 @@ public class ParameterSenderService : BackgroundService
                     _prefix = _localSettingsService.ReadSetting<string>("AppSettings_OSCPrefix");
                     _sendNativeVrcEyeTracking = _localSettingsService.ReadSetting<bool>("VRC_UseNativeTracking");
                     _useDfr = _localSettingsService.ReadSetting<bool>("AppSettings_UseDFR");
-                    _jawOpenCurve = Math.Clamp(
-                        _localSettingsService.ReadSetting("AppSettings_JawOpenCurve", 1f), 0.5f, 3f);
                     _eyeSquintStrength = Math.Clamp(
                         _localSettingsService.ReadSetting("AppSettings_EyeSquintStrength", 1f), 0f, 2f);
                 }
@@ -219,7 +216,17 @@ public class ParameterSenderService : BackgroundService
     }
 
     /// <summary>The model's key for jaw opening, the one channel shaped before calibration.</summary>
-    internal const string JawOpenKey = "JawOpen";
+    internal const string JawOpenKey = "/jawOpen";
+
+    /// <summary>Opt-in output shaping, shared with the C2 recording and compatibility contract.</summary>
+    internal static float ReadEffectiveJawOpenCurve(ILocalSettingsService? settings)
+    {
+        if (settings?.ReadSetting("AppSettings_JawOpenCurveEnabled", false) != true)
+            return 1f;
+
+        var curve = settings.ReadSetting("AppSettings_JawOpenCurve", 1f);
+        return float.IsFinite(curve) ? Math.Clamp(curve, 0.5f, 3f) : 1f;
+    }
 
     /// <summary>
     /// Bends how quickly an expression climbs, without changing where it ends up.
@@ -236,8 +243,8 @@ public class ParameterSenderService : BackgroundService
     /// for anyone with the opposite complaint.</para>
     ///
     /// <para>Applied before the user's Lower/Upper calibration, so that keeps working on top
-    /// unchanged. Exactly identity at 1, which is the default, so this is inert until someone asks
-    /// for it. The calibration override path deliberately does not go through here: a commanded
+    /// unchanged. Disabled by default, and exactly identity at 1 even when enabled. The calibration
+    /// override path deliberately does not go through here: a commanded
     /// ground-truth target must reach the avatar verbatim.</para>
     /// </remarks>
     internal static float ShapeExpression(float value, float curve)
@@ -294,11 +301,14 @@ public class ParameterSenderService : BackgroundService
 
         if (expressions == null) return;
 
+        // Use current settings once per face batch, as C2 does for its live context guard.
+        // The old one-second cache could lag behind a deliberate C2/curve setting change.
+        var jawOpenCurve = ReadEffectiveJawOpenCurve(_localSettingsService);
         foreach (var expression in expressions)
         {
             float weight = expression.Value;
             if (expression.Key == JawOpenKey)
-                weight = ShapeExpression(weight, _jawOpenCurve);
+                weight = ShapeExpression(weight, jawOpenCurve);
 
             var settings = _calibrationService.GetExpressionSettings(expression.Key);
 

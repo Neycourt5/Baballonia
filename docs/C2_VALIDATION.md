@@ -8,6 +8,12 @@ The preview source preserves C2 Keep's persistent selection, Audio Assist/naviga
 
 Portable-PDB checksums match all existing inspected main/Desktop/SDK/CaptureBin C# documents, with no mismatches. DLL-to-PDB identity and normalized checksums also match. See [provenance](PRIVACY_AND_PROVENANCE.md#c2-keep-correspondence). This establishes inspected source correspondence, not fresh package behavior.
 
+## Opt-in jaw-curve update
+
+The jaw curve now uses the real `/jawOpen` output key and an explicit switch that defaults off. Existing stored curve values and identity-exponent C2 candidates retain their behavior while it is off. Sender-route tests cover shaping before calibration, other-channel/override preservation, current settings, and C2 compatibility when opting in. The exact test counts and package checks for each update are recorded in its release notes and `BUILD-INFO.json`.
+
+The VR calibration overlay may flicker (user-reported); this jaw-curve update does not claim to fix or hardware-verify that issue.
+
 ## Automated results during preview preparation
 
 | Check | Result | Scope |

@@ -9,7 +9,7 @@ C2 has worked well for the maintainer's own setup. That is a personal observatio
 ## Download and run on Windows
 
 1. Open this fork's [Releases](https://github.com/Neycourt5/Baballonia/releases).
-2. Choose **C2 Experimental Preview — 2026-09-15** (`c2-preview-2026.09.15`) and download **Baballonia-C2-Windows-x64.zip**.
+2. Choose **C2 Experimental Preview — 2026-09-15 (opt-in jaw curve)** (`c2-preview-2026.09.15.1`) and download **Baballonia-C2-Windows-x64.zip**.
 3. Extract the entire ZIP into a folder.
 4. Run **Baballonia.Desktop.exe**. Keep the DLLs, `Modules`, models, and other folders beside it.
 5. Select and start your cameras on **Home**, then check their previews and crop settings.
@@ -27,7 +27,7 @@ The Windows x64 package includes its .NET runtime; installing Python is only nec
 | Eyes | Eyelid and gaze synchronization, synchronized squint/wide-eye controls, adjustable squint strength, and configurable wink handling. |
 | BlinkGuard | Optional post-blink gaze hold and stable-sample reacquisition intended to reduce reopening jumps. Off by default. |
 | Expressions Alpha | Processing support for expression-capable eye models and eye calibration; the maintainer's tuned model is not bundled. |
-| Speech and jaw | Optional microphone loudness assist after visual correction. The jaw-open curve control remains present; a known sender-key mismatch makes it ineffective on the standard `/jawOpen` path. |
+| Speech and jaw | Optional microphone loudness assist after visual correction. The repaired jaw-open curve is opt-in and off by default. Enable it in App Settings to shape small openings; existing C2 motion stays unchanged while it is off. |
 | Camera recovery | Lifecycle/watchdog recovery for missing, stale, failed, and reconnected face/eye sources. Hardware-specific recovery still needs testing. |
 | Diagnostics | Opt-in eye-stage traces and BlinkGuard counters/captures for investigating timing and mapping. |
 
@@ -63,7 +63,7 @@ Build the Desktop project rather than the whole solution, which also contains mo
 ```powershell
 git clone --recurse-submodules https://github.com/Neycourt5/Baballonia.git
 cd Baballonia
-git checkout c2-preview-2026.09.15
+git checkout c2-preview-2026.09.15.1
 git submodule update --init --recursive
 powershell -ExecutionPolicy Bypass -File .\download_dependencies.ps1
 . .\scripts\resolve-dotnet.ps1
@@ -74,7 +74,7 @@ The tag becomes available when the preview is published. Dependency downloads re
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run-tests.ps1 -Configuration Release
-powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Version 0.0.0-c2-preview.20260915 -RequireCleanSource
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Version 0.0.0-c2-preview.20260915.1 -RequireCleanSource
 ```
 
 The package script creates a self-contained Windows x64 folder and ZIP under a new `artifacts/release` directory. It retains native camera, OpenCV, Avalonia, and ONNX dependencies and includes `training` for in-app personal training. It does not use trimming or single-file publishing. [Validation and reproduction](docs/C2_VALIDATION.md) record tests, build results, and outstanding hardware checks.

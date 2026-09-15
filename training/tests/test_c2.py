@@ -49,6 +49,19 @@ def test_nonidentity_targets_are_inverted_once():
     assert weight[0, 21] == 0
 
 
+@pytest.mark.parametrize("exponent", [.5, 2., 3.])
+def test_opted_in_jaw_curve_inverts_reviewed_targets_and_preserves_other_channels(exponent):
+    output = context(True)
+    output["EffectiveJawExponent"] = exponent
+    target, weight, _ = c2.labels([row(value, dims=(4, 19, 20)) for value in (0., .25, 1.)], output, True)
+    # The same synthetic calibration/cues are checked against the real C# sender.
+    assert target[1, 4] == pytest.approx(.35 ** (1 / exponent), abs=1e-6)
+    np.testing.assert_allclose(target[:, 19], [.2, .35, .8], atol=1e-6)
+    emitted = c2.emit(target, output)
+    np.testing.assert_allclose(emitted[:, [4, 19, 20]], np.repeat([[0.], [.25], [1.]], 3, axis=1), atol=1e-6)
+    assert not weight[:, 21].any()
+
+
 def test_entirely_masked_batch_has_finite_zero_human_loss():
     reference = torch.full((2, 45), .4)
     predicted = reference.clone().requires_grad_()

@@ -72,6 +72,12 @@ The present workflow evaluates a check as part of the candidate training run. A 
 
 **Keep** records your preference, not an independently proven improvement. A kept C2 can use Audio Assist after visual C2 correction. Keep audio off for controlled visual comparisons.
 
+## Optional jaw-open curve
+
+**App Settings / Enable Jaw Open Curve** starts off, preserving your existing jaw motion and kept C2 even if an older saved curve value is above 1. When enabled, values above 1 reduce intermediate openings; 1 keeps the current response. The curve is applied before face calibration.
+
+Choose your curve before collecting/training a new C2. Changing its effective value makes an incompatible active C2 fall back to Model C with an explanation. To reuse an older candidate, restore its curve/settings and explicitly keep it again; the app does not rewrite that candidate or your recordings.
+
 ## If C2 stops or refuses to load
 
 Read the displayed reason. Activation checks candidate bytes, schema/contract metadata, reference C and blend, camera/crop, smoothing, and calibration. Changing these can make a candidate incompatible. Calibration for expressions outside corrected support can change during kept everyday use.

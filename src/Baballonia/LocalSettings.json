@@ -1,4 +1,5 @@
 {
+  "AppSettings_JawOpenCurveEnabled": false,
   "VRC_UseNativeTracking": false,
   "SecondsWarningRead": false,
   "ShowOnboardingOnStartup": true,

@@ -1,7 +1,7 @@
 # Build a fresh self-contained Windows directory and ZIP. Existing builds are retained.
 [CmdletBinding()]
 param(
-    [string]$Version = '0.0.0-c2-preview.20260915',
+    [string]$Version = '0.0.0-c2-preview.20260915.1',
     [switch]$RequireCleanSource
 )
 $ErrorActionPreference = 'Stop'

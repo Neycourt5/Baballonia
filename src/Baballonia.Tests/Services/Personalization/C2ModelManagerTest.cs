@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Baballonia.Contracts;
 using Baballonia.Services;
+using Baballonia.Services.Calibration;
 using Baballonia.Services.events;
 using Baballonia.Services.Inference;
 using Baballonia.Services.Inference.Enums;
@@ -16,8 +17,10 @@ using Baballonia.Services.Inference.Models;
 using Baballonia.Services.Personalization;
 using Baballonia.Services.Personalization.C2;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.ML.OnnxRuntime.Tensors;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Moq;
+using OpenCvSharp;
 
 namespace Baballonia.Tests.Services.Personalization;
 
@@ -299,6 +302,115 @@ public class C2ModelManagerTest
         face.SetTransformation(transform with { RotationRadians = 1f });
         Assert.IsFalse(matches(), "Changing the live crop/rotation must cause fallback.");
         StringAssert.Contains(everydayFailure()!, "Face camera crop");
+    }
+
+    [TestMethod]
+    public void JawCurveOptInChecksEffectiveContextWithoutMigratingLegacyContract()
+    {
+        var enabled = false;
+        var curve = 2f;
+        var settings = new Mock<ILocalSettingsService>();
+        settings.Setup(s => s.ReadSetting<bool>("AppSettings_JawOpenCurveEnabled", false, false)).Returns(() => enabled);
+        settings.Setup(s => s.ReadSetting<float>("AppSettings_JawOpenCurve", 1f, false)).Returns(() => curve);
+        settings.Setup(s => s.ReadSetting<float>("AppSettings_OneEuroMinFreqCutoff", default, false)).Returns(.5f);
+        var calibration = new Mock<ICalibrationService>();
+        calibration.Setup(c => c.GetExpressionSettings(It.IsAny<string>())).Returns(new CalibrationParameter(0, 1, 0, 1));
+        var output = C2OutputContext.Capture(calibration.Object, settings.Object);
+        var recorded = new C2ReferenceContract("stock", "stock-hash", "feature", "feature-hash",
+            "C.onnx", "C-hash", 1, output, "camera");
+        var original = JsonSerializer.SerializeToUtf8Bytes(recorded);
+        Assert.AreEqual(1f, output.EffectiveJawExponent,
+            "An existing non-neutral slider value must not change old C2 output until opt-in.");
+        C2ReferenceContract Current() => recorded with { Output = C2OutputContext.Capture(calibration.Object, settings.Object) };
+        curve = 3f;
+        C2RuntimeContext.ValidateContext(recorded, Current());
+        enabled = true;
+        var error = Assert.ThrowsExactly<InvalidOperationException>(() => C2RuntimeContext.ValidateContext(recorded, Current()));
+        StringAssert.Contains(error.Message, "Jaw-open curve changed");
+        StringAssert.Contains(error.Message, "leave the curve off");
+        // Keeping a candidate cannot bypass the output mapping check via its supported channels.
+        Assert.ThrowsExactly<InvalidOperationException>(() => C2RuntimeContext.ValidateContext(recorded, Current(), i => i is 4 or 19 or 20));
+        curve = 1f;
+        C2RuntimeContext.ValidateContext(recorded, Current());
+        curve = 2f;
+        var recordedWithCurve = Current();
+        C2RuntimeContext.ValidateContext(recordedWithCurve, Current());
+        enabled = false;
+        Assert.ThrowsExactly<InvalidOperationException>(() => C2RuntimeContext.ValidateContext(recordedWithCurve, Current()));
+        CollectionAssert.AreEqual(original, JsonSerializer.SerializeToUtf8Bytes(recorded),
+            "Compatibility checks must not change the old serialized contract or its bound hash.");
+        settings.Verify(s => s.SaveSetting(It.IsAny<string>(), It.IsAny<float>(), It.IsAny<bool>()), Times.Never);
+    }
+
+    [TestMethod]
+    public async Task LiveJawCurveOptInFallsBackToCAndPreservesKeptSelectionUntilExplicitReactivation()
+    {
+        var enabled = false;
+        var curve = 2f;
+        var settings = new Mock<ILocalSettingsService>();
+        settings.Setup(s => s.ReadSetting<bool>("AppSettings_JawOpenCurveEnabled", false, false)).Returns(() => enabled);
+        settings.Setup(s => s.ReadSetting<float>("AppSettings_JawOpenCurve", 1f, false)).Returns(() => curve);
+        settings.Setup(s => s.ReadSetting<float>("AppSettings_OneEuroMinFreqCutoff", default, false)).Returns(.5f);
+        settings.Setup(s => s.ReadSetting<float>(PersonalModelManager.BlendSetting, 1f, false)).Returns(1f);
+        settings.Setup(s => s.ReadSetting<string>("LastOpenedFaceCamera", null, false)).Returns("camera");
+        var transform = new CameraSettings(Camera.Face, new RegionOfInterest(0, 0, 8, 8));
+        settings.Setup(s => s.ReadSetting<CameraSettings>("FaceCamera", null, false)).Returns(transform);
+        var video = new Mock<IVideoSource>();
+        video.Setup(s => s.GetFrame(It.IsAny<ColorType?>())).Returns(() => new Mat(8, 8, MatType.CV_8UC1, new Scalar(100)));
+        var transformer = new Mock<IImageTransformer>();
+        transformer.Setup(t => t.Apply(It.IsAny<Mat>())).Returns((Mat frame) => frame.Clone());
+        var inference = new Mock<IInferenceRunner>();
+        inference.As<IEmbeddingSource>().Setup(i => i.GetEmbedding()).Returns(new DenseTensor<float>([1, 1280]));
+        inference.Setup(i => i.GetInputTensor()).Returns(new DenseTensor<float>([1, 1, 8, 8]));
+        inference.Setup(i => i.Run()).Returns(() =>
+        {
+            var map = new OrderedFloatMap(PersonalizationSchemaBinding.ExpectedKeys.ToArray());
+            map.ValuesSpan.Fill(.1f);
+            return map;
+        });
+        var personal = new Mock<IPersonalCorrector>();
+        personal.SetupGet(c => c.Blend).Returns(1f);
+        personal.Setup(c => c.Correct(It.IsAny<DenseTensor<float>>(), It.IsAny<float[]>()))
+            .Returns(() => Enumerable.Repeat(.3f, 45).ToArray());
+        var pipeline = new FaceProcessingPipeline(new FacePipelineEventBus(), new PipelineMetrics())
+        {
+            VideoSource = video.Object, ImageTransformer = transformer.Object,
+            InferenceService = inference.Object, Corrector = personal.Object
+        };
+        var face = (FacePipelineManager)RuntimeHelpers.GetUninitializedObject(typeof(FacePipelineManager));
+        typeof(FacePipelineManager).GetField("_pipeline", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(face, pipeline);
+        var model = new PersonalModelManager(face, settings.Object, NullLogger<PersonalModelManager>.Instance);
+        typeof(PersonalModelManager).GetField("_corrector", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(model, personal.Object);
+        typeof(PersonalModelManager).GetProperty(nameof(PersonalModelManager.ActiveModelPath))!.SetValue(model, "C.onnx");
+        var calibration = new CalibrationService(settings.Object);
+        var output = C2OutputContext.Capture(calibration, settings.Object);
+        var recorded = new C2ReferenceContract("stock", "hash", "feature", "hash", "C.onnx", "hash", model.Blend,
+            output, JsonSerializer.Serialize(new { Address = "camera", Backend = (string?)null, Transform = transform }));
+        var context = new C2RuntimeContext(model, calibration, settings.Object, face);
+        using var manager = new C2ModelManager(SelectionPath,
+            (_, _) => Task.FromResult(new C2PreparedCandidate(Prepared().Corrector, context.ContextGuard(recorded))),
+            (candidate, guard) => { _installed = candidate; return face.SwapC2(candidate, guard); },
+            NullLogger<C2ModelManager>.Instance);
+        await manager.ActivateAsync(Path.Combine(_root, "chosen"), keep: true);
+        var selection = File.ReadAllBytes(SelectionPath);
+        Assert.AreEqual(.4f, pipeline.RunUpdate()!["/jawOpen"], 1e-6f);
+        curve = 3f;
+        Assert.AreEqual(.4f, pipeline.RunUpdate()!["/jawOpen"], 1e-6f,
+            "Editing an inactive slider must preserve the kept C2.");
+        enabled = true;
+        StringAssert.Contains(context.ContextFailure(recorded, allowAudioAssist: true)()!, "Jaw-open curve changed");
+        Assert.AreEqual(.3f, pipeline.RunUpdate()!["/jawOpen"], 1e-6f,
+            "The existing pipeline guard must return the working C output when the curve becomes incompatible.");
+        Assert.IsFalse(manager.IsActive);
+        Assert.IsNotNull(manager.Failure);
+        CollectionAssert.AreEqual(selection, File.ReadAllBytes(SelectionPath));
+        enabled = false;
+        Assert.AreEqual(.3f, pipeline.RunUpdate()!["/jawOpen"], 1e-6f,
+            "A failed candidate stays inactive until the user explicitly keeps it again.");
+        await manager.ActivateAsync(Path.Combine(_root, "chosen"), keep: true);
+        Assert.IsTrue(manager.IsKept);
+        Assert.AreEqual(.4f, pipeline.RunUpdate()!["/jawOpen"], 1e-6f);
+        CollectionAssert.AreEqual(selection, File.ReadAllBytes(SelectionPath));
     }
 
     [TestMethod]

@@ -174,19 +174,46 @@ public class C2Test
         Assert.AreNotEqual(Context(true).Emit(4,.95f),emitted[1][4]);
     }
 
-    [TestMethod]
-    public void C2RawContractMatchesActualSenderWithNonIdentityRangesAndCurrentJawKey()
+    [DataTestMethod]
+    [DataRow(false, 2f, 1f)]
+    [DataRow(true, 0.5f, 0.5f)]
+    [DataRow(true, 2f, 2f)]
+    [DataRow(true, 3f, 3f)]
+    public void C2CapturedCurveMatchesActualSenderAndInvertsTeachingTargets(
+        bool enabled, float storedCurve, float effectiveCurve)
     {
-        var calibration=new Mock<ICalibrationService>();
-        calibration.Setup(c=>c.GetExpressionSettings(It.IsAny<string>())).Returns(new CalibrationParameter(.2f,.8f,0,1));
-        var loop=(ProcessingLoopService)RuntimeHelpers.GetUninitializedObject(typeof(ProcessingLoopService));
-        var sender=new ParameterSenderService(null!,null!,null!,calibration.Object,loop,NullLogger<ParameterSenderService>.Instance);
-        typeof(ParameterSenderService).GetField("_jawOpenCurve",BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(sender,2f);
-        var map=new OrderedFloatMap(PersonalizationSchemaBinding.ExpectedKeys.ToArray()); map.ValuesSpan.Fill(.35f);
-        typeof(ParameterSenderService).GetMethod("ProcessFaceExpressionData",BindingFlags.Instance|BindingFlags.NonPublic)!.Invoke(sender,[map]);
-        var queue=(System.Collections.Concurrent.ConcurrentQueue<OscCore.OscMessage>)typeof(ParameterSenderService)
-            .GetField("_vrcftQueue",BindingFlags.Instance|BindingFlags.NonPublic)!.GetValue(sender)!;
-        Assert.AreEqual(45,queue.Count);
-        Assert.AreEqual(Context(true).Emit(4,.35f),(float)queue.Single(m=>m.Address.EndsWith("/jawOpen"))[0],1e-6);
+        var settings = new Mock<ILocalSettingsService>();
+        settings.Setup(s => s.ReadSetting<bool>("AppSettings_JawOpenCurveEnabled", false, false)).Returns(enabled);
+        settings.Setup(s => s.ReadSetting<float>("AppSettings_JawOpenCurve", 1f, false)).Returns(storedCurve);
+        settings.Setup(s => s.ReadSetting<float>("AppSettings_OneEuroMinFreqCutoff", default, false)).Returns(.5f);
+        var calibration = new Mock<ICalibrationService>();
+        calibration.Setup(c => c.GetExpressionSettings(It.IsAny<string>()))
+            .Returns(new CalibrationParameter(.2f, .8f, 0, 1));
+        var context = C2OutputContext.Capture(calibration.Object, settings.Object);
+        Assert.AreEqual(effectiveCurve, context.EffectiveJawExponent);
+        var loop = (ProcessingLoopService)RuntimeHelpers.GetUninitializedObject(typeof(ProcessingLoopService));
+        var sender = new ParameterSenderService(null!, null!, settings.Object, calibration.Object, loop,
+            NullLogger<ParameterSenderService>.Instance);
+        var map = new OrderedFloatMap(PersonalizationSchemaBinding.ExpectedKeys.ToArray());
+        map.ValuesSpan.Fill(.65f);
+        typeof(ParameterSenderService).GetMethod("ProcessFaceExpressionData", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(sender, [map]);
+        var queue = (System.Collections.Concurrent.ConcurrentQueue<OscCore.OscMessage>)typeof(ParameterSenderService)
+            .GetField("_vrcftQueue", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(sender)!;
+        Assert.AreEqual(45, queue.Count);
+        var sent = queue.ToDictionary(message => message.Address, message => (float)message[0]);
+        Assert.AreEqual(context.Emit(4, .65f), sent["/jawOpen"], 1e-6f);
+        Assert.AreEqual(Math.Clamp((MathF.Pow(.65f, effectiveCurve) - .2f) / .6f, 0f, 1f), sent["/jawOpen"], 1e-6f);
+        for (var channel = 0; channel < 45; channel++)
+            if (channel != 4)
+                Assert.AreEqual(.75f, sent[PersonalizationSchemaBinding.ExpectedKeys[channel]], 1e-6f,
+                    "Opting into the jaw curve must not shape another expression.");
+        foreach (var target in new[] { 0f, .25f, 1f })
+        {
+            var raw = context.ToRawTarget(4, target);
+            Assert.AreEqual(target, context.Emit(4, raw), 1e-6f,
+                "C2 teaching targets must invert the same curve and calibration that the sender applies.");
+        }
+        Assert.AreEqual(.35f, context.ToRawTarget(19, .25f), 1e-6f);
     }
 }

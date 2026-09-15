@@ -7,14 +7,14 @@ C2 is a separate experimental correction stage over a working personal **Model C
 ```text
 face camera → saved transform → stock expressions + shared visual features
             → personal Model C → optional C2 → optional Audio Assist
-            → One Euro smoothing → calibration/remap → OSC output
+            → One Euro smoothing → optional jaw curve → calibration/remap → OSC output
 ```
 
 Face and eyes use separate background workers and pipeline locks. C2 consumes Model C's 45 raw expression values and the stock network's 1280-element feature vector; it does not run another camera backbone. ONNX inputs are `reference` and `embedding`; the named output is `personal`.
 
 The contract is `c2-raw-reference-v1`, with label recipe `c2-reviewed-holds-v1`. Output stays in Model C's pre-filter domain. Approximate teaching cues are inverted through the recorded output mapping before supervising the raw head.
 
-A known sender comparison checks `JawOpen`, whereas the standard schema uses `/jawOpen`. The jaw curve is ineffective on that route. C2 records effective exponent 1 and preserves that behavior. Enabling the curve would change existing candidate meaning and requires a separate change and validation.
+The sender shapes the canonical `/jawOpen` channel only when **Enable Jaw Open Curve** is on. The switch defaults off; stored curve values are preserved, but the effective exponent remains 1. This preserves candidates created while the earlier curve control was inactive. Sender output, recording targets, and C2 activation/live compatibility checks share the effective exponent. A changed exponent invalidates an incompatible C2 and falls back to Model C; recorded contracts and weights are never rewritten.
 
 ## Labels and preservation
 
