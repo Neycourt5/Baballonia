@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "description": "Public Windows dependencies. SHA-256 values verified against public GitHub release digests; licenses verified from tagged source. No personal models or recordings.",
+  "dependencies": [
+    {
+      "name": "BabbleTrainer",
+      "version": "1.5.2",
+      "url": "https://github.com/Project-Babble/BabbleTrainer/releases/download/1.5.2/BabbleTrainer-x64.exe",
+      "sha256": "4eb78e6e04d1270e9d50c0b76787f32a5a245a68218033b511301ffcb2ec8e2a",
+      "kind": "file",
+      "destination": "src/Baballonia.Desktop/Calibration/Windows/Trainer/BabbleTrainer.exe"
+    },
+    {
+      "name": "BabbleCalibration",
+      "version": "1.0.8",
+      "url": "https://github.com/Project-Babble/BabbleCalibration/releases/download/1.0.8/Windows.zip",
+      "sha256": "9742179388699b5c74aac5f18c12ff9898d90ffc41c2eb9f14a1a1e6dff825cd",
+      "kind": "zip",
+      "destination": "src/Baballonia.Desktop/Calibration/Windows/Overlay"
+    },
+    {
+      "name": "espflash",
+      "version": "v4.6.0",
+      "url": "https://github.com/esp-rs/espflash/releases/download/v4.6.0/espflash-x86_64-pc-windows-msvc.zip",
+      "sha256": "b2cb4656b067716fe2b3794cf0604b461b2476d06dee7f481704cb6c8495b11c",
+      "kind": "zip",
+      "destination": "src/Baballonia/Firmware/Windows"
+    }
+  ],
+  "licenses": [
+    {
+      "name": "BabbleTrainer-LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/Project-Babble/BabbleTrainer/1.5.2/LICENSE.txt",
+      "sha256": "88bec1dde0ff33748c5fe396905e8db3ca7f6c6788c27b070147d18d5af94c99"
+    },
+    {
+      "name": "BabbleCalibration-LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/Project-Babble/BabbleCalibration/1.0.8/LICENSE",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "name": "espflash-LICENSE-APACHE.txt",
+      "url": "https://raw.githubusercontent.com/esp-rs/espflash/v4.6.0/LICENSE-APACHE",
+      "sha256": "811f4d4d7ae8f88090dcd14cddf1982ca75cc30b5604e6ebb636693d9b885788"
+    },
+    {
+      "name": "espflash-LICENSE-MIT.txt",
+      "url": "https://raw.githubusercontent.com/esp-rs/espflash/v4.6.0/LICENSE-MIT",
+      "sha256": "8daec6f7e829af4dfc7c99a251986648f718b90589aa819bc48be8ef82b0c12f"
+    }
+  ]
+}

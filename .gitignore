@@ -379,11 +379,7 @@ MigrationBackup/
 FodyWeavers.xsd
 
 # VS Code files for those working on multiple tools
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
+.vscode/
 *.code-workspace
 
 # Local History for Visual Studio Code
@@ -416,6 +412,8 @@ src/Baballonia/Firmware/Windows/espflash.exe
 src/Baballonia/Firmware/Linux/espflash
 src/Baballonia.Desktop/Calibration/Windows/Trainer/BabbleTrainer.exe
 src/Baballonia.Desktop/Calibration/Linux/Trainer/BabbleTrainer
+src/Baballonia.Desktop/Calibration/Linux/Trainer/_internal
+src/Baballonia.Desktop/Calibration/Windows/Trainer/_internal
 
 # ---------------------------------------------------------------------------
 # Personalization (personal face-tracking fork)
@@ -446,5 +444,45 @@ faceModelWithEmbedding.onnx
 # Manual label corrections produced by the review tool
 corrections*.jsonl
 
-# Local reference copy of upstream, not part of the build
-/Baballonia-main/
+# Local publication/build output and private developer snapshots
+/artifacts/
+/dist/
+/private-backups/
+.pytest_cache/
+.venv/
+venv/
+*.pdb
+*.dmp
+*.dump
+*.stackdump
+
+# Local secrets; keep deliberately sanitized examples reviewable
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Runtime profiles and personalized training/calibration output.
+# Do not broadly ignore ONNX/NPZ/PT/BIN: upstream models and synthetic tests need them.
+**/ProjectBabble*/
+**/PersonalTraining/
+**/EyeDataset/
+**/EyePersonalization/
+**/C2/Candidates/
+**/C2/Sessions/
+/C2/
+/recordings/
+/captures/
+/calibration-profiles/
+/models/personal/
+**/C2/Recordings/
+**/C2/Reviews/
+**/C2/Manifests/
+**/C2/selection.json
+**/C2/wearing-session.json
+
+# Legacy trainer samples/checkpoints are not inputs to the pinned standalone trainer.
+# Existing upstream tracked baselines stay available; do not add copied development payloads.
+/src/Baballonia.Desktop/Calibration/*/Trainer/footage_unlabeled.npz
+/src/Baballonia.Desktop/Calibration/*/Trainer/gaze_model_best.pt
+/src/Baballonia.Desktop/Calibration/*/Trainer/model_best.pt

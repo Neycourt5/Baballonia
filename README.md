@@ -1,124 +1,101 @@
 ![Baballonia Promo](BaballoniaPromo.png)
 
-# Baballonia
+# Baballonia — C2 experimental fork
 
-**Baballonia** is a cross-platform, hardware-agnostic XR eye and face tracking application.
+An unofficial experimental fork of [Project-Babble/Baballonia](https://github.com/Project-Babble/Baballonia), maintained at [Neycourt5/Baballonia](https://github.com/Neycourt5/Baballonia). It adds personal face training, C2 candidate comparison, and custom eye and camera recovery behavior to the upstream XR eye/face tracker.
 
-## Installation
+C2 has worked well for the maintainer's own setup. That is a personal observation, not evidence that it improves tracking for everyone. This preview shares the implementation so other users can train and assess their own models.
 
-### Steam
+## Download and run on Windows
 
-Baballonia is now on Steam! [Download it here!](https://store.steampowered.com/app/4091970/Project_Babble_Baballonia/)
+1. Open this fork's [Releases](https://github.com/Neycourt5/Baballonia/releases).
+2. Choose **C2 Experimental Preview — 2026-09-15** (`c2-preview-2026.09.15`) and download **Baballonia-C2-Windows-x64.zip**.
+3. Extract the entire ZIP into a folder.
+4. Run **Baballonia.Desktop.exe**. Keep the DLLs, `Modules`, models, and other folders beside it.
+5. Select and start your cameras on **Home**, then check their previews and crop settings.
 
-*This is the suggested install method. You will automatically recieve updates with this method.*
+The Windows x64 package includes its .NET runtime; installing Python is only necessary for training. A release asset is available once it appears on the release page. See the release notes and included `README.txt` for completed validation.
 
-### Windows (Alternative)
+**A fresh profile starts with stock face and eye models.** The maintainer's personal Model C, C2 weights, tuned eye model, camera recordings, and calibration are not included. Existing installations use their own saved profile; extracting this ZIP does not create an isolated profile. See [profiles and privacy](docs/PRIVACY_AND_PROVENANCE.md#profiles-and-local-data) before running two copies at once.
 
-Head to the releases tab and [download the latest installer](https://github.com/Project-Babble/Baballonia/releases/latest).
+## What this fork changes
 
-You may be prompted to download the .NET runtime for desktop apps, install it if need be.
+| Area | Available behavior |
+|---|---|
+| Personal face models | Local recording and A/B/C training, model history and selection, guided teaching cues, and quick corrections. |
+| C2 | Short reviewed jaw/smile tasks, separate candidate training, reports, a 60-second trial, explicit **Keep using this C2**, restart restoration, and **Return to Model C**. |
+| Eyes | Eyelid and gaze synchronization, synchronized squint/wide-eye controls, adjustable squint strength, and configurable wink handling. |
+| BlinkGuard | Optional post-blink gaze hold and stable-sample reacquisition intended to reduce reopening jumps. Off by default. |
+| Expressions Alpha | Processing support for expression-capable eye models and eye calibration; the maintainer's tuned model is not bundled. |
+| Speech and jaw | Optional microphone loudness assist after visual correction. The jaw-open curve control remains present; a known sender-key mismatch makes it ineffective on the standard `/jawOpen` path. |
+| Camera recovery | Lifecycle/watchdog recovery for missing, stale, failed, and reconnected face/eye sources. Hardware-specific recovery still needs testing. |
+| Diagnostics | Opt-in eye-stage traces and BlinkGuard counters/captures for investigating timing and mapping. |
 
-### Linux (Alternative)
+These additions are experimental. Full synchronization can reduce independent eye movement; camera layout, model, calibration, receiver, and avatar rig all affect the result. [Eye behavior and checks](docs/EYE_GAZE_DIAGNOSTICS.md) describe the limits.
 
-Head to the releases tab and [download the latest tarball](https://github.com/Project-Babble/Baballonia/releases/latest).
+## What is C2?
 
-You may be prompted to download the .NET runtime for desktop apps, install it if need be.
+**Model C** is a personal correction model that reuses visual features from the stock face network. **C2** is a separate correction stage trained against your working Model C, using short facial holds you explicitly review. It keeps unsupported expression channels with Model C and retains Model C for fallback.
 
-### MacOS
+C2 is specific to its recordings, base Model C, camera configuration, and output settings. Training creates a separate candidate and does not activate it. **Keep using this C2** saves your choice across pages and restarts; **Return to Model C** clears it.
 
-Baballonia currently does not have an installer for MacOS. You will need to follow our build instructions and run it from source.
+Start with [Train your own Model C and C2](docs/C2_GETTING_STARTED.md). The [personalization guide](PERSONALIZATION_GUIDE.md) covers A/B/C, guided recordings, and audio. [C2 design](docs/C2_DESIGN_AND_DECISIONS.md) explains the implementation.
 
-## Platform Compatibility
+## Requirements
 
-To get started, follow the [quickstart guide on our documentation page](https://docs.babble.diy/docs/babbleofficaltracker).
+- Windows x64 for this package, with a supported face camera and/or eye-camera source and working drivers. Face and eye tracking can be used separately.
+- A compatible graphics driver for DirectML acceleration; available execution providers depend on the machine.
+- For source builds: Git, .NET SDK 10, and the dependencies below.
+- For personal training only: Python **3.11–3.13**, preferably **3.13**, internet access for **Set Up Training Tools**, and disk space for recordings and CPU training packages. Python 3.14 is incompatible with the pinned PyTorch 2.7.1 training dependency.
+- For headset instruction overlays: SteamVR and a compatible connected headset. Instructions are also available in the desktop UI.
+- For VRChat facial output: VRCFaceTracking, a compatible Babble module, and an avatar with the required expressions. Native VRChat eye OSC provides eye look rather than full facial output.
 
-### VRChat
+### Hardware and game references
 
-#### VRCFaceTracking
+Upstream documents support for official/DIY Babble trackers and Vive Facial Tracker; eye sources include EyetrackVR and Bigscreen Beyond 2E. Other devices can need a separate camera bridge: [ReVision](https://github.com/Blue-Doggo/ReVision) for Vive Pro Eye, [Varjo Streamer](https://docs.babble.diy/docs/software/baballonia/varjo-streamer) for Varjo Aero, and [BrokenEye](https://github.com/ghostiam/BrokenEye) for HP Reverb G2 Omnicept/Pimax Crystal. Beyond 2E on Linux can use [go-bsb-cams](https://github.com/LilliaElaine/go-bsb-cams). These preserve upstream integration references; they are not a hardware test matrix for this preview.
 
-To use Baballonia with VRChat, you will need to use VRCFaceTracking with the `VRCFT-Babble` module.
+See the upstream [quickstart](https://docs.babble.diy/docs/babbleofficaltracker) and [integration documentation](https://docs.babble.diy/docs/software/integrations), including Resonite and ChilloutVR. VRCFaceTracking is available on [Steam](https://store.steampowered.com/app/3329480/VRCFaceTracking/); its [module documentation](https://docs.vrcft.io/docs/vrcft-software/vrcft#module-registry) covers installation. [VRChat native eye OSC](https://docs.vrchat.com/docs/osc-eye-tracking) is a separate output route.
 
-1. Download and install the latest version of VRCFaceTracking from [Steam](https://store.steampowered.com/app/3329480/VRCFaceTracking/).
-1. Install the `VRCFT-Babble` module within VRCFaceTracking.
-1. Use Baballonia to set the module mode (eyes, face or both). Restart VRCFaceTracking to see your changes.
+## Build from source
 
-More information can be found on the [VRCFT Docs](https://docs.vrcft.io/docs/vrcft-software/vrcft\#module-registry)
+Build the Desktop project rather than the whole solution, which also contains mobile and separate VRCFaceTracking module projects.
 
-#### VRC Native Eyelook
+```powershell
+git clone --recurse-submodules https://github.com/Neycourt5/Baballonia.git
+cd Baballonia
+git checkout c2-preview-2026.09.15
+git submodule update --init --recursive
+powershell -ExecutionPolicy Bypass -File .\download_dependencies.ps1
+. .\scripts\resolve-dotnet.ps1
+& (Resolve-BaballoniaDotNet) build .\src\Baballonia.Desktop\Baballonia.Desktop.csproj -c Release
+```
 
-Alternatively, Baballonia also supports [VRC Native Eyelook](https://docs.vrchat.com/docs/osc-eye-tracking).
+The tag becomes available when the preview is published. Dependency downloads require internet access. To test and package from a clean checkout:
 
-While this doesn't support lower face tracking, it supports (almost) all VRChat Avatars.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run-tests.ps1 -Configuration Release
+powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1 -Version 0.0.0-c2-preview.20260915 -RequireCleanSource
+```
 
-### Resonite 
+The package script creates a self-contained Windows x64 folder and ZIP under a new `artifacts/release` directory. It retains native camera, OpenCV, Avalonia, and ONNX dependencies and includes `training` for in-app personal training. It does not use trimming or single-file publishing. [Validation and reproduction](docs/C2_VALIDATION.md) record tests, build results, and outstanding hardware checks.
 
-Resonite works natively with Baballonia's eye and face tracking - no external tools necessary!
+## Repository map
 
-### ChilloutVR
+- `src/Baballonia` and `src/Baballonia.Desktop`: application and desktop host.
+- `src/Baballonia.Tests` and `training/tests`: regression and synthetic training tests.
+- `training/babble_personal`: face training used by the app.
+- `docs/`: current instructions, design, diagnostics, and validation.
+- `src/BabblePersonalizer`, `docs/BabblePersonalizer`, and `experimental/`: separate optional work, outside the active in-app C2 pipeline. See their documentation before use.
+- `artifacts/`, local profiles, recordings, and build outputs are excluded from Git.
 
-ChilloutVR has a mod-based integration for Baballonia's eye and face tracking. Please refer to our docs (below) for installation.
+## Privacy and validation
 
-*For more game information and setup, refer to our [ChilloutVR documentation page](https://docs.babble.diy/docs/software/integrations/chilloutVR).*
+Personal recordings, training caches, models, calibration, and logs stay out of this repository and release package. Personalization runs locally. The inherited calibration upload integration is disabled unless explicitly configured; see [privacy and provenance](docs/PRIVACY_AND_PROVENANCE.md) for its configuration and scope.
 
-## Supported Hardware
+Portable-PDB source hashes were compared with the preserved C2 Keep build. This establishes C# source correspondence, not a quality result or a fresh hardware test. [Validation status](docs/C2_VALIDATION.md) separates automated checks from headset/camera checks.
 
-Baballonia supports many kinds of hardware for eye and face tracking:
+## Upstream credit and license
 
-| Device                            | Eyes | Face | Notes                                                                                        |
-|-----------------------------------| ----- | ----- |-------------------------------------------------------------------------------------------|
-| Official Babble Face Tracker      | :x: | ✅ |                                                                                                |
-| DIY and 3rd party Babble Trackers | :x: | ✅ |                                                                                                |
-| Vive Facial Tracker               | :x: | ✅ |                                                                                                |
-| DIY EyetrackVR                    | ✅ | :x: |                                                                                                |
-| Bigscreen Beyond 2E               | ✅ | :x: | *On Linux*, requires [go-bsb-cams](https://github.com/LilliaElaine/go-bsb-cams)                |
-| Vive Pro Eye                      | ✅ | :x: | Requires [Revision](https://github.com/Blue-Doggo/ReVision)                                    |
-| Varjo Aero                        | ✅ | :x: | Requires the [Varjo Streamer](https://docs.babble.diy/docs/software/baballonia/varjo-streamer) |
-| HP Reverb G2 Omnicept             | ✅ | :x: | Requires [BrokenEye](https://github.com/ghostiam/BrokenEye)                                    |
-| Pimax Crystal                     | ✅ | :x: | Requires [BrokenEye](https://github.com/ghostiam/BrokenEye)                                    |
+Baballonia is built by [Project Babble](https://github.com/Project-Babble/Baballonia) and its contributors. This fork preserves the [LICENSE](LICENSE), [CREDITS.md](CREDITS.md), third-party notices, and existing copyright attribution. It is not an official Project Babble release and is not relicensed.
 
-*For more hardware information, refer to our [documentation pages](https://docs.babble.diy/docs/intro).*
-
----
-
-## Build Instructions
-
-### Baballonia.Desktop
-
-1. Run the associated ``download_dependencies`` script for your given platform (``.ps1`` on Windows, ``.sh`` on Linux).
-2. If you are using an IDE, disable these projects:
-- `VRCFaceTracking`
-- `VRCFaceTracking.Core`
-- `VRCFaceTracking.SDK`
-- `VRCFaceTracking.Baballonia`
-- `Baballonia.iOS`
-- `Baballonia.Android`
-3. Run ``dotnet build`` inside the ``src/Baballonia.Desktop`` directory, or build with your IDE
-
-#### Publishing
-
-If you want to publish a standalone installer for Baballonia, download [NSIS](https://github.com/negrutiu/nsis) here, or use your package manager. Then, run the 
-`.nsi` script located at `src/Baballonia.Desktop/main.nsi`
-
-### Baballonia.Android/iOS
-
-1. If you are using an IDE, disable these projects:
-- `VRCFaceTracking`
-- `VRCFaceTracking.Core`
-- `VRCFaceTracking.SDK`
-- `VRCFaceTracking.Baballonia`
-- `Baballonia.Desktop`
-- `Baballonia.iOS`, if you are building for Android
-- `Baballonia.Android`, if you are building for iOS
-2. Run ``dotnet build`` inside the ``src/Baballonia.Android`` or ``src/Baballonia.iOS`` directory, or build with your IDE
-
-### VRCFaceTracking.Baballonia
-
-1. If you are using an IDE, disable all projects except the following:
-- `VRCFaceTracking.Core`
-- `VRCFaceTracking.SDK`
-- `VRCFaceTracking.Baballonia`
-2. Run ``dotnet build`` inside the ``src/VRCFaceTracking.Baballonia`` directory, or build with your IDE
-
-This will create a `VRCFaceTracking.Baballonia.zip` module which you can install manually.
-
-*For more build information, refer to our [build documentation page](https://docs.babble.diy/docs/software/integrations).*
+For official upstream builds, use [Project Babble on Steam](https://store.steampowered.com/app/4091970/Project_Babble_Baballonia/) or [upstream Releases](https://github.com/Project-Babble/Baballonia/releases). Those downloads are distinct from this fork's C2 preview. See [CONTRIBUTING.md](CONTRIBUTING.md) for upstream contribution guidance.
